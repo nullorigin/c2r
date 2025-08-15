@@ -1,5 +1,8 @@
 [package]
 name = "c2rs"
+repository = "https://github.com/nullorigin/c2rs.git"
+license = "MIT"
+authors = ["Matthew Fay"]
 version = "0.1.0"
 edition = "2024"
 
