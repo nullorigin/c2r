@@ -1,7 +1,7 @@
 [package]
-name = "c2rs"
+name = "c2r"
 description = "A C to Rust conversion program"
-repository = "https://github.com/nullorigin/c2rs.git"
+repository = "https://github.com/nullorigin/c2r.git"
 license = "MIT"
 authors = ["Matthew Fay"]
 version = "0.1.0"
