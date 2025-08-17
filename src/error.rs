@@ -79,6 +79,11 @@ impl ConversionError {
         ConversionError::Io(err)
     }
     
+    /// Create a new I/O error from a message string
+    pub fn io_error_msg(message: &str) -> Self {
+        ConversionError::Io(std::io::Error::new(std::io::ErrorKind::Other, message))
+    }
+    
     /// Create a new unsupported construct error
     pub fn unsupported_construct(construct: &str, message: &str) -> Self {
         ConversionError::UnsupportedConstruct {
