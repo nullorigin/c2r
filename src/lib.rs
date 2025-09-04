@@ -1,24 +1,30 @@
-// Export key modules for the handler architecture
+// Library module declarations
 pub mod config;
 pub mod convert;
 pub mod error;
 pub mod extract;
 pub mod file_utils;
 pub mod handler;
-pub mod handler_test;
 pub mod handlers;
+pub mod lock;
+pub mod logging;
+pub mod token;
+
+pub mod pattern;
+// Re-export public APIs for external use
+pub use crate::config::*;
+pub use crate::convert::*;
+pub use crate::error::*;
+pub use crate::extract::*;
+pub use crate::handler::*;
+pub use crate::handlers::array_handler::*;
+pub use crate::handlers::comment_handler::*;
+pub use crate::handlers::common::*;
+pub use crate::handlers::macro_handler::*;
+pub use crate::handlers::*;
+pub use crate::lock::*;
+pub use crate::token::*;
+
+// Tests module (only compiled during testing)
+#[cfg(test)]
 pub mod tests;
-pub mod token_parser;
-
-// Re-export key types and traits
-pub use error::ConversionError;
-pub use handler::{HandlerResult, ParserContext, TokenHandler};
-pub use token_parser::{Token, Tokenizer};
-
-// Re-export handlers for convenience
-pub use handlers::array_handler::ArrayHandler;
-pub use handlers::composite_handler::CompositeHandler;
-pub use handlers::function_call::FunctionCallHandler;
-pub use handlers::pointer_declaration::PointerDeclarationHandler;
-pub use handlers::struct_member_access::StructMemberAccessHandler;
-pub use handlers::type_cast_handler::TypeCastHandler;

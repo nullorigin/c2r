@@ -1,365 +1,820 @@
-use crate::config::Config;
+use super::common::not_handled;
+use crate::config::{
+    Context,
+    HandlerPhase::{Handle, Process, Report},
+    HandlerReport,
+    ReportLevel::{Error, Info, Warning},
+};
 use crate::error::ConversionError;
-use crate::file_utils::FileUtils;
-use crate::handler::{HandlerResult, ParserContext, TokenHandler};
-use crate::log;
-use crate::token_parser::Token;
-use std::path::Path;
+use crate::extract::ExtractedElement;
+use crate::extract::ExtractedInclude;
+use crate::handler::HandlerResult;
+use crate::macro_handler::{handle_define, handle_ifdef, handle_undef, process_macro};
+use crate::{context, report, ConvertedElement, ConvertedInclude, Id, Token};
+use std::path::{Path, PathBuf};
 
-/// Handler for preprocessing C #include directives
-/// Example: #include "file.h"  -> use file;
-/// Converts C include directives into Rust use statements
-pub struct IncludeHandler {
-    config: Config,
+/// Creates an include handler that can detect and convert C include directives
+pub fn create_include_handler() -> crate::handler::Handler {
+    let handler_id = Id::get("include_handler");
+    let handler_role = "include";
+    let priority = 10; // Very high priority
+
+    super::create_handler(
+        handler_id,
+        handler_role,
+        priority,
+        Some(process_include),
+        Some(handle_include),
+        Some(extract_include),
+        Some(convert_include),
+        Some(report_include),
+        Some(result_include),
+        Some(redirect_include),
+    )
 }
 
-impl IncludeHandler {
-    /// Create a new include handler with the provided configuration
-    pub fn new(config: Config) -> Self {
-        IncludeHandler { config }
-    }
+/// Report callback: Collects and summarizes all include-related reports from the context
+fn report_include(
+    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+    // Get all reports for this handler
+    let context = context!();
+    let reports = context.get_reports_by_handler("include");
 
-    /// Create a new include handler with default settings
-    pub fn default() -> Self {
-        IncludeHandler {
-            config: Config::new(),
+    // Count reports by level
+    let mut info_count = 0;
+    let mut warning_count = 0;
+    let mut error_count = 0;
+
+    for report in &reports {
+        match report.level {
+            Info => info_count += 1,
+            Warning => warning_count += 1,
+            Error => error_count += 1,
+            _ => info_count += 1, // Handle Debug and other variants as info
         }
     }
 
-    /// Get the effective configuration, checking context first, then falling back to the instance config
-    fn get_effective_config(&self, context: &ParserContext) -> Config {
-        // Try to get config from context first
-        if let Some(config) = context.get_value::<Config>("config") {
-            log!(debug, "Using Config from ParserContext");
-            config.clone()
+    // Create summary report
+    Ok(HandlerReport {
+        report_id: Box::new(Id::get(&Id::gen_name("include_handler"))),
+        handler_id: Box::new(Id::get("include_handler")),
+        handler_name: "include".to_string(),
+        function_name: "report_include".to_string(),
+        message: format!(
+            "Include handler summary: {} reports ({} info, {} warnings, {} errors)",
+            reports.len(),
+            info_count,
+            warning_count,
+            error_count
+        ),
+        level: if error_count > 0 {
+            Error
+        } else if warning_count > 0 {
+            Warning
         } else {
-            // Fall back to our own config
-            log!(debug, "Using Config from IncludeHandler instance");
-            self.config.clone()
-        }
-    }
+            Info
+        },
+        tokens_processed: reports.len(),
+        tokens_consumed: 0,
+        phase: Report,
+        success: error_count == 0,
+        metadata: std::collections::HashMap::new(),
+    })
+}
 
-    /// Process an include directive
-    fn process_include(
-        &self,
-        tokens: &[Token],
-        context: &ParserContext,
-    ) -> Result<Option<String>, ConversionError> {
-        if tokens.len() < 3 || tokens[0] != Token::Hash {
-            return Ok(None);
-        }
+/// Result callback: Postprocesses generated code, adds documentation, and cleans up the result
+fn result_include(
+    tokens: &[Token],
+    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    report!(
+        "include_handler",
+        "result_include",
+        Info,
+        Report,
+        "Starting result postprocessing for include",
+        true
+    );
 
-        // Check for #include directive
-        if let Token::Identifier(ref directive) = tokens[1] {
-            if directive != "include" {
-                return Ok(None);
+    match result {
+        HandlerResult::Handled(Some(processed_tokens), _, id) => {
+            let mut enhanced_result = processed_tokens.clone();
+
+            // Extract include path for documentation
+            let include_path = extract_include_path(tokens);
+
+            // Generate documentation comment for the include conversion
+            let doc_comment = generate_include_documentation(tokens, &include_path);
+
+            // Add documentation as the first token if substantial
+            if !doc_comment.trim().is_empty() {
+                let doc_token = Token::s(doc_comment);
+                enhanced_result.insert(0, doc_token);
             }
 
-            // Get effective configuration for this processing
-            let config = self.get_effective_config(context);
+            // Postprocess the generated Rust code for better formatting
+            enhanced_result = postprocess_include_code(enhanced_result);
 
-            // Handle local include "file.h"
-            if let Token::StringLiteral(ref filename) = tokens[2] {
-                return self.process_local_include(filename, &config);
-            }
+            // Add metadata comment about the conversion
+            let conversion_metadata = format!(
+                "\n// Converted from C include: {}",
+                tokens
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            enhanced_result.push(Token::s(conversion_metadata));
 
-            // Handle system include <file.h>
-            if tokens[2] == Token::LessThan {
-                // Find the closing '>'
-                let mut i = 3;
-                let mut system_include = String::new();
+            report!(
+                "include_handler",
+                "result_include",
+                Info,
+                Report,
+                format!(
+                    "Enhanced include result with documentation for '{}'",
+                    include_path
+                ),
+                true
+            );
 
-                while i < tokens.len() && tokens[i] != Token::GreaterThan {
-                    match &tokens[i] {
-                        Token::Identifier(id) => system_include.push_str(id),
-                        Token::Dot => system_include.push('.'),
-                        Token::Slash => system_include.push('/'),
-                        Token::Underscore => system_include.push('_'),
-                        _ => {}
-                    }
-                    i += 1;
-                }
-
-                return self.process_system_include(&system_include, &config);
-            }
+            Ok(HandlerResult::Handled(Some(enhanced_result), 0..1, id))
         }
+        HandlerResult::Handled(None, _, ref id) => {
+            // Even without processed tokens, we can add some documentation
+            let include_path = extract_include_path(tokens);
+            let doc_comment = generate_include_documentation(tokens, &include_path);
 
-        Ok(None)
-    }
+            if !doc_comment.trim().is_empty() {
+                let enhanced_tokens = vec![Token::s(doc_comment)];
 
-    /// Process a local include file
-    fn process_local_include(
-        &self,
-        filename: &str,
-        config: &Config,
-    ) -> Result<Option<String>, ConversionError> {
-        // First try to resolve relative to base_dir
-        let file_path = FileUtils::resolve_path(&config.base_dir, filename);
+                report!(
+                    "include_handler",
+                    "result_include",
+                    Info,
+                    Report,
+                    format!("Added documentation for include '{}'", include_path),
+                    true
+                );
 
-        // If not found, search in include directories
-        let _file_path_option = if file_path.exists() {
-            Some(file_path) // Use the resolved file_path
-        } else if let Some(path) = FileUtils::find_in_include_dirs(filename, &config.include_dirs) {
-            Some(path) // Use the found file path
-        } else {
-            // If not found, just generate a mod statement with a comment
-            return self.generate_mod_statement(filename, true, config);
-        };
-
-        // Generate the mod statement
-        self.generate_mod_statement(filename, false, config)
-    }
-
-    /// Process a system include file
-    fn process_system_include(
-        &self,
-        filename: &str,
-        config: &Config,
-    ) -> Result<Option<String>, ConversionError> {
-        if !config.process_system_includes {
-            // Return a comment if we're not processing system includes
-            return Ok(Some(format!("// System import: {} - disabled\n", filename)));
-        }
-
-        // Standard library mapping
-        let stdlib_mappings = self.get_stdlib_mappings();
-
-        if let Some(imports) = stdlib_mappings.get(filename) {
-            // Return standard library import statements
-            return Ok(Some(format!(
-                "// System import: {}\n{}\n",
-                filename, imports
-            )));
-        }
-
-        // For other system includes, just return a comment
-        Ok(Some(format!(
-            "// System import: {} - not mapped\n",
-            filename
-        )))
-    }
-
-    /// Generate a Rust mod statement from an include path
-    fn generate_mod_statement(
-        &self,
-        include_path: &str,
-        not_found: bool,
-        config: &Config,
-    ) -> Result<Option<String>, ConversionError> {
-        let path = Path::new(include_path);
-
-        // Extract the module name from the file stem
-        let file_name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-
-        // If there's no directory part, it's a simple mod statement
-        if path.parent().is_none() || path.parent() == Some(Path::new("")) {
-            let comment = if not_found {
-                format!("// Local include not found: {}\n", include_path)
+                Ok(HandlerResult::Handled(
+                    Some(enhanced_tokens),
+                    0..1,
+                    id.clone(),
+                ))
             } else {
-                format!("// Include: {}\n", include_path)
-            };
+                Ok(result)
+            }
+        }
+        _ => Ok(result), // Pass through other result types unchanged
+    }
+}
 
-            return Ok(Some(format!("{}mod {};", comment, file_name)));
+/// Helper function to extract include path from tokens
+fn extract_include_path(tokens: &[Token]) -> String {
+    if tokens.len() < 3 || tokens[0].to_string() != "#" || tokens[1].to_string() != "include" {
+        return "unknown_include".to_string();
+    }
+
+    // Handle system includes: <file.h>
+    if let (Some(left), Some(right)) = (
+        tokens.iter().position(|t| t.to_string() == "<"),
+        tokens.iter().position(|t| t.to_string() == ">"),
+    ) {
+        if left < right && right > left + 1 {
+            return tokens[left + 1..right]
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join("");
+        }
+    }
+
+    // Handle quoted includes: "file.h"
+    for token in &tokens[2..] {
+        let token_str = token.to_string();
+        if token_str.starts_with("\"") && token_str.ends_with("\"") {
+            return token_str.trim_matches('"').to_string();
+        }
+    }
+
+    // Fallback: return the third token (usually the filename)
+    if tokens.len() > 2 {
+        tokens[2]
+            .to_string()
+            .trim_matches('"')
+            .trim_matches('<')
+            .trim_matches('>')
+            .to_string()
+    } else {
+        "unknown_include".to_string()
+    }
+}
+
+/// Helper function to generate documentation for the include
+fn generate_include_documentation(
+    tokens: &[Token],
+    include_path: &str) -> String {
+    let mut doc = String::new();
+
+    // Generate basic include documentation
+    doc.push_str(&"/// Converted C include directive\n".to_string());
+    doc.push_str("///\n");
+
+    // Extract and document the original C include
+    let c_include = tokens
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    doc.push_str(&format!("/// Original C include: {}\n", c_include));
+
+    // Add specific information based on include type
+    let is_system = tokens.iter().any(|t| t.to_string() == "<");
+    if is_system {
+        doc.push_str("/// Type: System include (mapped to Rust standard library)\n");
+
+        // Add specific mapping information for common headers
+        match include_path {
+            "stdio.h" => doc.push_str("/// Mapped to: std::io and std::io::prelude\n"),
+            "stdlib.h" => doc.push_str("/// Mapped to: std::mem, std::ptr, libc\n"),
+            "string.h" => {
+                doc.push_str("/// Mapped to: std::ffi::CStr, std::ffi::CString, std::str\n")
+            }
+            "math.h" => doc.push_str("/// Mapped to: std::f64::consts, libc\n"),
+            "time.h" => doc.push_str("/// Mapped to: std::time\n"),
+            _ => doc.push_str(&"/// Mapped to: libc (generic system include)\n".to_string()),
+        }
+    } else {
+        doc.push_str("/// Type: Local include (mapped to Rust module)\n");
+        let module_name = if include_path.ends_with(".h") {
+            &include_path[0..include_path.len() - 2]
+        } else {
+            include_path
+        };
+        let rust_module = to_snake_case(module_name);
+        doc.push_str(&format!(
+            "/// Mapped to: mod {} and use {}::*\n",
+            rust_module, rust_module
+        ));
+    }
+
+    // Add note about conversion
+    doc.push_str("///\n");
+    doc.push_str("/// # Note\n");
+    doc.push_str("/// This include directive was automatically converted from C.\n");
+    doc.push_str("/// Please verify the mapping is correct for your use case.\n");
+
+    report!(
+        "include_handler",
+        "generate_include_documentation",
+        Info,
+        Report,
+        format!(
+            "Generated {} lines of documentation for include '{}'",
+            doc.lines().count(),
+            include_path
+        ),
+        true
+    );
+
+    doc
+}
+
+/// Helper function to postprocess and clean up generated include code
+fn postprocess_include_code(mut tokens: Vec<Token>) -> Vec<Token> {
+    // Clean up formatting in the generated code
+    for token in &mut tokens {
+        let token_str = token.to_string();
+
+        // Ensure proper line endings for use statements
+        if token_str.starts_with("use ") && !token_str.ends_with(";\n") && !token_str.ends_with(";")
+        {
+            let cleaned = if token_str.ends_with('\n') {
+                token_str.trim_end().to_string() + ";\n"
+            } else {
+                token_str.clone() + ";\n"
+            };
+            *token = Token::s(cleaned);
         }
 
-        // Handle nested paths by creating nested modules
-        let mut module_path = Vec::new();
-        let mut current_path = path.parent();
+        // Clean up comment formatting
+        if token_str.starts_with("//") && !token_str.ends_with('\n') {
+            let cleaned = token_str + "\n";
+            *token = Token::s(cleaned);
+        }
+    }
 
-        // Build up the module path from the directory structure
-        while let Some(dir) = current_path {
-            if let Some(dir_name) = dir.file_name().and_then(|s| s.to_str()) {
-                if !dir_name.is_empty() {
-                    module_path.push(dir_name);
+    report!(
+        "include_handler",
+        "postprocess_include_code",
+        Info,
+        Report,
+        format!(
+            "Postprocessed {} tokens for better formatting",
+            tokens.len()
+        ),
+        true
+    );
+
+    tokens
+}
+
+/// Process callback: Initializes and confirms this handler can handle the tokens
+fn process_include(tokens: &[Token]) -> Result<bool, ConversionError> {
+    // Validate input
+    if tokens.len() < 2 {
+        return Ok(false);
+    }
+
+    // Check for #include pattern
+    if tokens[0].to_string() == "#" && tokens.len() >= 2 && tokens[1].to_string() == "include" {
+        // Validate we have a filename
+        if tokens.len() >= 3 {
+            report!(
+                "include_handler",
+                "process_include",
+                Info,
+                Process,
+                "Include directive detected",
+                true
+            );
+            return Ok(true);
+        }
+
+        // Might be malformed include - let's try to handle it gracefully
+        report!(
+            "include_handler",
+            "process_include",
+            Info,
+            Process,
+            "Potentially malformed include directive detected",
+            true
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Processes an include directive
+fn handle_include(
+    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+    report!(
+        "include_handler",
+        "handle_include",
+        Info,
+        Handle,
+        "Include handler processing tokens",
+        true
+    );
+
+    if tokens.len() < 3 || tokens[0].to_string() != "#" || tokens[1].to_string() != "include" {
+        return not_handled();
+    }
+
+    let include_path: String;
+    let is_system_include: bool;
+
+    // Handle both <file.h> and "file.h" formats
+    if tokens[2].to_string() == "<" && tokens.len() >= 5 && tokens[4].to_string() == ">" {
+        // System include: #include <file.h>
+        include_path = tokens[3].to_string();
+        is_system_include = true;
+    } else if tokens[2].to_string().starts_with("\"") && tokens[2].to_string().ends_with("\"") {
+        // Local include with quotes in same token: #include "file.h"
+        include_path = tokens[2].to_string().trim_matches('"').to_string();
+        is_system_include = false;
+    } else if tokens[2].to_string() == "\"" && tokens.len() >= 5 && tokens[4].to_string() == "\"" {
+        // Local include with separate quote tokens: #include " file.h "
+        include_path = tokens[3].to_string();
+        is_system_include = false;
+    } else {
+        report!(
+            "include_handler",
+            "handle_include",
+            Error,
+            Handle,
+            "Unrecognized include format",
+            true
+        );
+        return not_handled();
+    }
+
+    report!(
+        "include_handler",
+        "handle_include",
+        Info,
+        Handle,
+        format!(
+            "Found include: {} (system: {})",
+            include_path, is_system_include
+        ),
+        true
+    );
+
+    // Actually perform the conversion and return proper HandlerResult::Converted
+    match convert_include(tokens)? {
+        Some(ConvertedElement::Include(converted_include)) => {
+            let rust_code = converted_include.rust_code.clone();
+            Ok(HandlerResult::Converted(
+                ConvertedElement::Include(converted_include),
+                0..1,
+                rust_code,
+                Id::get("include_handler"),
+            ))
+        }
+        _ => {
+            report!(
+                "include_handler",
+                "handle_include",
+                Error,
+                Handle,
+                "Failed to convert include directive",
+                false
+            );
+            not_handled()
+        }
+    }
+}
+
+/// Extracts an include directive as an ExtractedElement
+pub fn extract_include(
+    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+    if tokens.len() < 3 || tokens[0].to_string() != "#" || tokens[1].to_string() != "include" {
+        return Ok(None);
+    }
+
+    let include_path: String;
+    let is_system_include: bool;
+
+    // Handle both <file.h> and "file.h" formats
+    if tokens[2].to_string() == "<" && tokens.len() >= 5 && tokens[4].to_string() == ">" {
+        // System include: #include <file.h>
+        include_path = tokens[3].to_string();
+        is_system_include = true;
+    } else if tokens[2].to_string().starts_with("\"") && tokens[2].to_string().ends_with("\"") {
+        // Local include with quotes in same token: #include "file.h"
+        include_path = tokens[2].to_string().trim_matches('"').to_string();
+        is_system_include = false;
+    } else if tokens[2].to_string() == "\"" && tokens.len() >= 5 && tokens[4].to_string() == "\"" {
+        // Local include with separate quote tokens: #include " file.h "
+        include_path = tokens[3].to_string();
+        is_system_include = false;
+    } else {
+        return Ok(None);
+    }
+
+    let extracted_include = ExtractedInclude {
+        path: include_path,
+        tokens: tokens.to_vec(),
+        is_system_include,
+        original_code: tokens
+            .iter()
+            .map(|t| t.to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
+
+    Ok(Some(ExtractedElement::Include(extracted_include)))
+}
+pub fn convert_include(
+    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+    let id = Id::get("convert_include");
+    let mut rust_code = String::new();
+    let mut path: String = String::new();
+    let mut is_system_include: bool = false;
+    let left = tokens.iter().position(|t| t.to_string() == "<");
+    let right = tokens.iter().position(|t| t.to_string() == ">");
+    is_system_include = left.is_some() && right.is_some();
+    let mut range = 0..0;
+    if is_system_include {
+        range.start = left.unwrap() + 1;
+        range.end = right.unwrap();
+    } else {
+        // Handle quoted includes: "filename.h"
+        let mut quote_count = 0;
+        range.start = 0;
+        range.end = 0;
+
+        for (idx, token) in tokens.iter().enumerate() {
+            if token.to_string() == "\"" {
+                quote_count += 1;
+                if quote_count == 1 {
+                    range.start = idx + 1;
+                } else if quote_count == 2 {
+                    range.end = idx;
+                    break;
                 }
             }
-            current_path = dir.parent();
         }
 
-        // Reverse the path since we built it from leaf to root
-        module_path.reverse();
+        // If we didn't find separate quote tokens, check for quoted string in single token
+        if range.start == 0 && range.end == 0 {
+            for (idx, token) in tokens.iter().enumerate() {
+                let token_str = token.to_string();
+                if token_str.starts_with("\"") && token_str.ends_with("\"") {
+                    range.start = idx;
+                    range.end = idx + 1;
+                    break;
+                }
+            }
+        }
+    }
+    path = tokens[range.start..range.end]
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join("");
 
-        // Generate nested mod statements
-        let comment = if not_found {
-            format!("// Local include not found: {}\n", include_path)
+    // Clean up the path by removing any remaining quotes
+    if !is_system_include {
+        path = path.trim_matches('"').to_string();
+    }
+    if is_system_include {
+        // System includes are mapped to Rust equivalents if possible
+        match path.as_str() {
+            "stdio.h" => {
+                rust_code.push_str("// C stdio.h -> Rust std::io\n");
+                rust_code.push_str("use std::io;\n");
+                rust_code.push_str("use std::io::prelude::*;\n");
+            }
+            "stdlib.h" => {
+                rust_code.push_str("// C stdlib.h -> Rust std and libc\n");
+                rust_code.push_str("use std::mem;\n");
+                rust_code.push_str("use std::ptr;\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "string.h" => {
+                rust_code.push_str("// C string.h -> Rust str, String, and CStr\n");
+                rust_code.push_str("use std::ffi::CStr;\n");
+                rust_code.push_str("use std::ffi::CString;\n");
+                rust_code.push_str("use std::str;\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "math.h" => {
+                rust_code.push_str("// C math.h -> Rust std::f64 and std::f32\n");
+                rust_code.push_str("use std::f64::consts;\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "time.h" => {
+                rust_code.push_str("// C time.h -> Rust std::time\n");
+                rust_code.push_str("use std::time::{Duration, SystemTime};\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "stdbool.h" => {
+                rust_code.push_str("// C stdbool.h is not needed in Rust as bool is built-in\n");
+                // Nothing to include
+            }
+            "stdint.h" => {
+                rust_code.push_str("// C stdint.h fixed width integers are built into Rust\n");
+                // Nothing to include
+            }
+            "stddef.h" => {
+                rust_code.push_str("// C stddef.h -> Various Rust std types\n");
+                rust_code.push_str("use std::ptr;\n");
+                rust_code.push_str("use std::mem;\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "pthread.h" => {
+                rust_code.push_str("// C pthread.h -> Rust std::thread\n");
+                rust_code.push_str("use std::thread;\n");
+                rust_code.push_str("use std::sync::{Arc, Mutex, Condvar};\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "errno.h" => {
+                rust_code.push_str("// C errno.h -> Rust std::io::Error\n");
+                rust_code.push_str("use std::io::Error as IoError;\n");
+                rust_code.push_str("use std::io::ErrorKind;\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "assert.h" => {
+                rust_code.push_str("// C assert.h -> Rust assert! macro\n");
+                // Nothing to include as assert! is built-in
+            }
+            "ctype.h" => {
+                rust_code.push_str("// C ctype.h -> Rust char methods\n");
+                rust_code.push_str("use libc;\n");
+            }
+            "signal.h" => {
+                rust_code.push_str("// C signal.h -> Rust signal crate\n");
+                rust_code.push_str("use libc;\n");
+                rust_code.push_str("// You may need to add: signal = \"0.7\" to your Cargo.toml\n");
+            }
+            _ => {
+                // Generic system include
+                rust_code.push_str(&format!("// C include: <{}>\n", path));
+                rust_code.push_str("use libc;\n");
+                rust_code.push_str(&format!(
+                    "// TODO: Map <{}> to appropriate Rust imports\n",
+                    path
+                ));
+            }
+        }
+    } else {
+        // Local includes are converted to Rust module imports
+        // Strip .h extension if present
+        let module_name = if path.ends_with(".h") {
+            &path[0..path.len() - 2]
         } else {
-            format!("// Include: {}\n", include_path)
+            path.trim()
         };
 
-        let mut result = comment;
+        // Convert to snake_case if needed
+        let rust_module = to_snake_case(module_name);
 
-        // Start with the outermost module
-        if !module_path.is_empty() {
-            result.push_str(&format!("mod {} {{ ", module_path[0]));
+        rust_code.push_str(&format!("// C include: \"{}\"\n", path));
+        rust_code.push_str(&format!("mod {};\n", rust_module));
+        rust_code.push_str(&format!("use {}::*;\n", rust_module));
+    }
 
-            // Add the middle modules
-            for i in 1..module_path.len() {
-                result.push_str(&format!("mod {} {{ ", module_path[i]));
-            }
-
-            // Add the innermost module
-            result.push_str(&format!("mod {}; ", file_name));
-
-            // Close all the braces
-            for _ in 0..module_path.len() {
-                result.push('}');
-            }
-        } else {
-            // Simple case with no directory structure
-            result.push_str(&format!("mod {};", file_name));
+    // Check if we need to process the included file
+    if context!().get_feature("process_includes").unwrap_or(false) && !is_system_include {
+        // Find the file in the include directories
+        let include_dirs = context!().get_include_dirs();
+        if let Some(file_path) = find_include_file(path.trim(), &include_dirs) {
+            // Add code to process the include file later
+            rust_code.push_str(&format!(
+                "// TODO: Process included file: {:?}\n",
+                file_path
+            ));
         }
-
-        Ok(Some(result))
     }
 
-    /// Get standard library mappings for common C headers
-    fn get_stdlib_mappings(&self) -> std::collections::HashMap<String, &'static str> {
-        let mut map = std::collections::HashMap::new();
-        map.insert(
-            "stdio.h".to_string(),
-            "use std::io;\nuse std::io::{Read, Write};",
-        );
-        map.insert("stdlib.h".to_string(), "use std::alloc;\nuse std::mem;");
-        map.insert(
-            "string.h".to_string(),
-            "use std::str;\nuse std::string::String;\nuse std::ffi::CStr;",
-        );
-        map
-    }
-
-    /// Add an include directory for searching header files
-    pub fn add_include_dir(&mut self, dir: String) -> &mut Self {
-        self.config.add_include_dir(dir);
-        self
-    }
-
-    /// Set the base directory for resolving relative paths
-    pub fn set_base_dir(&mut self, dir: String) -> &mut Self {
-        self.config = self.config.clone().with_base_dir(dir);
-        self
-    }
-
-    /// Set whether to process system includes
-    pub fn with_system_includes(&mut self, enabled: bool) -> &mut Self {
-        self.config = self.config.clone().with_system_includes(enabled);
-        self
-    }
+    Ok(Some(ConvertedElement::Include(ConvertedInclude {
+        path,
+        rust_code,
+        is_external_crate: false,
+    })))
 }
 
-impl TokenHandler for IncludeHandler {
-    fn can_handle(&self, tokens: &[Token], _context: &ParserContext) -> bool {
-        if tokens.len() < 3 || tokens[0] != Token::Hash {
-            return false;
-        }
+/// Convert callback: Does the actual conversion of C to Rust code
 
-        // Check for #include directive
-        if let Token::Identifier(ref directive) = tokens[1] {
-            if directive != "include" {
-                return false;
+/// Redirect callback: Handles cases where this handler should pass tokens to a different handler
+fn redirect_include(
+    tokens: &[Token],
+    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    report!(
+        "include_handler",
+        "redirect_include",
+        Info,
+        Report,
+        "Checking if include tokens should be redirected",
+        true
+    );
+    let mut result = Ok(result.clone());
+    // Check if this is actually a different preprocessor directive
+    if tokens.len() >= 2 && tokens[0].to_string() == "#" {
+        match tokens[1].to_string().as_str() {
+            "define" => {
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Redirecting to macro handler (#define)",
+                    true
+                );
+                result = match process_macro(tokens) {
+                    Ok(true) => handle_define(tokens),
+                    Err(e) => Err(e),
+                    Ok(false) => result,
+                };
             }
+            "ifdef" | "ifndef" | "if" | "else" | "elif" | "endif" => {
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Redirecting to macro handler (conditional compilation)",
+                    true
+                );
 
-            // Handle local include "file.h"
-            if let Token::StringLiteral(_) = tokens[2] {
-                return true;
-            }
-
-            // Handle system include <file.h>
-            if tokens[2] == Token::LessThan {
-                // Look for the closing '>'
-                for token in &tokens[3..] {
-                    if *token == Token::GreaterThan {
-                        return true;
-                    }
+                result = match process_macro(tokens) {
+                    Ok(true) => handle_ifdef(tokens),
+                    Err(e) => Err(e),
+                    Ok(false) => result,
                 }
             }
+            "undef" => {
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Redirecting to macro handler (#undef)",
+                    true
+                );
+                result = match process_macro(tokens) {
+                    Ok(true) => handle_undef(tokens),
+                    Err(e) => Err(e),
+                    Ok(false) => result,
+                }
+            }
+            "pragma" => {
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Redirecting to macro handler (#pragma)",
+                    true
+                );
+                return result;
+            }
+            "error" | "warning" => {
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Redirecting to macro handler (compiler directive)",
+                    true
+                );
+                return result;
+            }
+            "line" => {
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Redirecting to macro handler (#line)",
+                    true
+                );
+                return result;
+            }
+            _ => {
+                // Unknown preprocessor directive, let macro handler try
+                report!(
+                    "include_handler",
+                    "redirect_include",
+                    Info,
+                    Report,
+                    "Unknown preprocessor directive, redirecting to macro handler",
+                    true
+                );
+                return result;
+            }
         }
-
-        false
     }
 
-    fn handle(
-        &self,
-        tokens: &[Token],
-        context: &mut ParserContext,
-    ) -> Result<HandlerResult, ConversionError> {
-        match self.process_include(tokens, context)? {
-            Some(rust_code) => Ok(HandlerResult::Replace(rust_code)),
-            None => Ok(HandlerResult::NotHandled),
-        }
+    // Check if this is malformed and might actually be something else
+    if tokens.len() >= 1 && tokens[0].to_string() == "#" && tokens.len() < 2 {
+        report!(
+            "include_handler",
+            "redirect_include",
+            Info,
+            Report,
+            "Malformed preprocessor directive, redirecting to macro handler",
+            true
+        );
+        return result;
     }
+
+    // No redirection needed
+    result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::token_parser::Tokenizer;
+/// Find an include file in the include directories
+fn find_include_file(path: &str, include_dirs: &[PathBuf]) -> Option<PathBuf> {
+    // First try direct path
+    let direct_path = Path::new(path);
+    if direct_path.exists() {
+        return Some(direct_path.to_path_buf());
+    }
 
-    #[test]
-    fn test_local_include() {
-        let c_code = "#include \"myheader.h\"";
-        let mut tokenizer = Tokenizer::new(c_code);
-        let tokens = tokenizer.tokenize();
-
-        let handler = IncludeHandler::default();
-        let result = handler.handle(&tokens, &mut ParserContext::new()).unwrap();
-
-        if let HandlerResult::Replace(rust_code) = result {
-            assert!(rust_code.contains("mod myheader;"));
-        } else {
-            panic!("Expected HandlerResult::Replace, got {:?}", result);
+    // Then try in each include directory
+    for dir in include_dirs {
+        let file_path = dir.join(path);
+        if file_path.exists() {
+            return Some(file_path);
         }
     }
 
-    #[test]
-    fn test_nested_include() {
-        let c_code = "#include \"utils/helper.h\"";
-        let mut tokenizer = Tokenizer::new(c_code);
-        let tokens = tokenizer.tokenize();
+    None
+}
 
-        let handler = IncludeHandler::default();
-        let result = handler.handle(&tokens, &mut ParserContext::new()).unwrap();
+/// Convert a string to snake_case
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut prev_is_lowercase = false;
 
-        if let HandlerResult::Replace(rust_code) = result {
-            assert!(rust_code.contains("mod utils { mod helper; }"));
+    for c in s.chars() {
+        if c.is_uppercase() {
+            if prev_is_lowercase {
+                result.push('_');
+            }
+            result.push(c.to_lowercase().next().unwrap());
+            prev_is_lowercase = false;
+        } else if c == '-' || c == ' ' {
+            result.push('_');
+            prev_is_lowercase = false;
         } else {
-            panic!("Expected HandlerResult::Replace, got {:?}", result);
+            result.push(c);
+            prev_is_lowercase = c.is_lowercase();
         }
     }
 
-    #[test]
-    fn test_system_include() {
-        let c_code = "#include <stdio.h>";
-        let mut tokenizer = Tokenizer::new(c_code);
-        let tokens = tokenizer.tokenize();
-
-        let handler = IncludeHandler::default();
-        let result = handler.handle(&tokens, &mut ParserContext::new()).unwrap();
-
-        if let HandlerResult::Replace(rust_code) = result {
-            assert!(rust_code.contains("System import: stdio.h"));
-        } else {
-            panic!("Expected HandlerResult::Replace, got {:?}", result);
-        }
-    }
-
-    #[test]
-    fn test_system_include_processing() {
-        let c_code = "#include <stdio.h>";
-        let mut tokenizer = Tokenizer::new(c_code);
-        let tokens = tokenizer.tokenize();
-
-        let mut handler = IncludeHandler::default();
-        handler.with_system_includes(true);
-
-        let result = handler.handle(&tokens, &mut ParserContext::new()).unwrap();
-
-        if let HandlerResult::Replace(rust_code) = result {
-            assert!(rust_code.contains("std::io"));
-        } else {
-            panic!("Expected HandlerResult::Replace, got {:?}", result);
-        }
-    }
+    result
 }

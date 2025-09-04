@@ -1,5 +1,5 @@
-use std::fmt;
 use std::error::Error;
+use std::fmt;
 
 /// Custom error types for the C to Rust conversion process
 #[derive(Debug)]
@@ -15,7 +15,7 @@ pub enum ConversionError {
         /// Description of what went wrong
         message: String,
     },
-    
+
     /// Error converting a C type to Rust
     TypeConversionError {
         /// The C type that couldn't be converted
@@ -23,7 +23,7 @@ pub enum ConversionError {
         /// Description of what went wrong
         message: String,
     },
-    
+
     /// Error converting a C expression to Rust
     ExpressionConversionError {
         /// The C expression that couldn't be converted
@@ -31,10 +31,10 @@ pub enum ConversionError {
         /// Description of what went wrong
         message: String,
     },
-    
+
     /// I/O error during file operations
     Io(std::io::Error),
-    
+
     /// Unsupported C construct
     UnsupportedConstruct {
         /// The construct type (e.g., "inline assembly", "variable arguments")
@@ -42,13 +42,19 @@ pub enum ConversionError {
         /// Description of why it's not supported
         message: String,
     },
-    
+
     /// General error
     General(String),
+
+    /// Error during extraction phase
+    InvalidExtraction(String),
 }
 
 impl ConversionError {
     /// Create a new parse error
+    pub fn new(message: &str) -> Self {
+        ConversionError::General(message.to_string())
+    }
     pub fn parse_error(source: &str, line: usize, position: usize, message: &str) -> Self {
         ConversionError::ParseError {
             source: source.to_string(),
@@ -57,7 +63,7 @@ impl ConversionError {
             message: message.to_string(),
         }
     }
-    
+
     /// Create a new type conversion error
     pub fn type_error(c_type: &str, message: &str) -> Self {
         ConversionError::TypeConversionError {
@@ -65,7 +71,7 @@ impl ConversionError {
             message: message.to_string(),
         }
     }
-    
+
     /// Create a new expression conversion error
     pub fn expr_error(c_expr: &str, message: &str) -> Self {
         ConversionError::ExpressionConversionError {
@@ -73,17 +79,17 @@ impl ConversionError {
             message: message.to_string(),
         }
     }
-    
+
     /// Create a new I/O error
     pub fn io_error(err: std::io::Error) -> Self {
         ConversionError::Io(err)
     }
-    
+
     /// Create a new I/O error from a message string
     pub fn io_error_msg(message: &str) -> Self {
         ConversionError::Io(std::io::Error::new(std::io::ErrorKind::Other, message))
     }
-    
+
     /// Create a new unsupported construct error
     pub fn unsupported_construct(construct: &str, message: &str) -> Self {
         ConversionError::UnsupportedConstruct {
@@ -91,7 +97,7 @@ impl ConversionError {
             message: message.to_string(),
         }
     }
-    
+
     /// Create a new generic error
     pub fn general(message: &str) -> Self {
         ConversionError::General(message.to_string())
@@ -101,16 +107,30 @@ impl ConversionError {
 impl Clone for ConversionError {
     fn clone(&self) -> Self {
         match self {
-            ConversionError::ParseError { source, line, position, message } => {
-                ConversionError::ParseError { source: source.clone(), line: *line, position: *position, message: message.clone() }
-            }
+            ConversionError::ParseError {
+                source,
+                line,
+                position,
+                message,
+            } => ConversionError::ParseError {
+                source: source.clone(),
+                line: *line,
+                position: *position,
+                message: message.clone(),
+            },
 
             ConversionError::TypeConversionError { c_type, message } => {
-                ConversionError::TypeConversionError { c_type: c_type.clone(), message: message.clone() }
+                ConversionError::TypeConversionError {
+                    c_type: c_type.clone(),
+                    message: message.clone(),
+                }
             }
 
             ConversionError::ExpressionConversionError { c_expr, message } => {
-                ConversionError::ExpressionConversionError { c_expr: c_expr.clone(), message: message.clone() }
+                ConversionError::ExpressionConversionError {
+                    c_expr: c_expr.clone(),
+                    message: message.clone(),
+                }
             }
 
             ConversionError::Io(e) => {
@@ -118,11 +138,16 @@ impl Clone for ConversionError {
             }
 
             ConversionError::UnsupportedConstruct { construct, message } => {
-                ConversionError::UnsupportedConstruct { construct: construct.clone(), message: message.clone() }
+                ConversionError::UnsupportedConstruct {
+                    construct: construct.clone(),
+                    message: message.clone(),
+                }
             }
 
-            ConversionError::General(msg) => {
-                ConversionError::General(msg.clone())
+            ConversionError::General(msg) => ConversionError::General(msg.clone()),
+
+            ConversionError::InvalidExtraction(msg) => {
+                ConversionError::InvalidExtraction(msg.clone())
             }
         }
     }
@@ -132,29 +157,44 @@ impl Clone for ConversionError {
 impl fmt::Display for ConversionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConversionError::ParseError { source, line, position, message } => {
-                write!(f, "Parse error at line {}, position {}: {}\nSource: {}", 
-                    line, position, message, source)
+            ConversionError::ParseError {
+                source,
+                line,
+                position,
+                message,
+            } => {
+                write!(
+                    f,
+                    "Parse error at line {}, position {}: {}\nSource: {}",
+                    line, position, message, source
+                )
             }
-            
+
             ConversionError::TypeConversionError { c_type, message } => {
                 write!(f, "Type conversion error for '{}': {}", c_type, message)
             }
-            
+
             ConversionError::ExpressionConversionError { c_expr, message } => {
-                write!(f, "Expression conversion error for '{}': {}", c_expr, message)
+                write!(
+                    f,
+                    "Expression conversion error for '{}': {}",
+                    c_expr, message
+                )
             }
-            
+
             ConversionError::Io(err) => {
                 write!(f, "I/O error: {}", err)
             }
-            
+
             ConversionError::UnsupportedConstruct { construct, message } => {
                 write!(f, "Unsupported C construct '{}': {}", construct, message)
             }
-            
+
             ConversionError::General(msg) => {
                 write!(f, "Error: {}", msg)
+            }
+            ConversionError::InvalidExtraction(msg) => {
+                write!(f, "Invalid extraction: {}", msg)
             }
         }
     }
