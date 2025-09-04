@@ -1,449 +1,442 @@
+use crate::context::{Context, HandlerReport, ReportLevel, HandlerPhase};
+use crate::context::ReportLevel::{Info, Error, Warning, Debug};
+use crate::context::HandlerPhase::{Process, Handle, Extract, Convert, Report};
+use crate::report;
 use crate::error::ConversionError;
-use crate::handler::{HandlerResult, ParserContext, TokenHandler};
-use crate::token_parser::Token;
+use crate::extract::ExtractedElement;
+use crate::extract::ExtractedFunction;
+use crate::handler::HandlerResult;
+use crate::{convert_type, get_id, ConvertedElement, ConvertedFunction, Token};
+use crate::common::parse_name;
+use crate::debug;
+use super::common::{self, find_matching_token, not_handled, replace_with};
 
-/// Handler for converting C functions to Rust functions
-pub struct FunctionHandler;
+/// Creates a function handler that can detect and convert C function declarations and definitions
+pub fn create_function_handler() -> crate::handler::Handler {
+    let handler_id = get_id("function_handler");
+    let handler_role = "function";
+    let priority = 100; // Standard priority
+    
+    super::create_handler(
+        handler_id,
+        handler_role,
+        priority,
+        Some(process_function),
+        Some(handle_function),
+        Some(extract_function),
+        Some(convert_function),
+        None,
+        None,
+        Some(redirect_function)
+    )
+}
 
-impl FunctionHandler {
-    pub fn new() -> Self {
-        FunctionHandler
+/// Process callback: Initializes and confirms this handler can handle the tokens
+fn process_function(tokens: &[Token], context: &mut Context) -> Result<bool, ConversionError> {
+    // Validate input
+    if tokens.len() < 4 {
+        return Ok(false);
     }
-
-    /// Map C type tokens to Rust type tokens
-    fn map_type(&self, c_type: &[Token]) -> Vec<Token> {
-        // This is a simplified implementation - would need to handle more complex type mapping
-        let mut _rust_type: Vec<Token> = Vec::new();
-
-        // Check for special cases
-        if c_type.is_empty() {
-            return vec![Token::Identifier("()".to_string())]; // void -> ()
-        }
-
-        if c_type.len() == 1 {
-            if let Token::Identifier(ref id) = c_type[0] {
-                match id.as_str() {
-                    "void" => return vec![Token::Identifier("()".to_string())],
-                    "int" => return vec![Token::Identifier("i32".to_string())],
-                    "char" => return vec![Token::Identifier("i8".to_string())],
-                    "float" => return vec![Token::Identifier("f32".to_string())],
-                    "double" => return vec![Token::Identifier("f64".to_string())],
-                    "short" => return vec![Token::Identifier("i16".to_string())],
-                    "long" => return vec![Token::Identifier("i64".to_string())],
-                    "size_t" => return vec![Token::Identifier("usize".to_string())],
-                    _ => {}
-                }
-            }
-        }
-
-        // Handle unsigned types
-        if c_type.len() >= 2 {
-            if let (Token::Identifier(id1), Token::Identifier(id2)) = (&c_type[0], &c_type[1]) {
-                match (id1.as_str(), id2.as_str()) {
-                    ("unsigned", "int") => return vec![Token::Identifier("u32".to_string())],
-                    ("unsigned", "char") => return vec![Token::Identifier("u8".to_string())],
-                    ("unsigned", "short") => return vec![Token::Identifier("u16".to_string())],
-                    ("unsigned", "long") => return vec![Token::Identifier("u64".to_string())],
-                    ("const", "char") => {
-                        // Special case for const char* (common C string pattern)
-                        if c_type.len() > 2 && c_type[2] == Token::Asterisk {
-                            return vec![Token::Identifier("*const i8".to_string())];
+    
+    // Look for function patterns: return_type function_name(parameters)
+    for i in 1..tokens.len().saturating_sub(1) {
+        if tokens[i + 1].to_string() == "(" {
+            // Check if tokens before this point could form a valid type
+            if common::is_type(&tokens[0..i], context) {
+                // Additional validation: ensure this looks like a function
+                if let Some(closing_paren) = find_matching_token(&tokens[i + 1..], "(", ")") {
+                    let paren_end = i + 1 + closing_paren + 1;
+                    
+                    // Check for function body or semicolon
+                    if paren_end < tokens.len() {
+                        let next_token = &tokens[paren_end].to_string();
+                        if next_token == "{" || next_token == ";" {
+                            report!(context, "function_handler", Info, Handle, 
+                                format!("Function pattern detected: {}", tokens[i].to_string()), true);
+                            return Ok(true);
                         }
                     }
-                    _ => {}
                 }
             }
         }
+    }
+    
+    Ok(false)
+}
 
-        // Handle pointers
-        let mut is_pointer = false;
-        let mut is_const = false;
-        let mut base_type = Vec::new();
-
-        // First pass to detect const and pointers
-        for i in 0..c_type.len() {
-            match &c_type[i] {
-                Token::Identifier(id) if id == "const" => {
-                    is_const = true;
-                }
-                Token::Asterisk => {
-                    is_pointer = true;
-                }
-                _ => {
-                    // Only add non-const, non-pointer tokens to the base type
-                    base_type.push(c_type[i].clone());
-                }
+/// Legacy function for backwards compatibility
+fn can_handle_function(tokens: &[Token], context: &mut Context) -> bool {
+    if tokens.len() < 4 {
+        return false;
+    }
+    
+    // Look for common function patterns
+    // Check for return type + name + open parenthesis
+    
+    // First, find potential function name
+    // We're looking for a pattern where token is followed by an opening parenthesis
+    for i in 1..tokens.len() - 1 {
+        if matches!(tokens[i+1].to_string().as_str(), "(") {
+            let _potential_name = &tokens[i];
+            
+            // Check if tokens before this point could form a type
+            // This is a simplification - real implementation would do more thorough type checking
+            if common::is_type(&tokens[0..i], context) {
+                return true;
             }
         }
+    }
+    
+    false
+}
 
-        // Map the base type first
-        let mapped_base_type = if base_type.len() == 1 {
-            if let Token::Identifier(ref id) = base_type[0] {
-                match id.as_str() {
-                    "int" => vec![Token::Identifier("i32".to_string())],
-                    "char" => vec![Token::Identifier("i8".to_string())],
-                    "float" => vec![Token::Identifier("f32".to_string())],
-                    "double" => vec![Token::Identifier("f64".to_string())],
-                    "short" => vec![Token::Identifier("i16".to_string())],
-                    "long" => vec![Token::Identifier("i64".to_string())],
-                    "size_t" => vec![Token::Identifier("usize".to_string())],
-                    _ => base_type.clone(),
-                }
-            } else {
-                base_type.clone()
+/// Processes a function declaration or definition
+fn handle_function(tokens: &[Token], context: &mut Context) -> Result<HandlerResult, ConversionError> {
+    let id = get_id("handle_function");
+    report!(context, "function_handler", Info, Process, 
+        format!("Processing {} tokens for function handling", tokens.len()), true);
+    
+    // Find function name and opening parenthesis
+    let mut name_pos = 0;
+    for i in 0..tokens.len() - 1 {
+        if matches!(tokens[i+1].to_string().as_str(), "(") {
+            name_pos = i;
+            break;
+        }
+    }
+    
+    if name_pos == 0 {
+        return not_handled();
+    }
+    
+    let func_name = tokens[name_pos].to_string();
+    report!(context, "function_handler", Info, Process, 
+        format!("Found function: {}", func_name), true);
+    
+    // Return type is everything before the name
+    let return_type_tokens = &tokens[0..name_pos];
+    
+    // Find the parameter list between parentheses
+    let params_start = name_pos + 1; // Opening parenthesis
+    let params_end = match find_matching_token(&tokens[params_start..], "(", ")") {
+        Some(pos) => params_start + pos + 1, // +1 for the closing parenthesis
+        None => {
+            report!(context, "function_handler", Error, Process, 
+                format!("Could not find closing parenthesis for function {}", func_name), false);
+            return not_handled();
+        }
+    };
+    
+    // Extract parameter tokens
+    let param_tokens = &tokens[params_start + 1..params_end];
+    
+    // Check if this is a function declaration or definition
+    let is_definition = params_end < tokens.len() && tokens[params_end].to_string() == "{";
+    
+    if is_definition {
+        // Find the body between braces
+        let body_start = params_end;
+        let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
+            Some(pos) => body_start + pos + 1,
+            None => {
+                report!(context, "function_handler", Error, Process, 
+                    format!("Could not find closing brace for function {}", func_name), false);
+                return not_handled();
             }
-        } else {
-            base_type.clone()
         };
 
-        // For now we'll just join tokens as a simplification
-        // A proper implementation would handle more complex types
-        let mut result = Vec::new();
+        // Extract body tokens
+        let body_tokens = &tokens[body_start + 1..body_end - 1];
 
-        if is_pointer {
-            if is_const {
-                result.push(Token::Identifier("*const ".to_string()));
-            } else {
-                result.push(Token::Identifier("*mut ".to_string()));
-            }
+        // Convert to Rust
+        if let Some(ConvertedElement::Function(converted_function)) = convert_function(
+            tokens,
+            context,
+        )? {
+            return replace_with(converted_function.rust_code.clone(), get_id("handle_function"));
+        } else {
+            Err(ConversionError::new("Failed to convert function"))
         }
+    } else {
+// Function declaration only (no body)
+        if let Some(ConvertedElement::Function(converted_function)) = convert_function(
+            tokens,
+            context,
+        )? {
+            return replace_with(converted_function.rust_code.clone(), get_id("handle_function"));
+        } else {
+            Err(ConversionError::new("Failed to convert function"))
+        }
+    }
+}
 
-        // Add the mapped base type tokens
-        result.extend(mapped_base_type);
-
-        result
+/// Extract callback: Finds and returns the locations this handler should handle
+pub fn extract_function(tokens: &[Token], context: &mut Context) -> Result<Option<ExtractedElement>, ConversionError> {
+    report!(context, "function_handler", Info, Extract, 
+        format!("Extracting function from {} tokens", tokens.len()), true);
+    // Find function name and opening parenthesis
+    let mut name_pos = 0;
+    for i in 0..tokens.len().saturating_sub(1) {
+        if matches!(tokens[i+1].to_string().as_str(), "(") {
+            name_pos = i;
+            break;
+        }
     }
 
-    /// Extract and convert a function from tokens
-    fn extract_and_convert_function(
-        &self,
-        tokens: &[Token],
-    ) -> Result<HandlerResult, ConversionError> {
-        // Find function name
-        let mut name_pos = 0;
-        for i in 0..tokens.len() {
-            if tokens[i] == Token::OpenParen {
-                if i > 0 {
-                    // The token before the opening parenthesis should be the function name
-                    if let Token::Identifier(_) = tokens[i - 1] {
-                        name_pos = i - 1;
-                        break;
-                    }
-                }
-            }
-        }
+    if name_pos == 0 {
+        return Ok(None);
+    }
 
-        // If no function name was found, this is not a function
-        if name_pos == 0 {
-            return Ok(HandlerResult::NotHandled);
-        }
+    let func_name = tokens[name_pos].to_string();
+    report!(context, "function_handler", Info, Extract, 
+        format!("Extracting function: {}", func_name), true);
+    let return_type_tokens = tokens[0..name_pos].to_vec();
 
-        // Get function name
-        let name = if let Token::Identifier(ref id) = tokens[name_pos] {
-            id.clone()
-        } else {
-            return Ok(HandlerResult::NotHandled);
+    // Find the parameter list between parentheses
+    let params_start = name_pos + 1;
+    let params_end = match find_matching_token(&tokens[params_start..], "(", ")") {
+        Some(pos) => params_start + pos + 1,
+        None => return Ok(None),
+    };
+
+    // Extract parameter tokens
+    let param_tokens = tokens[params_start + 1..params_end].to_vec();
+
+    // Check if this is a function declaration or definition
+    let is_definition = params_end < tokens.len() && tokens[params_end].to_string() == "{";
+    let body_tokens = if is_definition {
+        // Find the body between braces
+        let body_start = params_end;
+        let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
+            Some(pos) => body_start + pos + 1,
+            None => return Ok(None),
         };
 
-        // Extract return type (tokens before function name)
-        let mut return_type = Vec::new();
-        let mut is_static = false;
+        tokens[body_start + 1..body_end - 1].to_vec()
+    } else {
+        vec![]
+    };
 
-        for i in 0..name_pos {
-            match &tokens[i] {
-                Token::Identifier(id) if id == "static" => {
-                    is_static = true;
-                }
-                Token::Identifier(id) if id == "inline" => {
-                    // Skip inline keyword
-                }
-                _ => {
-                    return_type.push(tokens[i].clone());
-                }
-            }
+    // Check for static and inline modifiers
+    let is_static = return_type_tokens.iter().any(|t| t.to_string() == "static");
+    let is_inline = return_type_tokens.iter().any(|t|
+        matches!(t.to_string().as_str(), "inline" | "__inline" | "__inline__")
+    );
+
+    // Create ExtractedFunction
+    let extracted_function = ExtractedFunction {
+        name: func_name,
+        return_type: return_type_tokens,
+        parameters: param_tokens,
+        body: body_tokens,
+        is_definition,
+        is_static,
+        is_inline,
+        original_code: tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" "),
+        tokens: tokens.to_vec(),
+        is_variadic: false,
+        from_recovery: false,
+    };
+
+    Ok(Some(ExtractedElement::Function(extracted_function)))
+}
+
+/// Convert callback: Does the actual conversion of C to Rust code
+fn convert_function(
+    tokens: &[Token],
+    context: &mut Context,
+) -> Result<Option<ConvertedElement>, ConversionError> {
+    report!(context, "function_handler", Info, Convert, 
+        format!("Converting function from {} tokens", tokens.len()), true);
+    let id = get_id("convert_function");
+    if let ExtractedElement::Function(element) = extract_function(tokens, context)?.unwrap() {
+        let mut rust_code = String::new();
+        // Add function visibility
+        rust_code.push_str("pub ");
+
+        // Check for special cases like 'extern "C"'
+        if element.return_type.iter().any(|t| t.to_string() == "extern") {
+            rust_code.push_str("extern \"C\" ");
         }
 
-        // Find parameters
-        let param_start = name_pos + 1;
-        let mut param_end = param_start + 1;
-        let mut param_tokens = Vec::new();
-
-        // Count parentheses to find the closing one
-        let mut paren_count = 1;
-
-        while param_end < tokens.len() && paren_count > 0 {
-            match tokens[param_end] {
-                Token::OpenParen => paren_count += 1,
-                Token::CloseParen => paren_count -= 1,
-                _ => {}
-            }
-
-            if paren_count > 0 {
-                param_tokens.push(tokens[param_end].clone());
-            }
-            param_end += 1;
-        }
+        // Add function declaration
+        rust_code.push_str("fn ");
+        rust_code.push_str(element.name.as_str());
+        rust_code.push('(');
 
         // Convert parameters
-        let parameters = self.parse_parameters(&param_tokens)?;
-
-        // Check for function body
-        let mut has_body = false;
-        let mut body_start = param_end;
-
-        while body_start < tokens.len() {
-            if tokens[body_start] == Token::OpenBrace {
-                has_body = true;
-                break;
-            }
-            body_start += 1;
-        }
-
-        // Generate Rust function signature
-        let mut rust_code = String::new();
-
-        // Add visibility and other qualifiers
-        if is_static {
-            rust_code.push_str("fn ");
+        let params = if element.parameters.is_empty() {
+            String::new()
         } else {
-            rust_code.push_str("pub fn ");
-        }
+            // Parse parameters
+            let mut params = Vec::new();
+            let mut current_param = Vec::new();
 
-        // Add function name
-        rust_code.push_str(&name);
-
-        // Add parameters
-        rust_code.push('(');
-        for (i, (param_name, param_type)) in parameters.iter().enumerate() {
-            // Map the C type to Rust type
-            let rust_type = self.map_type(param_type);
-            let type_str = rust_type
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<String>>()
-                .join("");
-
-            rust_code.push_str(&format!("{}: {}", param_name, type_str));
-
-            if i < parameters.len() - 1 {
-                rust_code.push_str(", ");
-            }
-        }
-        rust_code.push(')');
-
-        // Add return type if not void
-        if !return_type.is_empty() {
-            let rust_return_type = self.map_type(&return_type);
-            let type_str = rust_return_type
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<String>>()
-                .join("");
-
-            if type_str != "()" {
-                rust_code.push_str(&format!(" -> {}", type_str));
-            }
-        }
-
-        // If there's a body, add a placeholder for now
-        if has_body {
-            rust_code.push_str(" {\n    // Function body conversion not yet implemented\n}");
-        } else {
-            rust_code.push(';');
-        }
-
-        Ok(HandlerResult::RustCode(rust_code))
-    }
-
-    /// Parse function parameters
-    fn parse_parameters(
-        &self,
-        tokens: &[Token],
-    ) -> Result<Vec<(String, Vec<Token>)>, ConversionError> {
-        if tokens.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let mut parameters = Vec::new();
-        let mut param_start = 0;
-
-        // Split by commas
-        for i in 0..tokens.len() {
-            if tokens[i] == Token::Comma {
-                if i > param_start {
-                    // Extract one parameter
-                    if let Some((name, param_type)) =
-                        self.parse_parameter(&tokens[param_start..i])?
-                    {
-                        parameters.push((name, param_type));
+            for token in element.parameters {
+                if token.to_string() == "," {
+                    if !current_param.is_empty() {
+                        params.push(current_param.clone());
+                        current_param.clear();
                     }
-                }
-                param_start = i + 1;
-            }
-        }
-
-        // Handle the last parameter
-        if param_start < tokens.len() {
-            if let Some((name, param_type)) = self.parse_parameter(&tokens[param_start..])? {
-                parameters.push((name, param_type));
-            }
-        }
-
-        Ok(parameters)
-    }
-
-    /// Parse a single parameter
-    fn parse_parameter(
-        &self,
-        tokens: &[Token],
-    ) -> Result<Option<(String, Vec<Token>)>, ConversionError> {
-        if tokens.is_empty() {
-            return Ok(None);
-        }
-
-        // Look for parameter name (usually the last identifier)
-        let mut name = String::new();
-        let mut name_pos = 0;
-
-        // Handle special case for "void" parameter
-        if tokens.len() == 1 {
-            if let Token::Identifier(ref id) = tokens[0] {
-                if id == "void" {
-                    return Ok(None); // void parameter means no parameters
+                } else {
+                    current_param.push(token.clone());
                 }
             }
-        }
 
-        // Find parameter name
-        for i in (0..tokens.len()).rev() {
-            if let Token::Identifier(ref id) = tokens[i] {
-                // Skip type keywords
-                let type_keywords = [
-                    "int", "char", "float", "double", "void", "short", "long", "unsigned",
-                    "signed", "const", "volatile", "struct", "enum", "union",
-                ];
+            if !current_param.is_empty() {
+                params.push(current_param);
+            }
 
-                if !type_keywords.contains(&id.as_str()) {
-                    name = id.clone();
-                    name_pos = i;
+            // Convert each parameter
+            let mut rust_params = Vec::new();
+            for param in params {
+                if param.is_empty() {
+                    continue;
+                }
+
+                // Extract parameter name (typically the last token before any array brackets)
+                let mut name_idx = param.len() - 1;
+
+                for i in (0..param.len()).rev() {
+                    if param[i].to_string() == "[" || param[i].to_string() == "]" {
+                        continue;
+                    }
+                    name_idx = i;
                     break;
                 }
+
+                let param_name = param[name_idx].to_string();
+
+                // Parameter type is everything before the name
+                let param_type_tokens = &param[0..name_idx];
+
+                // Convert type to Rust
+                let mut param_type = param_type_tokens.iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                // Look up type conversion in our registry
+                if let Some(rust_type) = convert_type(&param_type) {
+                    param_type = rust_type;
+                }
+
+                rust_params.push(format!("{}: {}", param_name, param_type));
             }
-        }
 
-        // If we couldn't find a name, use a generated one
-        if name.is_empty() {
-            name = "param".to_string();
-            name_pos = tokens.len();
-        }
-
-        // Extract parameter type (all tokens before the name)
-        let param_type = if name_pos > 0 {
-            tokens[0..name_pos].to_vec()
-        } else {
-            Vec::new()
+            rust_params.join(", ")
         };
 
-        Ok(Some((name, param_type)))
-    }
-}
+        rust_code.push_str(&params);
+        rust_code.push(')');
 
-impl TokenHandler for FunctionHandler {
-    fn can_handle(&self, tokens: &[Token], _context: &ParserContext) -> bool {
-        // Check if this looks like a function declaration or definition
-        if tokens.len() < 3 {
-            return false;
-        }
+        // Convert return type (skip if void)
+        let return_type = {
+            let return_type_str = element.return_type.iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
 
-        // Look for pattern: [tokens] identifier(
-        for i in 1..tokens.len() - 1 {
-            if let Token::Identifier(_) = tokens[i] {
-                if tokens[i + 1] == Token::OpenParen {
-                    // Make sure this isn't a function call within an expression
-                    // by checking that it's at the start of a statement
-                    if i == 0 || self.is_likely_function_start(&tokens[0..i]) {
-                        return true;
+            // Simple conversion - in a real implementation, you'd have more logic
+            match return_type_str.as_str() {
+                "void" => "()".to_string(),
+                _ => {
+                    // Try to convert using the type registry
+                    if let Some(rust_type) = convert_type(&return_type_str) {
+                        rust_type
+                    } else {
+                        // Default to keeping the original type
+                        return_type_str
                     }
                 }
             }
+        };
+
+        if return_type != "()" {
+            rust_code.push_str(" -> ");
+            rust_code.push_str(&return_type);
         }
 
-        false
-    }
+        // Add function body if present
+        if let body = element.body {
+            rust_code.push_str(" {\n");
 
-    fn handle(
-        &self,
-        tokens: &[Token],
-        _context: &mut ParserContext,
-    ) -> Result<HandlerResult, ConversionError> {
-        self.extract_and_convert_function(tokens)
+            // Convert body content - simplified version here
+            rust_code.push_str("    // TODO: Convert function body\n");
+
+            // Real implementation would convert each statement
+            let body_content = body.iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // Simple C to Rust conversion - placeholder for actual conversion
+            let rust_body = "    // Original C code: \n    // ".to_string() + &body_content;
+            rust_code.push_str(&rust_body);
+            rust_code.push_str("\n}");
+        } else {
+            // Declaration only
+            rust_code.push(';');
+        }
+        Ok(Some(ConvertedElement::Function(ConvertedFunction {
+            return_type: "()".to_string(), // Default return type
+            parameters: Vec::new(), // Default empty parameters
+            body: "".to_string(), // Default empty body
+            rust_code,
+            is_unsafe: false,
+            is_public: false,
+        })))
+    } else {
+        Err(ConversionError::new("Failed to convert function"))
     }
 }
 
-impl FunctionHandler {
-    /// Check if tokens are likely to be the start of a function declaration
-    /// This is a heuristic and not exhaustive
-    fn is_likely_function_start(&self, tokens: &[Token]) -> bool {
-        // Commonly used type and modifier keywords at the start of function declarations
-        let type_keywords = [
-            "void", "int", "char", "float", "double", "short", "long", "unsigned", "signed",
-            "const", "static", "inline", "struct", "enum", "union", "auto", "register", "extern",
-        ];
-
-        for token in tokens {
-            if let Token::Identifier(id) = token {
-                if type_keywords.contains(&id.as_str()) {
-                    return true;
-                }
-            }
-        }
-
-        false
+/// Redirect callback: Handles cases where this handler should pass tokens to a different handler
+fn redirect_function(tokens: &[Token], result: HandlerResult, context: &mut Context) -> Result<HandlerResult, ConversionError> {
+    report!(context, "function_handler", Info, Report, 
+        "Checking if function tokens should be redirected", true);
+    
+    // Check if this might actually be a function pointer typedef
+    if tokens.iter().any(|t| t.to_string() == "typedef") {
+        report!(context, "function_handler", Info, Report, 
+            "Redirecting to typedef handler", true);
+        return Ok(result);
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_function_handler_simple_function() {
-        let c_code = "int add(int a, int b) { return a + b; }";
-        let mut tokenizer = crate::token_parser::Tokenizer::new(c_code);
-        let tokens = tokenizer.tokenize();
-
-        let handler = FunctionHandler::new();
-        let context = &mut ParserContext::new();
-
-        assert!(handler.can_handle(&tokens, context));
-
-        if let HandlerResult::RustCode(rust_code) = handler.handle(&tokens, context).unwrap() {
-            assert!(rust_code.contains("pub fn add"));
-            assert!(rust_code.contains("a: i32"));
-            assert!(rust_code.contains("b: i32"));
-            assert!(rust_code.contains("-> i32"));
-        } else {
-            panic!("Expected RustCode result");
+    
+    // Check if this might be a macro that looks like a function
+    if tokens.len() > 0 && tokens[0].to_string() == "#" {
+        report!(context, "function_handler", Info, Report, 
+            "Redirecting to macro handler", true);
+        return Ok(result);
+    }
+    
+    // Check if this is actually a struct method definition
+    if tokens.iter().any(|t| t.to_string() == "struct") {
+        report!(context, "function_handler", Info, Report, 
+            "Redirecting to struct handler", true);
+        return Ok(result);
+    }
+    
+    // Check if this looks more like a variable declaration with function pointer type
+    let mut paren_count = 0;
+    let mut has_assignment = false;
+    
+    for token in tokens {
+        match token.to_string().as_str() {
+            "(" => paren_count += 1,
+            ")" => paren_count -= 1,
+            "=" => has_assignment = true,
+            _ => {}
         }
     }
-
-    #[test]
-    fn test_function_handler_void_function() {
-        let c_code = "void print_message(const char* msg) { }";
-        let mut tokenizer = crate::token_parser::Tokenizer::new(c_code);
-        let tokens = tokenizer.tokenize();
-
-        let handler = FunctionHandler::new();
-        let context = &mut ParserContext::new();
-
-        assert!(handler.can_handle(&tokens, context));
-
-        if let HandlerResult::RustCode(rust_code) = handler.handle(&tokens, context).unwrap() {
-            assert!(rust_code.contains("pub fn print_message"));
-            assert!(rust_code.contains("msg: *const i8"));
-            assert!(!rust_code.contains("->"));
-        } else {
-            panic!("Expected RustCode result");
-        }
+    
+    // If we have an assignment and complex parentheses, might be a function pointer variable
+    if has_assignment && paren_count == 0 {
+        report!(context, "function_handler", Info, Report, 
+            "Redirecting to global handler (function pointer variable)", true);
+        return Ok(result);
     }
+    
+    // No redirection needed
+    Ok(result)
 }

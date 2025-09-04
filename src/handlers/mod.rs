@@ -1,106 +1,89 @@
-// Register all available handlers
-pub mod array_handler;
-pub mod composite_handler;
-pub mod define_const_handler;
-pub mod define_handler;
-pub mod define_macro_handler;
-pub mod enum_handler;
-pub mod function_call;
-pub mod function_handler;
-pub mod ifdef_handler;
-pub mod include_handler;
-pub mod loop_handler;
-pub mod multiline_macro_handler;
-pub mod pointer_declaration;
-pub mod struct_declaration;
-pub mod struct_member_access;
-pub mod type_cast_handler;
-pub mod typedef_handler;
-pub mod union_handler;
+use crate::context::{Context, HandlerReport};
+use crate::error::ConversionError;
+use crate::extract::ExtractedElement;
+use crate::handler::{Handler, HandlerResult};
+use crate::{get_id, ProcessedResult, Token};
+use crate::{ConvertedElement, Id};
+use std::sync::atomic::Ordering;
+use std::sync::atomic::AtomicU64;
 
-pub use array_handler::ArrayHandler;
-pub use composite_handler::CompositeHandler;
-pub use define_const_handler::DefineConstHandler;
-pub use define_handler::DefineHandler;
-pub use define_macro_handler::DefineMacroHandler;
-pub use enum_handler::EnumHandler;
-pub use function_call::FunctionCallHandler;
-pub use function_handler::FunctionHandler;
-pub use ifdef_handler::IfdefHandler;
-pub use include_handler::IncludeHandler;
-pub use loop_handler::LoopHandler;
-pub use multiline_macro_handler::MultilineMacroHandler;
-pub use pointer_declaration::PointerDeclarationHandler;
-pub use struct_declaration::StructDeclarationHandler;
-pub use struct_member_access::StructMemberAccessHandler;
-pub use type_cast_handler::TypeCastHandler;
-pub use typedef_handler::TypedefHandler;
-pub use union_handler::UnionHandler;
+// Global counter for handler IDs to ensure uniqueness
+static HANDLER_ID_COUNTER: AtomicU64 = AtomicU64::new(100);
 
-use crate::config::Config;
-use crate::handler::HandlerRegistry;
-
-/// Register all standard handlers with the registry
-pub fn register_handlers(registry: &mut HandlerRegistry, config: &Config) {
-    // Register struct declaration handler
-    registry.register(Box::new(StructDeclarationHandler::new()));
-
-    // Register pointer declaration handler
-    registry.register(Box::new(PointerDeclarationHandler::new()));
-
-    // Register struct member access handler
-    registry.register(Box::new(StructMemberAccessHandler::new()));
-
-    // Register function call handler
-    registry.register(Box::new(FunctionCallHandler::new()));
-
-    // Register array handler
-    registry.register(Box::new(ArrayHandler::new()));
-
-    // Register type cast handler
-    registry.register(Box::new(TypeCastHandler::new()));
-
-    // Register define directive handlers
-    registry.register(Box::new(DefineConstHandler::new())); // For simple constants
-    registry.register(Box::new(DefineMacroHandler::new())); // For complex macros
-    registry.register(Box::new(DefineHandler::new())); // Kept for backward compatibility
-
-    // Register preprocessor directive handlers
-    registry.register(Box::new(IfdefHandler::new()));
-
-    // Register enum and union handlers
-    registry.register(Box::new(EnumHandler::new()));
-    registry.register(Box::new(UnionHandler::new()));
-
-    // Register loop handler for converting C loops to idiomatic Rust
-    registry.register(Box::new(LoopHandler::new()));
-
-    // Register function handler for the new architecture
-    registry.register(Box::new(FunctionHandler::new()));
-
-    // Register typedef handler
-    registry.register(Box::new(TypedefHandler::new()));
-
-    // Register multi-line macro handler
-    registry.register(Box::new(MultilineMacroHandler::new()));
-
-    // Register include handler with configuration
-    registry.register(Box::new(IncludeHandler::new(config.clone())));
-
-    // Create and register a composite handler for complex expressions
-    // This demonstrates how handlers can be chained together
-    let mut complex_expr_handler = CompositeHandler::new("ComplexExpressionHandler");
-    complex_expr_handler
-        .add_handler(Box::new(StructMemberAccessHandler::new()))
-        .add_handler(Box::new(ArrayHandler::new()))
-        .add_handler(Box::new(FunctionCallHandler::new()));
-
-    registry.register(Box::new(complex_expr_handler));
-    // Add more handlers here as they are implemented
+// Function to get the next handler ID
+pub fn next_handler_id() -> Id {
+    let _num = HANDLER_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+    let mut id = crate::get_id("next_handler_id");
+    id.0 += 1;
+    id
 }
 
-/// Register all standard handlers with the registry using default configuration
-/// This is kept for backward compatibility
-pub fn register_handlers_default(registry: &mut HandlerRegistry) {
-    register_handlers(registry, &Config::new());
+
+/// Create a complete handler with all function types
+pub fn create_handler(
+    id: Id,
+    role: &str,
+    priority: u64,
+    process: Option<fn(&[Token], &mut Context) -> Result<bool, ConversionError>>,
+    handle: Option<fn(&[Token], &mut Context) -> Result<HandlerResult, ConversionError>>,
+    extract: Option<fn(&[Token], &mut Context) -> Result<Option<ExtractedElement>, ConversionError>>,
+    convert: Option<fn(&[Token], &mut Context) -> Result<Option<ConvertedElement>, ConversionError>>,
+    report: Option<fn(&[Token], &mut Context) -> Result<HandlerReport, ConversionError>>,
+    result: Option<fn(&[Token], HandlerResult, &mut Context) -> Result<HandlerResult, ConversionError>>,
+    redirect: Option<fn(&[Token],HandlerResult, &mut Context) -> Result<HandlerResult, ConversionError>>,
+) -> Handler {
+    let mut handler = Handler::new(id.clone(), role.to_string(), priority.clone());
+    handler.process = process;
+    handler.handle = handle;
+    handler.extract = extract;
+    handler.convert = convert;
+    handler.report = report;
+    handler.result = result;
+    handler.redirect = redirect;
+    handler
+}
+
+// Export submodules
+pub mod common;
+pub mod function_handler;
+pub mod struct_handler;
+pub mod enum_handler;
+pub mod typedef_handler;
+pub mod include_handler;
+pub mod macro_handler;
+pub mod global_handler;
+pub mod control_flow_handler;
+pub mod array_handler;
+pub mod expression_handler;
+pub mod comment_handler;
+
+/// Creates all handlers and returns them in a Vec
+pub fn create_all_handlers() -> Vec<Handler> {
+    let mut handlers = Vec::new();
+    
+    // Add handlers in order of priority
+    handlers.push(include_handler::create_include_handler());
+    handlers.push(macro_handler::create_macro_handler());
+    handlers.push(control_flow_handler::create_control_flow_handler());
+    handlers.push(expression_handler::create_expression_handler());
+    handlers.push(struct_handler::create_struct_handler());
+    handlers.push(enum_handler::create_enum_handler());
+    handlers.push(typedef_handler::create_typedef_handler());
+    handlers.push(function_handler::create_function_handler());
+    handlers.push(array_handler::create_array_handler());
+    handlers.push(comment_handler::create_comment_handler());
+    handlers.push(global_handler::create_global_handler());
+    
+    handlers
+}
+
+/// Registers all handlers with the provided context
+pub fn register_all_handlers(context: &mut Context) {
+    // Create all handlers
+    let handlers = create_all_handlers();
+    
+    // Register each handler
+    for handler in handlers {
+        context.register_handler(handler.clone());
+    }
 }

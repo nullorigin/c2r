@@ -1,6 +1,5 @@
 use crate::error::ConversionError;
 use std::fs;
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// File utility to handle I/O operations for the C2R converter
