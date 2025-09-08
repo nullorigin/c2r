@@ -1,6 +1,5 @@
 use super::common::not_handled;
 use crate::config::{
-    Context,
     HandlerPhase::{Handle, Process, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},

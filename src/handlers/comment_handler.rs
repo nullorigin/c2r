@@ -1,14 +1,14 @@
 use super::common::{not_handled, replace_with_range};
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
+use crate::config::HandlerReport;
 use crate::config::ReportLevel::{Info, Warning};
-use crate::config::{Context, HandlerReport};
 use crate::config::{HandlerPhase, ReportLevel};
 use crate::error::ConversionError;
 use crate::extract::{ExtractedComment, ExtractedElement};
 use crate::handler::HandlerResult;
 use crate::lock::Id;
-use crate::{context, report};
 use crate::Token;
+use crate::{context, report};
 use crate::{ConvertedComment, ConvertedElement};
 
 /// Creates a comment handler that can detect and convert C comments
@@ -32,7 +32,7 @@ pub fn create_comment_handler() -> crate::handler::Handler {
 }
 
 /// Determines if the token sequence represents a comment
- fn process_comment(tokens: &[Token]) -> Result<bool, ConversionError> {
+fn process_comment(tokens: &[Token]) -> Result<bool, ConversionError> {
     let _id = Id::get("process_comment");
     if tokens.is_empty() {
         return Ok(false);

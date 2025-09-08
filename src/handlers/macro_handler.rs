@@ -1,6 +1,5 @@
 use super::common::{find_matching_token, not_handled, replace_with_range};
 use crate::config::{
-    Context,
     HandlerPhase::{Convert, Handle, Process, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},
@@ -710,7 +709,7 @@ fn convert_object_macro_to_rust(
 fn convert_function_macro_to_rust(
     name: &str,
     params: &[String],
-    body: &str
+    body: &str,
 ) -> Result<String, ConversionError> {
     let mut rust_code = String::new();
 

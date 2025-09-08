@@ -6,8 +6,6 @@
     non_upper_case_globals
 )]
 
-use crate::HandlerMap;
-use crate::config::Context;
 use crate::error::ConversionError;
 use crate::handler::{HandlerResult, ProcessedResult};
 use crate::{context, debug, error, info, warn};
@@ -16,7 +14,6 @@ use std::fmt;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::io::Read;
 use std::mem::transmute;
 use std::ops::Add;
 use std::ops::BitAnd;
@@ -26,10 +23,8 @@ use std::ops::Div;
 use std::ops::Mul;
 use std::ops::Rem;
 use std::ops::Sub;
-use std::slice::from_raw_parts;
 use std::str::from_utf8;
 use std::str::FromStr;
-use std::sync::LazyLock;
 use std::time::Instant;
 
 const TOKEN_MAX: usize = 4096;
@@ -754,7 +749,7 @@ impl Tokenizer {
     pub fn tokenize(
         mut self,
         content: Vec<u8>,
-) -> Result<Vec<Token>, ConversionError> {
+    ) -> Result<Vec<Token>, ConversionError> {
         let mut tokens = Vec::new();
         self.content = content.clone();
         // Debug: Print total content length
@@ -882,8 +877,8 @@ impl Tokenizer {
         if b.is_ascii_alphabetic() || b == b'_' {
             while self.cursor < self.content.len()
                 && (self.cursor_byte().is_ascii_alphanumeric()
-                    || self.cursor_byte() == b'_'
-                    || self.cursor_byte() == b'.')
+                || self.cursor_byte() == b'_'
+                || self.cursor_byte() == b'.')
             {
                 self.cursor += 1;
             }
@@ -940,10 +935,10 @@ impl Tokenizer {
             // Handle numeric literals - create proper Token::i() or Token::f() variants using tok! macro
             if b.is_ascii_digit()
                 || (b == b'.'
-                    && self
-                        .content
-                        .get(start + 1)
-                        .map_or(false, |&next| next.is_ascii_digit()))
+                && self
+                .content
+                .get(start + 1)
+                .map_or(false, |&next| next.is_ascii_digit()))
             {
                 if content.contains('.') || content.contains('e') || content.contains('E') {
                     // Parse as float
@@ -1529,8 +1524,8 @@ impl Tokenizer {
                         let before_paren = &line[pattern.len()..paren_pos].trim();
                         if !before_paren.is_empty()
                             && before_paren
-                                .chars()
-                                .all(|c| c.is_alphanumeric() || c == '_')
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_')
                         {
                             candidates.push((pos, line.to_string()));
                             debug!(
@@ -1676,7 +1671,7 @@ impl Tokenizer {
     pub fn process_tokens(
         &mut self,
         tokens: &[Token],
-) -> Result<ProcessedResult, ConversionError> {
+    ) -> Result<ProcessedResult, ConversionError> {
         let start_time = Instant::now();
         // Track statistics if debug mode is enabled
         let total_tokens = tokens.len();
@@ -1754,8 +1749,8 @@ impl Tokenizer {
                     // Only warn about non-trivial unhandled tokens (not just whitespace or comments)
                     if !unhandled_token_str.trim().is_empty()
                         && !unhandled_tokens
-                            .iter()
-                            .all(|t| t.to_string().trim().is_empty())
+                        .iter()
+                        .all(|t| t.to_string().trim().is_empty())
                     {
                         warn!("Unhandled tokens: {}", unhandled_token_str);
 

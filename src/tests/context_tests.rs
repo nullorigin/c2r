@@ -1,11 +1,11 @@
 //! Clean Context tests using correct API patterns
 //! Tests basic Context functionality, Registry operations, and reporting system
 
-use crate::config::{Context, Entry, HandlerPhase, HandlerReport, ReportLevel};
+use crate::config::{Entry, HandlerPhase, HandlerReport, ReportLevel};
 use crate::lock::Id;
-use std::collections::HashMap;
 // Import the report macro
 use crate::{context, report, Global};
+use std::collections::HashMap;
 
 /// Test basic Context creation
 #[test]
@@ -175,7 +175,7 @@ fn test_report_macro() {
         "Test macro message",
         true
     );
-    
+
     // Verify the report was created using shared global Context
     let reports = Global::context_fn(|ctx| {
         ctx.get_reports_by_handler("test_handler").into_iter().cloned().collect::<Vec<_>>()

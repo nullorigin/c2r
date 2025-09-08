@@ -8,7 +8,6 @@
 
 use super::common::{find_matching_token, not_handled, replace_with_range};
 use crate::config::{
-    Context,
     HandlerPhase::{Convert, Process, Report},
     HandlerReport,
     ReportLevel::{Info, Warning},

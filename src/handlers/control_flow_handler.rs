@@ -1,13 +1,13 @@
 use super::common::{find_matching_token, not_handled, replace_with_range};
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
+use crate::config::HandlerReport;
 use crate::config::ReportLevel::{Info, Warning};
-use crate::config::{Context, HandlerReport};
 use crate::config::{HandlerPhase, ReportLevel};
 use crate::error::ConversionError;
 use crate::extract::{ExtractedControlFlow, ExtractedElement};
 use crate::handler::HandlerResult;
-use crate::{context, report};
 use crate::Id;
+use crate::{context, report};
 use crate::{ConvertedControlFlow, ConvertedElement, Token};
 
 /// Creates a control flow handler that can detect and convert C control flow statements
@@ -1072,7 +1072,7 @@ fn redirect_control_flow(
                     if !matches!(prev_token.as_str(), "if" | "while" | "for" | "switch")
                         && is_identifier(&prev_token)
                     {
-report!(
+                        report!(
                             "control_flow_handler",
                             "redirect_control_flow",
                             Info,
@@ -1096,11 +1096,11 @@ report!(
     // Check if this contains variable declarations
     if tokens.iter().any(|t| t.to_string() == "=")
         && !tokens.iter().any(|t| {
-            matches!(
+        matches!(
                 t.to_string().as_str(),
                 "if" | "while" | "for" | "switch" | "do"
             )
-        })
+    })
     {
         report!(
             "control_flow_handler",
@@ -1404,7 +1404,7 @@ fn extract_control_flow_info_from_tokens(tokens: &[Token]) -> ControlFlowInfo {
             } else {
                 "moderate (C-style)"
             }
-            .to_string();
+                .to_string();
         }
         "while" => {
             info.description = "conditional loop".to_string();

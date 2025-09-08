@@ -445,7 +445,7 @@ fn test_realistic_c_code_workflow() -> Result<(), ConversionError> {
             return 0;
         }
     "
-    .to_vec();
+        .to_vec();
 
     // Tokenize
     let tokenizer = Tokenizer::new("test_tokenizer");

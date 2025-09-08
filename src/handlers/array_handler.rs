@@ -6,15 +6,15 @@
     non_upper_case_globals
 )]
 
-use crate::{context};
 use super::common::{find_matching_token, not_handled, replace_with_range};
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
+use crate::config::HandlerReport;
 use crate::config::ReportLevel;
-use crate::config::{Context, HandlerReport};
+use crate::context;
 use crate::error::ConversionError;
 use crate::extract::{ExtractedArray, ExtractedElement};
 use crate::handler::HandlerResult;
-use crate::{report};
+use crate::report;
 use crate::Id;
 use crate::ReportLevel::Info;
 use crate::ReportLevel::Warning;
@@ -91,13 +91,13 @@ fn process_array(tokens: &[Token]) -> Result<bool, ConversionError> {
             // Additional validation: ensure this looks like a real array declaration
             let token1 = if i > 0 { tokens[i].to_string() } else { String::new() };
             let token2 = if i + 1 < tokens.len() { tokens[i + 1].to_string() } else { String::new() };
-            
+
             // Check if first token looks like a type
             if token1 == "int" || token1 == "char" || token1 == "float" || token1 == "double" ||
-               token1 == "long" || token1 == "short" || token1 == "unsigned" || token1 == "signed" ||
-               (!token1.is_empty() && !token1.starts_with('{') && !token1.starts_with('}') && 
-                !token1.starts_with(';') && !token1.starts_with('=')) {
-                
+                token1 == "long" || token1 == "short" || token1 == "unsigned" || token1 == "signed" ||
+                (!token1.is_empty() && !token1.starts_with('{') && !token1.starts_with('}') &&
+                    !token1.starts_with(';') && !token1.starts_with('=')) {
+
                 // Look for closing bracket to confirm array pattern
                 let mut j = i + 3;
                 while j < tokens.len() {
@@ -114,12 +114,12 @@ fn process_array(tokens: &[Token]) -> Result<bool, ConversionError> {
     for i in 0..tokens.len() - 2 {
         if i + 1 < tokens.len() && tokens[i + 1].to_string() == "[" {
             let identifier = tokens[i].to_string();
-            
+
             // Additional validation: ensure identifier looks legitimate (not punctuation)
-            if !identifier.is_empty() && !identifier.starts_with('{') && !identifier.starts_with('}') && 
-               !identifier.starts_with(';') && !identifier.starts_with('=') && !identifier.starts_with(',') &&
-               !identifier.starts_with('(') && !identifier.starts_with(')') {
-                
+            if !identifier.is_empty() && !identifier.starts_with('{') && !identifier.starts_with('}') &&
+                !identifier.starts_with(';') && !identifier.starts_with('=') && !identifier.starts_with(',') &&
+                !identifier.starts_with('(') && !identifier.starts_with(')') {
+
                 // Look for closing bracket
                 let mut j = i + 2;
                 while j < tokens.len() {
@@ -247,7 +247,7 @@ fn process_array_declaration(
             break;
         }
     }
-    
+
     let id = Id::get("array_declaration");
     replace_with_range(rust_code, 0..end_pos, id)
 }
@@ -322,7 +322,7 @@ fn process_array_access(
     // Calculate token consumption range for array access
     // Range should cover from array name to closing bracket
     let token_range = name_pos..bracket_end;
-    
+
     let id = Id::get("array_access");
     replace_with_range(rust_code, token_range, id)
 }

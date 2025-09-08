@@ -15,12 +15,11 @@ use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 use crate::lock::Id;
 use crate::ReportLevel::Info;
-use crate::{report, context, Context, ConvertedElement, HandlerRedirect, Token, Entry};
+use crate::{context, report, Context, ConvertedElement, Entry, HandlerRedirect, Token};
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::hash::{DefaultHasher, Hash, RandomState};
+use std::hash::Hash;
 use std::ops::Range;
-use std::sync::{LazyLock, OnceLock};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Handler {
@@ -69,45 +68,45 @@ impl Handler {
     pub fn process(
         &self,
         tokens: &[Token],
-) -> Result<bool, ConversionError> {
+    ) -> Result<bool, ConversionError> {
         self.process.unwrap()(tokens)
     }
     pub fn handle(
         &self,
         tokens: &[Token],
-) -> Result<HandlerResult, ConversionError> {
+    ) -> Result<HandlerResult, ConversionError> {
         self.handle.unwrap()(tokens)
     }
     pub fn extract(
         &self,
         tokens: &[Token],
-) -> Result<Option<ExtractedElement>, ConversionError> {
+    ) -> Result<Option<ExtractedElement>, ConversionError> {
         self.extract.unwrap()(tokens)
     }
     pub fn convert(
         &self,
         tokens: &[Token],
-) -> Result<Option<ConvertedElement>, ConversionError> {
+    ) -> Result<Option<ConvertedElement>, ConversionError> {
         self.convert.unwrap()(tokens)
     }
     pub fn report(
         &self,
         tokens: &[Token],
-) -> Result<HandlerReport, ConversionError> {
+    ) -> Result<HandlerReport, ConversionError> {
         self.report.unwrap()(tokens)
     }
     pub fn result(
         &self,
         tokens: &[Token],
         result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
+    ) -> Result<HandlerResult, ConversionError> {
         self.result.unwrap()(tokens, result)
     }
     pub fn redirect(
         &self,
         tokens: &[Token],
         result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
+    ) -> Result<HandlerResult, ConversionError> {
         self.redirect.unwrap()(tokens, result)
     }
     /// Returns a string representation of the handler including its name and role
@@ -228,7 +227,7 @@ impl HandlerMap {
             self.register(handler);
         }
     }
-    pub fn register_all_shared(&mut self, handlers: Vec<Handler>,id: Id) {
+    pub fn register_all_shared(&mut self, handlers: Vec<Handler>, id: Id) {
         let mut context = context!();
         for handler in handlers.clone() {
             self.register_shared(handler, &mut context, &id);
@@ -455,8 +454,8 @@ impl HandlerMap {
     /// Process tokens with the first handler that can handle them
     pub fn process(
         &self,
-        tokens: &[Token]
-) -> Result<ProcessedResult, ConversionError> {
+        tokens: &[Token],
+    ) -> Result<ProcessedResult, ConversionError> {
         let id = Id::get("process");
         if tokens.is_empty() {
             return Ok(ProcessedResult::new(
@@ -518,7 +517,7 @@ impl HandlerMap {
                         to_id,
                     ) = &result
                     {
-report!(
+                        report!(
                             "handler_map",
                             "process",
                             Info,
@@ -560,7 +559,7 @@ report!(
                     // Step 6: Check if handler successfully processed tokens
                     if !matches!(result, HandlerResult::NotHandled(_, _, _)) {
                         let tokens_consumed = self.calculate_tokens_consumed(&result, tokens.len());
-report!(
+                        report!(
                             "handler_map",
                             "process",
                             Info,
@@ -579,7 +578,7 @@ report!(
                             result,
                         ));
                     } else {
-report!(
+                        report!(
                             "handler_map",
                             "process",
                             Info,
@@ -591,7 +590,7 @@ report!(
                 }
             }
         }
-        
+
         report!(
             "handler_map",
             "process",
@@ -600,7 +599,7 @@ report!(
             "process: no handler could process tokens",
             true
         );
-        
+
         Ok(ProcessedResult::new(
             0,
             0,
@@ -613,7 +612,7 @@ report!(
     pub fn process_all(
         &self,
         tokens: &[Token],
-) -> Result<ProcessedResults, ConversionError> {
+    ) -> Result<ProcessedResults, ConversionError> {
         let mut results = ProcessedResults::new();
         let mut current_pos = 0;
 

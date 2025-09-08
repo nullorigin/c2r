@@ -1,5 +1,4 @@
 use crate::config::{
-    Context,
     HandlerPhase::{Convert, Extract, Handle, Process, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},
@@ -352,7 +351,7 @@ pub enum TypedefKind {
 /// Converts a C typedef to Rust syntax
 fn convert_typedef_to_rust(
     name: &str,
-    source_type_tokens: &[Token]
+    source_type_tokens: &[Token],
 ) -> Result<String, ConversionError> {
     // Form the source type string
     let source_type = source_type_tokens

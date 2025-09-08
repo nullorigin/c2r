@@ -1,6 +1,5 @@
 use super::common::{not_handled, replace_with_range};
 use crate::config::{
-    Context,
     HandlerPhase::{Convert, Extract, Handle, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},
@@ -9,7 +8,7 @@ use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 use crate::extract::ExtractedGlobal;
 use crate::handler::HandlerResult;
-use crate::{config, context, convert_type, report, ConvertedElement, ConvertedGlobal, Id, Token};
+use crate::{context, convert_type, report, ConvertedElement, ConvertedGlobal, Id, Token};
 use std::collections::HashMap;
 
 /// Creates a global variable handler that can detect and convert C global variables
@@ -378,7 +377,7 @@ fn convert_global_to_rust(
     base_type: &str,
     name: &str,
     array_size: Option<&str>,
-    initializer: Option<&str>
+    initializer: Option<&str>,
 ) -> Result<String, ConversionError> {
     let mut rust_code = String::new();
 

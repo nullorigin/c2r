@@ -8,7 +8,6 @@
 
 use super::common::{find_matching_token, not_handled, replace_with_range};
 use crate::config::{
-    Context,
     HandlerPhase::{Extract, Handle, Process, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},
@@ -127,8 +126,8 @@ fn handle_struct(
 
     if tokens[0].to_string() != "struct"
         && !(tokens.len() >= 2
-            && tokens[0].to_string() == "typedef"
-            && tokens[1].to_string() == "struct")
+        && tokens[0].to_string() == "typedef"
+        && tokens[1].to_string() == "struct")
     {
         return not_handled();
     }

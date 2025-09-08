@@ -1,12 +1,7 @@
-use crate::{Context, Entry};
-use crate::context;
-use std::ops::Range;
-use crate::{Token};
+use crate::Token;
+use std::cell::LazyCell;
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::{Mutex, OnceLock, LazyLock};
-use std::cell::LazyCell;
-use std::time::{Duration, Instant};
 /// Represents different types of converted Rust elements
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConvertedElement {
@@ -259,7 +254,7 @@ pub fn is_c_keyword(token: Token) -> bool {
         "volatile".to_string(),
         "while".to_string(),
     ]
-    .contains(&token.to_string())
+        .contains(&token.to_string())
 }
 pub fn create_map() -> HashMap<String, String> {
     let mut hm1: HashMap<&str, &str> = HashMap::new();

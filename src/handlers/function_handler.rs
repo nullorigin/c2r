@@ -7,7 +7,6 @@
 )]
 
 use super::common::{self, find_matching_token, not_handled};
-use crate::config::Context;
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
 use crate::config::HandlerReport;
 use crate::config::ReportLevel;
@@ -693,20 +692,20 @@ fn convert_single_parameter(tokens: &[Token]) -> Option<String> {
     }
 
     let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-    
+
     // Find parameter name - it's the last identifier that's not a type keyword
     let mut param_name = String::new();
     let mut name_idx = tokens.len();
-    
+
     // Look for the parameter name by finding the last non-type token
     for i in (0..tokens.len()).rev() {
         let token_str = &token_strings[i];
-        
+
         // Skip array brackets and pointers at the end
         if token_str == "[" || token_str == "]" || token_str == "*" {
             continue;
         }
-        
+
         // Skip type keywords
         if matches!(token_str.as_str(), 
             "const" | "static" | "volatile" | "register" | "auto" | "extern" |
@@ -716,7 +715,7 @@ fn convert_single_parameter(tokens: &[Token]) -> Option<String> {
         ) {
             continue;
         }
-        
+
         // This should be the parameter name
         param_name = token_str.clone();
         name_idx = i;
@@ -738,7 +737,7 @@ fn convert_single_parameter(tokens: &[Token]) -> Option<String> {
 
     // Convert the type
     let rust_type = convert_c_type_to_rust(type_tokens);
-    
+
     report!(
         "function_handler",
         "convert_single_parameter",
@@ -767,12 +766,12 @@ fn convert_return_type(return_type_tokens: &[Token]) -> String {
         .collect();
 
     let rust_type = convert_c_type_to_rust(&filtered_tokens);
-    
+
     // Handle void special case for return types
     if rust_type == "c_void" {
         return "()".to_string();
     }
-    
+
     report!(
         "function_handler",
         "convert_return_type",
@@ -783,7 +782,7 @@ fn convert_return_type(return_type_tokens: &[Token]) -> String {
             rust_type),
         true
     );
-    
+
     rust_type
 }
 
@@ -795,40 +794,40 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
 
     let mut type_parts: Vec<String> = type_tokens.iter().map(|t| t.to_string()).collect();
     let original_type = type_parts.join(" ");
-    
+
     // Handle const modifier
     let is_const = type_parts.contains(&"const".to_string());
     type_parts.retain(|part| part != "const");
-    
+
     // Handle pointer
     let pointer_count = type_parts.iter().filter(|part| *part == "*").count();
     type_parts.retain(|part| part != "*");
-    
+
     // Handle static/extern/inline (these don't affect parameter types)
     type_parts.retain(|part| !matches!(part.as_str(), "static" | "extern" | "inline" | "__inline" | "__inline__"));
-    
+
     let base_type_str = type_parts.join(" ");
-    
+
     // Convert base type using USER's mapping rules
     let binding = {
-            // Try convert_type function for other types
-            if let Some(converted) = convert_type(&base_type_str) {
-                converted.to_string()
-            } else {
-                // Keep custom types as-is (like Point, MyInt, etc.)
-                base_type_str.to_string()
-            }
-        };
+        // Try convert_type function for other types
+        if let Some(converted) = convert_type(&base_type_str) {
+            converted.to_string()
+        } else {
+            // Keep custom types as-is (like Point, MyInt, etc.)
+            base_type_str.to_string()
+        }
+    };
     let rust_base_type = match base_type_str.as_str() {
         "void" => "()",
         "char" => "i8",
-        "short" => "i16", 
+        "short" => "i16",
         "int" => "i32",
         "long" => "i64",
         "long long" => "i64",
         "unsigned char" => "u8",
         "unsigned short" => "u16",
-        "unsigned int" => "u32", 
+        "unsigned int" => "u32",
         "unsigned long" => "u64",
         "unsigned long long" => "u64",
         "float" => "f32",
@@ -845,7 +844,7 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
         "uint64_t" => "u64",
         _ => binding.as_str()
     };
-    
+
     // Apply pointer and const modifiers
     let final_type = match pointer_count {
         0 => rust_base_type.to_string(),
@@ -855,7 +854,7 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
             } else {
                 format!("*mut {}", rust_base_type)
             }
-        },
+        }
         n => {
             let mut result = rust_base_type.to_string();
             for i in 0..n {
@@ -868,7 +867,7 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
             result
         }
     };
-    
+
     report!(
         "function_handler",
         "convert_c_type_to_rust",
@@ -877,7 +876,7 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
         format!("Type conversion: '{}' -> '{}'", original_type, final_type),
         true
     );
-    
+
     final_type.to_string()
 }
 

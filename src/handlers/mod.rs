@@ -1,4 +1,4 @@
-use crate::config::{Context, HandlerReport};
+use crate::config::HandlerReport;
 use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 pub(crate) use crate::handler::{Handler, HandlerResult};

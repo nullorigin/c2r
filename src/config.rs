@@ -7,21 +7,17 @@
 )]
 
 use crate::lock::Id;
-use crate::{info, Handler, HandlerMap, Tokenizer};
 use crate::pattern::Pattern;
 use crate::pattern::Patternizer;
+use crate::{info, Handler, HandlerMap, Tokenizer};
 use std::any::{Any, TypeId};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::fs::copy;
 use std::hash::{Hash, Hasher};
-use std::mem::transmute;
-use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::result;
 use std::sync::atomic::AtomicU8;
-use std::sync::{LazyLock, OnceLock, RwLock};
+use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Convenient macro for creating and adding handler reports to the centralized system
@@ -385,7 +381,7 @@ impl Context {
         let id = Id::get(name);
         println!("🔍 Getting entry '{}' with ID: {:?}", name, id);
         println!("🔍 Registry has {} entries", self.registry.entries.len());
-        
+
         if name.starts_with("pattern_") {
             println!("🔍 Registry contents for pattern lookup:");
             for (entry_id, entry) in self.registry.entries.iter() {
@@ -395,7 +391,7 @@ impl Context {
                 });
             }
         }
-        
+
         let result = self.registry.entries.get(&id);
         if result.is_some() {
             println!("✅ Found entry '{}' in registry", name);
@@ -411,7 +407,7 @@ impl Context {
         println!("🔧 Registry before insert has {} entries", self.registry.entries.len());
         self.registry.entries.insert(id.clone(), entry);
         println!("🔧 Registry after insert has {} entries", self.registry.entries.len());
-        
+
         // Verify the entry was actually stored
         if self.registry.entries.contains_key(&id) {
             println!("✅ Verified entry '{}' was stored successfully", name);
@@ -419,18 +415,18 @@ impl Context {
             println!("❌ Entry '{}' was NOT stored!", name);
         }
     }
-    pub fn id(&self,name: &str) -> Option<Id> {
+    pub fn id(&self, name: &str) -> Option<Id> {
         let mut entry = self.registry.entries.get(&Id::get(name));
         if let Some(Entry::Id(value)) = entry {
-            return Some(value.clone())
+            return Some(value.clone());
         } else {
             None
         }
     }
-    pub fn pattern(&self,name: &str) -> Option<Pattern> {
+    pub fn pattern(&self, name: &str) -> Option<Pattern> {
         let mut entry = self.registry.entries.get(&Id::get(name));
         if let Some(Entry::Patternizer(value)) = entry {
-            return Some(value.clone())
+            return Some(value.clone());
         } else {
             None
         }
@@ -536,7 +532,7 @@ impl Context {
             Some(Entry::Patternizer(pattern)) => {
                 println!("✅ Found pattern '{}' in registry with key '{}'", pattern.name, key);
                 Some(pattern)
-            },
+            }
             _ => {
                 println!("❌ Pattern '{}' not found in registry (key: '{}')", pattern_id, key);
                 None
@@ -953,7 +949,7 @@ impl Registry {
             Some(Entry::Patternizer(pattern)) => {
                 println!("✅ Found pattern '{}' in registry with key '{}'", pattern.name, key);
                 Some(pattern.clone())
-            },
+            }
             _ => {
                 println!("❌ Pattern '{}' not found in registry (key: '{}')", pattern_id, key);
                 None
@@ -1007,7 +1003,7 @@ impl Registry {
 
         let root_key = parts[0];
         let root_id = Id::get(root_key);
-        
+
         // Debug: Print registry state for pattern lookups
         if name.starts_with("pattern_") {
             println!("🔍 Registry lookup for '{}', root_id: {:?}", name, root_id);
@@ -1019,7 +1015,7 @@ impl Registry {
                 });
             }
         }
-        
+
         let entry = self.entries.get(&root_id)?;
 
         // If we're at depth 0 or have no more path parts, return the current entry
@@ -1050,7 +1046,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::List(entries) => {
                 if let Ok(index) = current_key.parse::<usize>() {
                     if index < entries.len() {
@@ -1066,7 +1062,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::Pair(pair) => {
                 match current_key {
                     "left" => {
@@ -1075,17 +1071,17 @@ impl Registry {
                         } else {
                             self.traverse_entry(&pair.0, next_path, remaining_depth - 1)
                         }
-                    },
+                    }
                     "right" => {
                         if next_path.is_empty() || remaining_depth == 0 {
                             Some(pair.1.clone())
                         } else {
                             self.traverse_entry(&pair.1, next_path, remaining_depth - 1)
                         }
-                    },
+                    }
                     _ => None
                 }
-            },
+            }
             Entry::IdMap(map) => {
                 let id = Id::get(current_key);
                 if let Some(nested_entry) = map.get(&id) {
@@ -1097,7 +1093,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::ValMap(map) => {
                 if let Ok(val) = current_key.parse::<u64>() {
                     if let Some(nested_entry) = map.get(&val) {
@@ -1112,7 +1108,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::BoolMap(map) => {
                 if let Ok(bool_val) = current_key.parse::<bool>() {
                     if let Some(nested_entry) = map.get(&bool_val) {
@@ -1127,7 +1123,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::PathMap(map) => {
                 let path_key = std::path::PathBuf::from(current_key);
                 if let Some(nested_entry) = map.get(&path_key) {
@@ -1139,7 +1135,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::HandlerMap(map) => {
                 if let Some(handler) = map.get(current_key) {
                     if next_path.is_empty() || remaining_depth == 0 {
@@ -1150,7 +1146,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::PairMap(map) => {
                 if let Some(pair) = map.get(current_key) {
                     if next_path.is_empty() || remaining_depth == 0 {
@@ -1170,7 +1166,7 @@ impl Registry {
                 } else {
                     None
                 }
-            },
+            }
             Entry::AnyMap(map) => {
                 // Find first matching key
                 for (k, v) in map {
@@ -1185,14 +1181,14 @@ impl Registry {
                     }
                 }
                 None
-            },
+            }
             Entry::Any(any) => {
                 if remaining_depth > 0 {
                     self.traverse_entry(any, path, remaining_depth - 1)
                 } else {
                     None
                 }
-            },
+            }
             // Leaf nodes - return None for further traversal
             Entry::Id(_) | Entry::Val(_) | Entry::Str(_) | Entry::Bool(_) |
             Entry::Func(_) | Entry::Path(_) | Entry::Handler(_) |
@@ -1396,9 +1392,7 @@ impl PartialEq for Entry {
 }
 impl Eq for Entry {}
 
-impl Registry {
-
-}
+impl Registry {}
 /// Sets the global verbosity level
 pub fn set_verbosity(level: u8) {
     VERBOSITY_LEVEL.store(level, std::sync::atomic::Ordering::SeqCst);

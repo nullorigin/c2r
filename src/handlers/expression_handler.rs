@@ -8,15 +8,15 @@
 
 use super::common::{not_handled, replace_with_range};
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
+use crate::config::HandlerReport;
 use crate::config::ReportLevel::{Info, Warning};
-use crate::config::{Context, HandlerReport};
 use crate::config::{HandlerPhase, ReportLevel};
 use crate::error::ConversionError;
 use crate::extract::{ExtractedElement, ExtractedExpression};
 use crate::handler::HandlerResult;
 use crate::lock::Id;
-use crate::{context, report};
 use crate::Token;
+use crate::{context, report};
 use crate::{ConvertedElement, ConvertedExpression};
 
 /// Creates an expression handler that can detect and convert C expressions
@@ -124,7 +124,7 @@ fn is_binary_expression(tokens: &[Token]) -> bool {
         for i in 0..tokens.len().saturating_sub(3) {
             let token1 = tokens[i].to_string();
             // Pattern: type_keyword ... binary_op (variable declaration)
-            if (token1 == "enum" || token1 == "struct" || token1 == "int" || token1 == "char" || 
+            if (token1 == "enum" || token1 == "struct" || token1 == "int" || token1 == "char" ||
                 token1 == "float" || token1 == "double" || token1 == "void" || token1 == "long" ||
                 token1 == "short" || token1 == "unsigned" || token1 == "const" || token1 == "static") {
                 // Skip patterns that look like variable declarations
@@ -140,12 +140,12 @@ fn is_binary_expression(tokens: &[Token]) -> bool {
             // Additional context check: ensure this looks like a standalone binary expression
             let prev_token = tokens[i - 1].to_string();
             let next_token = if i + 1 < tokens.len() { tokens[i + 1].to_string() } else { String::new() };
-            
+
             // Skip if previous token looks like a type keyword
-            if prev_token == "enum" || prev_token == "struct" || prev_token == "int" || 
-               prev_token == "char" || prev_token == "float" || prev_token == "double" ||
-               prev_token == "void" || prev_token == "long" || prev_token == "short" ||
-               prev_token == "unsigned" || prev_token == "const" || prev_token == "static" {
+            if prev_token == "enum" || prev_token == "struct" || prev_token == "int" ||
+                prev_token == "char" || prev_token == "float" || prev_token == "double" ||
+                prev_token == "void" || prev_token == "long" || prev_token == "short" ||
+                prev_token == "unsigned" || prev_token == "const" || prev_token == "static" {
                 continue;
             }
 
@@ -174,7 +174,7 @@ fn is_binary_expression(tokens: &[Token]) -> bool {
                     continue;
                 }
             }
-            
+
             return true;
         }
     }
@@ -252,9 +252,9 @@ fn is_assignment_expression(tokens: &[Token]) -> bool {
             let token1 = tokens[i].to_string();
             let token3 = tokens[i + 2].to_string();
             // Pattern: type_keyword ... = (variable declaration)
-            if (token1 == "enum" || token1 == "struct" || token1 == "int" || token1 == "char" || 
+            if (token1 == "enum" || token1 == "struct" || token1 == "int" || token1 == "char" ||
                 token1 == "float" || token1 == "double" || token1 == "void" || token1 == "long" ||
-                token1 == "short" || token1 == "unsigned" || token1 == "const" || token1 == "static") 
+                token1 == "short" || token1 == "unsigned" || token1 == "const" || token1 == "static")
                 && token3 == "=" {
                 return false;
             }
@@ -268,15 +268,15 @@ fn is_assignment_expression(tokens: &[Token]) -> bool {
             // Additional context check: ensure this looks like a standalone assignment
             // not part of a larger declaration or function signature
             let prev_token = tokens[i - 1].to_string();
-            
+
             // Skip if previous token looks like a type keyword
-            if prev_token == "enum" || prev_token == "struct" || prev_token == "int" || 
-               prev_token == "char" || prev_token == "float" || prev_token == "double" ||
-               prev_token == "void" || prev_token == "long" || prev_token == "short" ||
-               prev_token == "unsigned" || prev_token == "const" || prev_token == "static" {
+            if prev_token == "enum" || prev_token == "struct" || prev_token == "int" ||
+                prev_token == "char" || prev_token == "float" || prev_token == "double" ||
+                prev_token == "void" || prev_token == "long" || prev_token == "short" ||
+                prev_token == "unsigned" || prev_token == "const" || prev_token == "static" {
                 continue;
             }
-            
+
             return true;
         }
     }

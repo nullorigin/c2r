@@ -27,7 +27,6 @@ pub use crate::lock::*;
 pub use crate::token::Token;
 pub use crate::token::Tokenizer;
 pub use crate::token::*;
-pub use crate::pattern::*;
 // Import logging macros
 use std::env;
 use std::fs;
