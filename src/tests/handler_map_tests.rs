@@ -11,20 +11,17 @@ use crate::token::Token;
 // Helper functions that match HandlerMap function pointer signatures
 
 /// Simple processor function that accepts any non-empty tokens
-fn test_processor_accept_any(
-    tokens: &[Token]) -> Result<bool, ConversionError> {
+fn test_processor_accept_any(tokens: &[Token]) -> Result<bool, ConversionError> {
     Ok(!tokens.is_empty())
 }
 
 /// Processor function for failing handler tests - always returns false to avoid infinite loops
-fn test_processor_reject_all(
-    _tokens: &[Token]) -> Result<bool, ConversionError> {
+fn test_processor_reject_all(_tokens: &[Token]) -> Result<bool, ConversionError> {
     Ok(false)
 }
 
 /// Test handler that always handles tokens successfully
-fn test_success_handler(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_success_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     if !tokens.is_empty() {
         Ok(HandlerResult::Handled(
             Some(tokens.to_vec()),
@@ -42,20 +39,17 @@ fn test_success_handler(
 
 /// Test handler that always returns NotHandled
 
-fn test_fail_handler(
-    _tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_fail_handler(_tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     Ok(HandlerResult::NotHandled(None, 0..0, Id::get("failed")))
 }
 
 /// Test handler that returns an error
-fn test_error_handler(
-    _tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_error_handler(_tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     Err(ConversionError::new("Test error from handler"))
 }
 
 /// Test handler for first priority
-fn test_first_handler(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_first_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     if tokens.iter().any(|t| match t {
         Token::s(s) => s == "skip_first",
         _ => false,
@@ -75,8 +69,7 @@ fn test_first_handler(
 }
 
 /// Test handler for second priority
-fn test_second_handler(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_second_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     Ok(HandlerResult::Handled(
         Some(tokens.to_vec()),
         0..1,
@@ -85,8 +78,7 @@ fn test_second_handler(
 }
 
 /// Test handler that returns Processed result
-fn test_processor_handler(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_processor_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     Ok(HandlerResult::Processed(
         Some(tokens.to_vec()),
         0..1,
@@ -96,8 +88,7 @@ fn test_processor_handler(
 }
 
 /// Test handler that redirects to another handler
-fn test_redirect_source_handler(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_redirect_source_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     Ok(HandlerResult::Redirected(
         Some(tokens.to_vec()),
         0..1,
@@ -108,8 +99,7 @@ fn test_redirect_source_handler(
 }
 
 /// Test handler that processes redirected tokens
-fn test_redirect_target_handler(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_redirect_target_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     Ok(HandlerResult::Handled(
         Some(tokens.to_vec()),
         0..1,
@@ -120,8 +110,7 @@ fn test_redirect_target_handler(
 // Helper processor functions
 
 /// Test processor that accepts tokens containing "accept"
-fn test_processor_accept(
-    tokens: &[Token]) -> Result<bool, ConversionError> {
+fn test_processor_accept(tokens: &[Token]) -> Result<bool, ConversionError> {
     Ok(tokens.iter().any(|t| match t {
         Token::s(s) => s.contains("accept"),
         _ => false,
@@ -133,7 +122,8 @@ fn test_processor_accept(
 /// Test result callback that transforms Processed to Converted
 fn test_result_callback(
     _tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     match result {
         HandlerResult::Processed(tokens, _, _id, _) => {
             let converted = match tokens {

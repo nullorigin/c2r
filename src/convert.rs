@@ -254,7 +254,7 @@ pub fn is_c_keyword(token: Token) -> bool {
         "volatile".to_string(),
         "while".to_string(),
     ]
-        .contains(&token.to_string())
+    .contains(&token.to_string())
 }
 pub fn create_map() -> HashMap<String, String> {
     let mut hm1: HashMap<&str, &str> = HashMap::new();
@@ -382,5 +382,3 @@ pub fn create_map() -> HashMap<String, String> {
     // Implementation logic for type conversion
     hm2
 }
-
-

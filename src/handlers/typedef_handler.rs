@@ -1,18 +1,19 @@
-use crate::config::{
+use crate::ReportLevel;
+use crate::error::ConversionError;
+use crate::handler::HandlerResult;
+use crate::{ConvertedElement, ConvertedTypedef, Token, context, report};
+use crate::{
     HandlerPhase::{Convert, Extract, Handle, Process, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},
 };
-use crate::error::ConversionError;
-use crate::handler::HandlerResult;
-use crate::{context, report, ConvertedElement, ConvertedTypedef, Token};
 
 use super::common::{not_handled, replace_with_range};
+use crate::Handler;
 use crate::convert_type;
 use crate::extract::ExtractedElement;
 use crate::extract::ExtractedTypedef;
 use crate::lock::Id;
-use crate::Handler;
 
 /// Creates a typedef handler that can detect and convert C typedef declarations
 pub fn create_typedef_handler() -> Handler {
@@ -104,8 +105,7 @@ fn process_typedef(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Processes a typedef declaration
-fn handle_typedef(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_typedef(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_typedef");
     report!(
         "typedef_handler",
@@ -196,8 +196,7 @@ fn handle_typedef(
 }
 
 /// Extracts a typedef as an ExtractedElement
-pub fn extract_typedef(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_typedef(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     if tokens.is_empty() || tokens[0].to_string() != "typedef" {
         return Ok(None);
     }
@@ -385,7 +384,8 @@ fn convert_typedef_to_rust(
 /// Converts a C function pointer typedef to Rust
 fn convert_function_pointer_typedef(
     name: &str,
-    source_type_tokens: &[Token]) -> Result<String, ConversionError> {
+    source_type_tokens: &[Token],
+) -> Result<String, ConversionError> {
     // This is a simplified version - a real implementation would parse the function signature
 
     // Try to find the return type (everything before the first open parenthesis)
@@ -484,7 +484,8 @@ fn convert_function_pointer_typedef(
 /// Converts a C array typedef to Rust
 fn convert_array_typedef(
     name: &str,
-    source_type_tokens: &[Token]) -> Result<String, ConversionError> {
+    source_type_tokens: &[Token],
+) -> Result<String, ConversionError> {
     // Find the base type (everything before the first '[')
     let mut base_type_tokens = Vec::new();
     for token in source_type_tokens {
@@ -535,8 +536,7 @@ fn convert_array_typedef(
 }
 
 /// Convert callback: Does the actual conversion of C to Rust code
-fn convert_typedef(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_typedef(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     report!(
         "typedef_handler",
         "convert_typedef",
@@ -549,10 +549,8 @@ fn convert_typedef(
     if let Some(ExtractedElement::Typedef(extracted_typedef)) =
         extract_typedef(tokens).unwrap_or_default()
     {
-        let rust_code = convert_typedef_to_rust(
-            &extracted_typedef.name,
-            &extracted_typedef.original_type,
-        )?;
+        let rust_code =
+            convert_typedef_to_rust(&extracted_typedef.name, &extracted_typedef.original_type)?;
 
         let id = Id::get("convert_typedef");
         Ok(Some(ConvertedElement::Typedef(ConvertedTypedef {
@@ -570,7 +568,8 @@ fn convert_typedef(
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_typedef(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("redirect_typedef");
     report!(
         "typedef_handler",
@@ -688,7 +687,8 @@ fn redirect_typedef(
 /// Result callback: Postprocesses generated typedef code, adds documentation, and enhances formatting
 fn result_typedef(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_typedef");
 
     report!(
@@ -972,9 +972,7 @@ fn extract_typedef_info_from_tokens(tokens: &[Token]) -> TypedefInfo {
 }
 
 /// Generates documentation comments for the typedef conversion
-fn generate_typedef_documentation(
-    tokens: &[Token],
-    typedef_info: &TypedefInfo) -> String {
+fn generate_typedef_documentation(tokens: &[Token], typedef_info: &TypedefInfo) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -1149,23 +1147,22 @@ fn postprocess_typedef_code(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 /// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_typedef(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_typedef(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("typedef_handler");
 
     // Count reports by level
     let info_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, crate::config::ReportLevel::Info))
+        .filter(|r| matches!(r.level, ReportLevel::Info))
         .count();
     let error_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, crate::config::ReportLevel::Error))
+        .filter(|r| matches!(r.level, ReportLevel::Error))
         .count();
     let warning_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, crate::config::ReportLevel::Warning))
+        .filter(|r| matches!(r.level, ReportLevel::Warning))
         .count();
 
     // Create summary message
@@ -1183,7 +1180,7 @@ fn report_typedef(
         handler_id: Box::new(Id::get("typedef_handler")),
         handler_name: "typedef_handler".to_string(),
         function_name: "report_typedef".to_string(),
-        level: crate::config::ReportLevel::Info,
+        level: crate::ReportLevel::Info,
         phase: crate::config::HandlerPhase::Report,
         message: summary_message,
         success: error_count == 0, // Success if no errors

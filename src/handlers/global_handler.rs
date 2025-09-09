@@ -1,14 +1,14 @@
 use super::common::{not_handled, replace_with_range};
-use crate::config::{
-    HandlerPhase::{Convert, Extract, Handle, Report},
-    HandlerReport,
-    ReportLevel::{Error, Info, Warning},
-};
 use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 use crate::extract::ExtractedGlobal;
 use crate::handler::HandlerResult;
-use crate::{context, convert_type, report, ConvertedElement, ConvertedGlobal, Id, Token};
+use crate::{ConvertedElement, ConvertedGlobal, Id, Token, context, convert_type, report};
+use crate::{
+    HandlerPhase::{Convert, Extract, Handle, Report},
+    HandlerReport,
+    ReportLevel::{Error, Info, Warning},
+};
 use std::collections::HashMap;
 
 /// Creates a global variable handler that can detect and convert C global variables
@@ -32,8 +32,7 @@ pub fn create_global_handler() -> crate::handler::Handler {
 }
 
 /// Report callback: Collects and summarizes all global-related reports from the context
-fn report_global(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_global(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     // Get all reports for this handler
     let reports = context.get_reports_by_handler("global");
@@ -121,8 +120,7 @@ fn process_global(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Processes a global variable declaration
-fn handle_global(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_global(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_global");
     report!(
         "global_handler",
@@ -188,8 +186,7 @@ fn handle_global(
     }
 }
 /// Extracts a global variable as an ExtractedElement
-pub fn extract_global(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_global(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "global_handler",
         "extract_global",
@@ -480,8 +477,7 @@ fn default_value_for_type(rust_type: &str) -> &'static str {
 }
 
 /// Convert callback: Does the actual conversion of C to Rust code
-fn convert_global(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_global(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     let _id = Id::get("convert_global");
     report!(
         "global_handler",
@@ -521,7 +517,8 @@ fn convert_global(
 /// Result callback: Postprocesses generated global variable code, adds documentation, and enhances formatting
 fn result_global(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_global");
 
     report!(
@@ -852,9 +849,7 @@ fn extract_global_info_from_tokens(tokens: &[Token]) -> GlobalInfo {
 }
 
 /// Generates documentation comments for the global variable conversion
-fn generate_global_documentation(
-    tokens: &[Token],
-    global_info: &GlobalInfo) -> String {
+fn generate_global_documentation(tokens: &[Token], global_info: &GlobalInfo) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -1102,7 +1097,8 @@ fn postprocess_global_code(mut tokens: Vec<Token>) -> Vec<Token> {
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_global(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("redirect_global");
     report!(
         "global_handler",

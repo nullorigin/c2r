@@ -36,10 +36,10 @@ pub fn gen_name(basename: &str) -> String {
     name.clone()
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Id {
     num: u128,
-    pub(crate) name: String,
+    pub name: String,
     priority: u64,
     timestamp: u128,
 }
@@ -193,7 +193,7 @@ impl Id {
         } else {
             Id {
                 num,
-                name: name.to_string(),
+                name: name,
                 priority: 100,
                 timestamp: time(),
             }
@@ -250,6 +250,13 @@ impl Display for Id {
         write!(fmt, "{}", self.name())
     }
 }
+
+impl std::fmt::Debug for Id {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Clean debug output without escaped quotes
+        write!(f, "Id({})", self.name)
+    }
+}
 impl Key {
     pub fn new(name: &str, privkey: u128) -> Key {
         Key {
@@ -304,4 +311,3 @@ static mut MAPPED_IDS: LazyLock<HashMap<String, Id>> =
     LazyLock::new(|| HashMap::with_capacity(4096));
 static mut ENCRYPTED_IDS: LazyLock<Vec<Lock>> = LazyLock::new(|| Vec::with_capacity(4096));
 static mut OBSOLETE_IDS: LazyLock<Vec<Id>> = LazyLock::new(|| Vec::with_capacity(8192));
-

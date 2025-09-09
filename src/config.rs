@@ -6,137 +6,21 @@
     non_upper_case_globals
 )]
 
-use crate::lock::Id;
-use crate::pattern::Pattern;
-use crate::pattern::Patternizer;
-use crate::{info, Handler, HandlerMap, Tokenizer};
-use std::any::{Any, TypeId};
+use crate::Id;
+use crate::Pattern;
+use crate::Patternizer;
+use crate::Registry;
+use crate::ReportLevel;
+use crate::VERBOSITY_LEVEL;
+use crate::{Entry, Handler, HandlerMap, Tokenizer, info};
+use std::any::Any;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::{Hash, Hasher};
-use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU8;
+use std::path::PathBuf;
 use std::sync::RwLock;
 use std::time::{SystemTime, UNIX_EPOCH};
-
-/// Convenient macro for creating and adding handler reports to the centralized system
-///
-/// Usage examples:
-/// ```
-//// report!(context, "function_handler", Info, Processing, "Processing function declaration", true);
-//// report!(context, "array_handler", Warning, Conversion, "Array size inference failed", false,
-////        ("tokens_processed", 5), ("fallback_used", true));
-/// ```
-#[macro_export]
-macro_rules! report {
-    // Basic report with just message and success
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr) => {
-        {
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: 0,
-                tokens_consumed: 0,
-                phase: $phase,
-                success: $success,
-                metadata: std::collections::HashMap::new(),
-            };
-            $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
-        }
-    };
-
-    // Report with token counts
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
-     $tokens_processed:expr, $tokens_consumed:expr) => {
-        {
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: $tokens_processed,
-                tokens_consumed: $tokens_consumed,
-                phase: $phase,
-                success: $success,
-                metadata: std::collections::HashMap::new(),
-            };
-             $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
-        }
-    };
-
-    // Report with metadata key-value pairs
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
-     $(($key:expr, $value:expr)),+) => {
-        {
-            let mut metadata = std::collections::HashMap::new();
-            $(
-                metadata.insert($key.to_string(), $value.to_string());
-            )+
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: 0,
-                tokens_consumed: 0,
-                phase: $phase,
-                success: $success,
-                metadata,
-            };
-            $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
-        }
-    };
-
-    // Full report with token counts and metadata
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
-     $tokens_processed:expr, $tokens_consumed:expr, $(($key:expr, $value:expr)),+) => {
-        {
-            let mut metadata = std::collections::HashMap::new();
-            $(
-                metadata.insert($key.to_string(), $value.to_string());
-            )+
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: $tokens_processed,
-                tokens_consumed: $tokens_consumed,
-                phase: $phase,
-                success: $success,
-                metadata,
-            };
-             $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
-        }
-    };
-}
-
-// Global verbosity level
-// 0: No output
-// 1: Errors only
-// 2: Errors + Debug messages
-// 3: All messages (Errors + Debug + Info)
-pub static VERBOSITY_LEVEL: AtomicU8 = AtomicU8::new(1); // Default to errors only
-
-// Verbosity level constants
-pub const VERBOSITY_NONE: u8 = 0;
-pub const VERBOSITY_ERROR: u8 = 1;
-
-pub const VERBOSITY_WARN: u8 = 2;
-pub const VERBOSITY_DEBUG: u8 = 3;
-pub const VERBOSITY_INFO: u8 = 4;
-
 
 static GLOBAL_CONTEXT: RwLock<Option<Context>> = RwLock::new(None);
 pub struct Global;
@@ -233,14 +117,13 @@ impl Clone for Context {
 impl Eq for Context {}
 impl PartialEq for Context {
     fn eq(&self, other: &Self) -> bool {
-        self.registry == other.registry &&
-            self.handlers == other.handlers &&
-            self.tokenizer == other.tokenizer &&
-            self.patternizer == other.patternizer &&
-            self.pending_redirects == other.pending_redirects
+        self.registry == other.registry
+            && self.handlers == other.handlers
+            && self.tokenizer == other.tokenizer
+            && self.patternizer == other.patternizer
+            && self.pending_redirects == other.pending_redirects
     }
 }
-
 
 impl Context {
     /// Create a new configuration with the given name
@@ -379,16 +262,20 @@ impl Context {
 
     pub fn get_entry(&self, name: &str) -> Option<&Entry> {
         let id = Id::get(name);
-        println!("🔍 Getting entry '{}' with ID: {:?}", name, id);
+        println!("🔍 Getting entry '{}' with ID: {}", name, id);
         println!("🔍 Registry has {} entries", self.registry.entries.len());
 
         if name.starts_with("pattern_") {
             println!("🔍 Registry contents for pattern lookup:");
             for (entry_id, entry) in self.registry.entries.iter() {
-                println!("  - ID: {:?} -> {:?}", entry_id, match entry {
-                    Entry::Patternizer(p) => format!("Patternizer({})", p.name),
+                let clean_id = entry_id.name.trim_end_matches("\n");
+                let clean_entry = match entry {
+                    Entry::Patternizer(p) => {
+                        format!("Patternizer({})", p.name.replace("\n", " | "))
+                    }
                     _ => "Other".to_string(),
-                });
+                };
+                println!(" - ID: {} -> {}", clean_id, clean_entry);
             }
         }
 
@@ -403,10 +290,16 @@ impl Context {
     /// Set a value in the registry
     pub fn set_entry(&mut self, name: &str, entry: Entry) {
         let id = Id::get(name);
-        println!("🔧 Setting entry '{}' with ID: {:?}", name, id);
-        println!("🔧 Registry before insert has {} entries", self.registry.entries.len());
+        println!("🔧 Setting entry '{}' with ID: {}", name, id);
+        println!(
+            "🔧 Registry before insert has {} entries",
+            self.registry.entries.len()
+        );
         self.registry.entries.insert(id.clone(), entry);
-        println!("🔧 Registry after insert has {} entries", self.registry.entries.len());
+        println!(
+            "🔧 Registry after insert has {} entries",
+            self.registry.entries.len()
+        );
 
         // Verify the entry was actually stored
         if self.registry.entries.contains_key(&id) {
@@ -438,7 +331,11 @@ impl Context {
     }
 
     /// Match patterns for a handler using the patternizer (proper Context method)
-    pub fn match_pattern(&mut self, handler_type: &str, tokens: &[crate::Token]) -> crate::pattern::PatternResult {
+    pub fn match_pattern(
+        &mut self,
+        handler_type: &str,
+        tokens: &[crate::Token],
+    ) -> crate::pattern::PatternResult {
         self.patternizer.match_pattern(handler_type, tokens)
     }
 
@@ -462,7 +359,6 @@ impl Context {
     pub fn set_value<T: Any + Clone + Debug>(&mut self, name: &str, value: T) {
         self.registry.set_value(name, value);
     }
-
 
     /// Get the base directory
     pub fn get_base_dir(&self) -> Option<PathBuf> {
@@ -522,7 +418,10 @@ impl Context {
         let id = Id::get(&key);
         let pattern_name = pattern.name.clone(); // Clone name before move
         self.registry.insert(id, Entry::Patternizer(pattern));
-        println!("📋 Stored pattern '{}' in registry with key '{}'", pattern_name, key);
+        println!(
+            "📋 Stored pattern '{}' in registry with key '{}'",
+            pattern_name, key
+        );
     }
 
     /// Retrieve a Patternizer directly from the registry (bypasses dyn Any)
@@ -530,11 +429,17 @@ impl Context {
         let key = format!("pattern_{}", pattern_id);
         match self.get_entry(&key) {
             Some(Entry::Patternizer(pattern)) => {
-                println!("✅ Found pattern '{}' in registry with key '{}'", pattern.name, key);
+                println!(
+                    "✅ Found pattern '{}' in registry with key '{}'",
+                    pattern.name, key
+                );
                 Some(pattern)
             }
             _ => {
-                println!("❌ Pattern '{}' not found in registry (key: '{}')", pattern_id, key);
+                println!(
+                    "❌ Pattern '{}' not found in registry (key: '{}')",
+                    pattern_id, key
+                );
                 None
             }
         }
@@ -609,25 +514,21 @@ impl Context {
     pub fn display_reports_by_level(&self, level: &ReportLevel) {
         let reports = self.get_reports_by_level(level);
         if reports.is_empty() {
-            println!("No {:?} level reports available.", level);
+            println!("No {} level reports available.", level);
             return;
         }
 
-        println!("\n=== {:?} LEVEL REPORTS ===", level);
+        println!("\n=== {} LEVEL REPORTS ===", level);
         for report in reports.clone() {
             self.display_single_report(report);
         }
-        println!(
-            "=== END {:?} REPORTS ({} total) ===\n",
-            level,
-            reports.len()
-        );
+        println!("=== END {} REPORTS ({} total) ===\n", level, reports.len());
     }
 
     /// Display a single report in formatted way
     fn display_single_report(&self, report: &HandlerReport) {
         println!(
-            "[{}] {:?} | {} | {:?}",
+            "[{}] {} | {} | {}",
             report.timestamp(),
             report.level,
             report.handler_name,
@@ -641,7 +542,14 @@ impl Context {
             );
         }
         if !report.metadata.is_empty() {
-            println!("  Metadata: {:?}", report.metadata);
+            print!("  Metadata: ");
+            for (i, (key, value)) in report.metadata.iter().enumerate() {
+                if i > 0 {
+                    print!(", ");
+                }
+                print!("{}={}", key, value);
+            }
+            println!();
         }
         println!("  Success: {}\n", report.success);
     }
@@ -660,6 +568,59 @@ impl Context {
         for key in report_keys {
             self.registry.remove(&key);
         }
+    }
+
+    /// Display the entire registry in a database-like format for debugging
+    pub fn display_registry_database(&self) {
+        println!("🗃️  Context Registry Database View:");
+        self.registry.display_database_view();
+    }
+
+    /// Display registry statistics for debugging
+    pub fn display_registry_stats(&self) {
+        println!("📊 Context Registry Statistics:");
+        self.registry.display_stats();
+    }
+
+    /// Display all context information including registry and reports
+    pub fn display_full_context(&self) {
+        println!("🌐 FULL CONTEXT DISPLAY");
+        println!(
+            "═══════════════════════════════════════════════════════════════════════════════════════"
+        );
+
+        // Display basic context info
+        println!("📋 Context Overview:");
+        println!("  - Handlers: {} registered", self.handlers.handlers.len());
+        println!("  - Pending Redirects: {}", self.pending_redirects.len());
+        println!("  - Registry Entries: {}", self.registry.entries.len());
+        println!();
+
+        // Display registry database view
+        self.display_registry_database();
+        println!();
+
+        // Display registry statistics
+        self.display_registry_stats();
+        println!();
+
+        // Display reports summary
+        let reports = self.get_reports();
+        if !reports.is_empty() {
+            println!("📝 Reports Summary:");
+            let mut level_counts = std::collections::HashMap::new();
+            for report in &reports {
+                *level_counts.entry(&report.level).or_insert(0) += 1;
+            }
+            for (level, count) in level_counts {
+                println!("  - {}: {}", level, count);
+            }
+            println!();
+        }
+
+        println!(
+            "═══════════════════════════════════════════════════════════════════════════════════════"
+        );
     }
 }
 impl Default for Context {
@@ -726,14 +687,21 @@ impl Hash for HandlerReport {
         self.metadata.iter().for_each(|(k, v)| v.hash(state));
     }
 }
-/// Reporting levels for handler messages
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum ReportLevel {
-    Debug,
-    Info,
-    Warning,
-    Error,
+
+impl std::fmt::Display for HandlerReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[{}] {} | {} | {} | {}",
+            self.timestamp(),
+            self.level,
+            self.handler_name,
+            self.phase,
+            self.message
+        )
+    }
 }
+/// Reporting levels for handler messages
 
 /// Handler processing phases
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -745,6 +713,20 @@ pub enum HandlerPhase {
     Report,
     Result,
     Redirect,
+}
+
+impl std::fmt::Display for HandlerPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HandlerPhase::Process => write!(f, "PROCESS"),
+            HandlerPhase::Handle => write!(f, "HANDLE"),
+            HandlerPhase::Extract => write!(f, "EXTRACT"),
+            HandlerPhase::Convert => write!(f, "CONVERT"),
+            HandlerPhase::Report => write!(f, "REPORT"),
+            HandlerPhase::Result => write!(f, "RESULT"),
+            HandlerPhase::Redirect => write!(f, "REDIRECT"),
+        }
+    }
 }
 
 /// Pending redirect structure for deferred handler processing
@@ -781,6 +763,19 @@ impl HandlerRedirect {
     }
     pub fn timestamp(&self) -> u128 {
         self.timestamp.clone()
+    }
+}
+
+impl std::fmt::Display for HandlerRedirect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Redirect({} -> {} | {} | {} tokens)",
+            self.source_handler,
+            self.target_handler,
+            self.directive_type,
+            self.tokens.len()
+        )
     }
 }
 
@@ -834,565 +829,6 @@ impl HandlerReport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Registry {
-    pub id: Id,
-    pub entries: HashMap<Id, Entry>,
-    pub entry_count: u64,
-}
-impl Registry {
-    pub fn new(name: &str) -> Self {
-        Registry {
-            id: Id::get("registry"),
-            entries: HashMap::new(),
-            entry_count: 0,
-        }
-    }
-
-    /// Set an entry in the registry by name
-    pub fn set_entry(&mut self, name: &str, entry: Entry) {
-        let id = Id::get(name);
-        self.entries.insert(id, entry);
-        self.entry_count += 1;
-    }
-
-    /// Get a value from the registry with type casting
-    pub fn get_value<T: Any + Clone + Debug>(&self, name: &str) -> Box<T> {
-        let id = Id::get(name);
-        if let Some(entry) = self.entries.get(&id) {
-            let entry_type: Box<dyn Any> = match entry {
-                Entry::Id(id) => Box::new(id.clone()),
-                Entry::Val(val) => Box::new(val.clone()),
-                Entry::Str(string) => Box::new(string.clone()),
-                Entry::Bool(boolean) => Box::new(boolean.clone()),
-                Entry::Func(func) => Box::new(*func),
-                Entry::Path(path) => Box::new(path.clone()),
-                Entry::Handler(handler) => Box::new(handler.clone()),
-                Entry::HandlerReport(report) => Box::new(report.clone()),
-                Entry::Pair(pair) => Box::new(pair.clone()),
-                Entry::List(list) => Box::new(list.clone()),
-                Entry::Any(any) => any.clone(),
-                Entry::IdMap(map) => Box::new(map.clone()),
-                Entry::ValMap(map) => Box::new(map.clone()),
-                Entry::StrMap(map) => Box::new(map.clone()),
-                Entry::BoolMap(map) => Box::new(map.clone()),
-                Entry::FuncMap(map) => Box::new(map.clone()),
-                Entry::PathMap(map) => Box::new(map.clone()),
-                Entry::HandlerMap(map) => Box::new(map.clone()),
-                Entry::PairMap(map) => Box::new(map.clone()),
-                Entry::AnyMap(map) => Box::new(map.clone()),
-                Entry::Patternizer(pattern) => Box::new(pattern.clone()),
-            };
-            entry_type.downcast::<T>().unwrap_or_else(|_| panic!("Failed to downcast entry for name: {}", name))
-        } else {
-            panic!("Entry not found for name: {}", name)
-        }
-    }
-
-    /// Set a value in the registry with type conversion
-    pub fn set_value<T: Any + Clone + Debug>(&mut self, name: &str, value: T) {
-        let id = Id::get(name);
-        let entry = self.from_value(value);
-        self.entries.insert(id, entry);
-        self.entry_count += 1;
-    }
-
-    /// Convert a value to an Entry
-    fn from_value<T: Any + Clone + Debug>(&self, value: T) -> Entry {
-        let any_value: &dyn Any = &value;
-        let type_id = any_value.type_id();
-
-        if type_id == TypeId::of::<Id>() {
-            Entry::Id(any_value.downcast_ref::<Id>().unwrap().clone())
-        } else if type_id == TypeId::of::<u64>() {
-            Entry::Val(any_value.downcast_ref::<u64>().unwrap().clone())
-        } else if type_id == TypeId::of::<String>() {
-            Entry::Str(any_value.downcast_ref::<String>().unwrap().clone())
-        } else if type_id == TypeId::of::<bool>() {
-            Entry::Bool(any_value.downcast_ref::<bool>().unwrap().clone())
-        } else if type_id == TypeId::of::<PathBuf>() {
-            Entry::Path(any_value.downcast_ref::<PathBuf>().unwrap().clone())
-        } else if type_id == TypeId::of::<Handler>() {
-            Entry::Handler(any_value.downcast_ref::<Handler>().unwrap().clone())
-        } else if type_id == TypeId::of::<HandlerReport>() {
-            Entry::HandlerReport(any_value.downcast_ref::<HandlerReport>().unwrap().clone())
-        } else if type_id == TypeId::of::<Vec<String>>() {
-            let vec = any_value.downcast_ref::<Vec<String>>().unwrap();
-            let entries: Vec<Entry> = vec.iter().map(|s| Entry::Str(s.clone())).collect();
-            Entry::List(entries)
-        } else if type_id == TypeId::of::<HashMap<String, String>>() {
-            let map = any_value.downcast_ref::<HashMap<String, String>>().unwrap();
-            let entry_map: HashMap<String, Entry> = map.iter()
-                .map(|(k, v)| (k.clone(), Entry::Str(v.clone())))
-                .collect();
-            Entry::StrMap(entry_map)
-        } else if type_id == TypeId::of::<Pattern>() {
-            Entry::Patternizer(any_value.downcast_ref::<Pattern>().unwrap().clone())
-        } else {
-            panic!("Unsupported type for Entry conversion: {:?}", type_id)
-        }
-    }
-
-    /// Store a Patternizer directly in the registry (bypasses dyn Any)
-    pub fn store_pattern(&mut self, pattern_id: &str, pattern: Pattern) {
-        let key = format!("pattern_{}", pattern_id);
-        let id = Id::get(&key);
-        self.entries.insert(id, Entry::Patternizer(pattern.clone()));
-        self.entry_count += 1;
-        println!("📋 Stored pattern '{}' in registry with key '{}'", pattern.name, key);
-    }
-
-    /// Retrieve a Patternizer directly from the registry (bypasses dyn Any)
-    pub fn get_pattern(&self, pattern_id: &str) -> Option<Pattern> {
-        let key = format!("pattern_{}", pattern_id);
-        match self.entries.get(&Id::get(&key)) {
-            Some(Entry::Patternizer(pattern)) => {
-                println!("✅ Found pattern '{}' in registry with key '{}'", pattern.name, key);
-                Some(pattern.clone())
-            }
-            _ => {
-                println!("❌ Pattern '{}' not found in registry (key: '{}')", pattern_id, key);
-                None
-            }
-        }
-    }
-
-    /// Get all entries in the registry
-    pub fn get_all_entries(&self) -> &HashMap<Id, Entry> {
-        &self.entries
-    }
-    pub fn insert(&mut self, id: Id, entry: Entry) -> Option<Entry> {
-        let result = self.entries.insert(id, entry);
-        if result.is_none() {
-            self.entry_count += 1;
-        }
-        result
-    }
-
-    pub fn remove(&mut self, id: &Id) -> Option<Entry> {
-        let result = self.entries.remove(id);
-        if result.is_some() {
-            self.entry_count -= 1;
-        }
-        result
-    }
-
-    pub fn clear(&mut self) {
-        self.entries.clear();
-        self.entry_count = 0;
-    }
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty() && self.entry_count == 0 && self.id.is_empty()
-    }
-    pub fn len(&self) -> u64 {
-        self.entry_count
-    }
-
-    pub fn get_root_entry(&self, id: &Id) -> Option<&Entry> {
-        self.entries.get(id)
-    }
-
-    pub fn get_root_entry_mut(&mut self, id: &Id) -> Option<&mut Entry> {
-        self.entries.get_mut(id)
-    }
-    pub fn get_entry(&self, name: &str, depth: u64) -> Option<Entry> {
-        let parts: Vec<&str> = name.split('/').collect();
-        if parts.is_empty() {
-            return None;
-        }
-
-        let root_key = parts[0];
-        let root_id = Id::get(root_key);
-
-        // Debug: Print registry state for pattern lookups
-        if name.starts_with("pattern_") {
-            println!("🔍 Registry lookup for '{}', root_id: {:?}", name, root_id);
-            println!("🔍 Registry has {} entries:", self.entries.len());
-            for (id, entry) in self.entries.iter() {
-                println!("  - ID: {:?} -> {:?}", id, match entry {
-                    Entry::Patternizer(p) => format!("Patternizer({})", p.name),
-                    _ => "Other".to_string(),
-                });
-            }
-        }
-
-        let entry = self.entries.get(&root_id)?;
-
-        // If we're at depth 0 or have no more path parts, return the current entry
-        if depth == 0 || parts.len() == 1 {
-            return Some(entry.clone());
-        }
-
-        let remaining_path = &parts[1..];
-        self.traverse_entry(entry, remaining_path, depth - 1)
-    }
-
-    fn traverse_entry(&self, entry: &Entry, path: &[&str], remaining_depth: u64) -> Option<Entry> {
-        if path.is_empty() {
-            return Some(entry.clone());
-        }
-
-        let current_key = path[0];
-        let next_path = &path[1..];
-
-        match entry {
-            Entry::StrMap(map) => {
-                if let Some(nested_entry) = map.get(current_key) {
-                    if next_path.is_empty() || remaining_depth == 0 {
-                        Some(nested_entry.clone())
-                    } else {
-                        self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::List(entries) => {
-                if let Ok(index) = current_key.parse::<usize>() {
-                    if index < entries.len() {
-                        let nested_entry = &entries[index];
-                        if next_path.is_empty() || remaining_depth == 0 {
-                            Some(nested_entry.clone())
-                        } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::Pair(pair) => {
-                match current_key {
-                    "left" => {
-                        if next_path.is_empty() || remaining_depth == 0 {
-                            Some(pair.0.clone())
-                        } else {
-                            self.traverse_entry(&pair.0, next_path, remaining_depth - 1)
-                        }
-                    }
-                    "right" => {
-                        if next_path.is_empty() || remaining_depth == 0 {
-                            Some(pair.1.clone())
-                        } else {
-                            self.traverse_entry(&pair.1, next_path, remaining_depth - 1)
-                        }
-                    }
-                    _ => None
-                }
-            }
-            Entry::IdMap(map) => {
-                let id = Id::get(current_key);
-                if let Some(nested_entry) = map.get(&id) {
-                    if next_path.is_empty() || remaining_depth == 0 {
-                        Some(nested_entry.clone())
-                    } else {
-                        self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::ValMap(map) => {
-                if let Ok(val) = current_key.parse::<u64>() {
-                    if let Some(nested_entry) = map.get(&val) {
-                        if next_path.is_empty() || remaining_depth == 0 {
-                            Some(nested_entry.clone())
-                        } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::BoolMap(map) => {
-                if let Ok(bool_val) = current_key.parse::<bool>() {
-                    if let Some(nested_entry) = map.get(&bool_val) {
-                        if next_path.is_empty() || remaining_depth == 0 {
-                            Some(nested_entry.clone())
-                        } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::PathMap(map) => {
-                let path_key = std::path::PathBuf::from(current_key);
-                if let Some(nested_entry) = map.get(&path_key) {
-                    if next_path.is_empty() || remaining_depth == 0 {
-                        Some(nested_entry.clone())
-                    } else {
-                        self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::HandlerMap(map) => {
-                if let Some(handler) = map.get(current_key) {
-                    if next_path.is_empty() || remaining_depth == 0 {
-                        Some(Entry::Handler(handler.clone()))
-                    } else {
-                        None // Handlers are leaf nodes
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::PairMap(map) => {
-                if let Some(pair) = map.get(current_key) {
-                    if next_path.is_empty() || remaining_depth == 0 {
-                        Some(Entry::Pair(pair.clone()))
-                    } else {
-                        // Try to traverse into the pair
-                        if next_path.len() > 0 {
-                            match next_path[0] {
-                                "left" => self.traverse_entry(&pair.0, &next_path[1..], remaining_depth - 1),
-                                "right" => self.traverse_entry(&pair.1, &next_path[1..], remaining_depth - 1),
-                                _ => None
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            }
-            Entry::AnyMap(map) => {
-                // Find first matching key
-                for (k, v) in map {
-                    if let Entry::Str(s) = k {
-                        if s == current_key {
-                            if next_path.is_empty() || remaining_depth == 0 {
-                                return Some(v.clone());
-                            } else {
-                                return self.traverse_entry(v, next_path, remaining_depth - 1);
-                            }
-                        }
-                    }
-                }
-                None
-            }
-            Entry::Any(any) => {
-                if remaining_depth > 0 {
-                    self.traverse_entry(any, path, remaining_depth - 1)
-                } else {
-                    None
-                }
-            }
-            // Leaf nodes - return None for further traversal
-            Entry::Id(_) | Entry::Val(_) | Entry::Str(_) | Entry::Bool(_) |
-            Entry::Func(_) | Entry::Path(_) | Entry::Handler(_) |
-            Entry::HandlerReport(_) | Entry::Patternizer(_) | Entry::FuncMap(_) => None,
-        }
-    }
-    pub fn get_str_map(&self, name: &str, depth: u64) -> Option<HashMap<String, Entry>> {
-        match self.get_entry(name, depth)? {
-            Entry::StrMap(map) => Some(map),
-            _ => None,
-        }
-    }
-
-    pub fn get_str(&self, name: &str, depth: u64) -> Option<String> {
-        match self.get_entry(name, depth)? {
-            Entry::Str(s) => Some(s),
-            _ => None,
-        }
-    }
-
-    pub fn get_bool(&self, name: &str, depth: u64) -> Option<bool> {
-        match self.get_entry(name, depth)? {
-            Entry::Bool(b) => Some(b),
-            _ => None,
-        }
-    }
-
-    pub fn get_val(&self, name: &str, depth: u64) -> Option<u64> {
-        match self.get_entry(name, depth)? {
-            Entry::Val(v) => Some(v),
-            _ => None,
-        }
-    }
-
-    pub fn get_path(&self, name: &str, depth: u64) -> Option<PathBuf> {
-        match self.get_entry(name, depth)? {
-            Entry::Path(p) => Some(p),
-            _ => None,
-        }
-    }
-
-    pub fn get_list(&self, name: &str, depth: u64) -> Option<Vec<Entry>> {
-        match self.get_entry(name, depth)? {
-            Entry::List(list) => Some(list),
-            _ => None,
-        }
-    }
-}
-impl Default for Registry {
-    fn default() -> Self {
-        Registry::new("default")
-    }
-}
-#[derive(Debug, Clone)]
-pub enum Entry {
-    Id(Id),
-    Val(u64),
-    Str(String),
-    Bool(bool),
-    Func(fn(Entry) -> Entry),
-    Path(PathBuf),
-    Handler(Handler),
-    HandlerReport(HandlerReport),
-    Pair(Box<(Entry, Entry)>),
-    List(Vec<Entry>),
-    Any(Box<Entry>),
-    IdMap(HashMap<Id, Entry>),
-    ValMap(HashMap<u64, Entry>),
-    StrMap(HashMap<String, Entry>),
-    BoolMap(HashMap<bool, Entry>),
-    FuncMap(HashMap<fn(Entry) -> Entry, Entry>),
-    PathMap(HashMap<PathBuf, Entry>),
-    HandlerMap(HashMap<String, Handler>),
-    PairMap(HashMap<String, Box<(Entry, Entry)>>),
-    AnyMap(HashMap<Entry, Entry>),
-    Patternizer(Pattern),
-}
-impl Default for Entry {
-    fn default() -> Self {
-        Entry::Id(Id::default())
-    }
-}
-impl Hash for Entry {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        match self {
-            Entry::Id(id) => id.hash(state),
-            Entry::Val(v) => v.hash(state),
-            Entry::Str(s) => s.hash(state),
-            Entry::Bool(b) => b.hash(state),
-            Entry::Func(f) => f.hash(state),
-            Entry::Path(p) => p.hash(state),
-            Entry::Handler(h) => h.hash(state),
-            Entry::HandlerReport(h) => h.hash(state),
-            Entry::Pair(p) => p.hash(state),
-            Entry::List(l) => l.hash(state),
-            Entry::Any(a) => a.hash(state),
-            Entry::IdMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::ValMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::StrMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::BoolMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::FuncMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::PathMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::HandlerMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::PairMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::AnyMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::Patternizer(p) => p.id.hash(state),
-        }
-    }
-}
-impl Entry {
-    pub fn none() -> Self {
-        Entry::Id(Id::get("none"))
-    }
-    pub fn get(id: Id) -> Entry {
-        Entry::Id(id)
-    }
-    pub fn val(v: u64) -> Entry {
-        Entry::Val(v)
-    }
-    pub fn str(s: &str) -> Entry {
-        Entry::Str(s.to_string())
-    }
-
-    /// Create a HandlerReport entry
-    pub fn handler_report(report: HandlerReport) -> Entry {
-        Entry::HandlerReport(report)
-    }
-    pub fn bool(b: bool) -> Entry {
-        Entry::Bool(b)
-    }
-    pub fn func(f: fn(Entry) -> Entry) -> Entry {
-        Entry::Func(f)
-    }
-    pub fn path(p: &Path) -> Entry {
-        Entry::Path(p.to_path_buf())
-    }
-    pub fn handler(h: Handler) -> Entry {
-        Entry::Handler(h)
-    }
-    pub fn pair(left: Entry, right: Entry) -> Entry {
-        Entry::Pair(Box::new((left, right)))
-    }
-    pub fn list(entries: Vec<Entry>) -> Entry {
-        Entry::List(entries)
-    }
-    pub fn id_map(entries: HashMap<Id, Entry>) -> Entry {
-        Entry::IdMap(entries)
-    }
-    pub fn val_map(entries: HashMap<u64, Entry>) -> Entry {
-        Entry::ValMap(entries)
-    }
-    pub fn str_map(entries: HashMap<String, Entry>) -> Entry {
-        Entry::StrMap(entries)
-    }
-    pub fn bool_map(entries: HashMap<bool, Entry>) -> Entry {
-        Entry::BoolMap(entries)
-    }
-    pub fn func_map(entries: HashMap<fn(Entry) -> Entry, Entry>) -> Entry {
-        Entry::FuncMap(entries)
-    }
-    pub fn path_map(entries: HashMap<PathBuf, Entry>) -> Entry {
-        Entry::PathMap(entries)
-    }
-    pub fn handler_map(map: HashMap<String, Handler>) -> Entry {
-        Entry::HandlerMap(map)
-    }
-    pub fn pair_map(entries: HashMap<String, Box<(Entry, Entry)>>) -> Entry {
-        Entry::PairMap(entries)
-    }
-    pub fn pattern(entry: Pattern) -> Entry {
-        Entry::Patternizer(entry)
-    }
-    pub fn any(entry: Entry) -> Entry {
-        Entry::Any(Box::new(entry))
-    }
-}
-impl PartialEq for Entry {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Entry::Id(left), Entry::Id(right)) => left == right,
-            (Entry::Val(left), Entry::Val(right)) => left == right,
-            (Entry::Str(left), Entry::Str(right)) => left == right,
-            (Entry::Bool(left), Entry::Bool(right)) => left == right,
-            (Entry::Func(left), Entry::Func(right)) => std::ptr::fn_addr_eq(*left, *right),
-            (Entry::Path(left), Entry::Path(right)) => left == right,
-            (Entry::Handler(left), Entry::Handler(right)) => left == right,
-            (Entry::HandlerReport(left), Entry::HandlerReport(right)) => left == right,
-            (Entry::Pair(left), Entry::Pair(right)) => left == right,
-            (Entry::List(left), Entry::List(right)) => left == right,
-            (Entry::IdMap(left), Entry::IdMap(right)) => left == right,
-            (Entry::StrMap(left), Entry::StrMap(right)) => left == right,
-            (Entry::BoolMap(left), Entry::BoolMap(right)) => left == right,
-            (Entry::FuncMap(left), Entry::FuncMap(right)) => left == right,
-            (Entry::PathMap(left), Entry::PathMap(right)) => left == right,
-            (Entry::HandlerMap(left), Entry::HandlerMap(right)) => left == right,
-            (Entry::PairMap(left), Entry::PairMap(right)) => left == right,
-            (Entry::Any(left), Entry::Any(right)) => left == right,
-            _ => false,
-        }
-    }
-}
-impl Eq for Entry {}
-
-impl Registry {}
 /// Sets the global verbosity level
 pub fn set_verbosity(level: u8) {
     VERBOSITY_LEVEL.store(level, std::sync::atomic::Ordering::SeqCst);

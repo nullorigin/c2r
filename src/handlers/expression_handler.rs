@@ -7,17 +7,17 @@
 )]
 
 use super::common::{not_handled, replace_with_range};
+use crate::ReportLevel::{Info, Warning};
+use crate::Token;
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
 use crate::config::HandlerReport;
-use crate::config::ReportLevel::{Info, Warning};
-use crate::config::{HandlerPhase, ReportLevel};
 use crate::error::ConversionError;
 use crate::extract::{ExtractedElement, ExtractedExpression};
 use crate::handler::HandlerResult;
 use crate::lock::Id;
-use crate::Token;
-use crate::{context, report};
 use crate::{ConvertedElement, ConvertedExpression};
+use crate::{HandlerPhase, ReportLevel};
+use crate::{context, report};
 
 /// Creates an expression handler that can detect and convert C expressions
 pub fn create_expression_handler() -> crate::handler::Handler {
@@ -67,8 +67,7 @@ fn process_expression(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Process expressions
-fn handle_expression(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_expression(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_expression");
     report!(
         "expression_handler",
@@ -124,9 +123,19 @@ fn is_binary_expression(tokens: &[Token]) -> bool {
         for i in 0..tokens.len().saturating_sub(3) {
             let token1 = tokens[i].to_string();
             // Pattern: type_keyword ... binary_op (variable declaration)
-            if (token1 == "enum" || token1 == "struct" || token1 == "int" || token1 == "char" ||
-                token1 == "float" || token1 == "double" || token1 == "void" || token1 == "long" ||
-                token1 == "short" || token1 == "unsigned" || token1 == "const" || token1 == "static") {
+            if token1 == "enum"
+                || token1 == "struct"
+                || token1 == "int"
+                || token1 == "char"
+                || token1 == "float"
+                || token1 == "double"
+                || token1 == "void"
+                || token1 == "long"
+                || token1 == "short"
+                || token1 == "unsigned"
+                || token1 == "const"
+                || token1 == "static"
+            {
                 // Skip patterns that look like variable declarations
                 return false;
             }
@@ -139,13 +148,26 @@ fn is_binary_expression(tokens: &[Token]) -> bool {
         if is_binary_operator(&token_str) {
             // Additional context check: ensure this looks like a standalone binary expression
             let prev_token = tokens[i - 1].to_string();
-            let next_token = if i + 1 < tokens.len() { tokens[i + 1].to_string() } else { String::new() };
+            let next_token = if i + 1 < tokens.len() {
+                tokens[i + 1].to_string()
+            } else {
+                String::new()
+            };
 
             // Skip if previous token looks like a type keyword
-            if prev_token == "enum" || prev_token == "struct" || prev_token == "int" ||
-                prev_token == "char" || prev_token == "float" || prev_token == "double" ||
-                prev_token == "void" || prev_token == "long" || prev_token == "short" ||
-                prev_token == "unsigned" || prev_token == "const" || prev_token == "static" {
+            if prev_token == "enum"
+                || prev_token == "struct"
+                || prev_token == "int"
+                || prev_token == "char"
+                || prev_token == "float"
+                || prev_token == "double"
+                || prev_token == "void"
+                || prev_token == "long"
+                || prev_token == "short"
+                || prev_token == "unsigned"
+                || prev_token == "const"
+                || prev_token == "static"
+            {
                 continue;
             }
 
@@ -183,8 +205,7 @@ fn is_binary_expression(tokens: &[Token]) -> bool {
 }
 
 /// Process binary expressions
-fn handle_binary_expression(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_binary_expression(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "expression_handler",
         "handle_binary_expression",
@@ -252,10 +273,20 @@ fn is_assignment_expression(tokens: &[Token]) -> bool {
             let token1 = tokens[i].to_string();
             let token3 = tokens[i + 2].to_string();
             // Pattern: type_keyword ... = (variable declaration)
-            if (token1 == "enum" || token1 == "struct" || token1 == "int" || token1 == "char" ||
-                token1 == "float" || token1 == "double" || token1 == "void" || token1 == "long" ||
-                token1 == "short" || token1 == "unsigned" || token1 == "const" || token1 == "static")
-                && token3 == "=" {
+            if (token1 == "enum"
+                || token1 == "struct"
+                || token1 == "int"
+                || token1 == "char"
+                || token1 == "float"
+                || token1 == "double"
+                || token1 == "void"
+                || token1 == "long"
+                || token1 == "short"
+                || token1 == "unsigned"
+                || token1 == "const"
+                || token1 == "static")
+                && token3 == "="
+            {
                 return false;
             }
         }
@@ -270,10 +301,19 @@ fn is_assignment_expression(tokens: &[Token]) -> bool {
             let prev_token = tokens[i - 1].to_string();
 
             // Skip if previous token looks like a type keyword
-            if prev_token == "enum" || prev_token == "struct" || prev_token == "int" ||
-                prev_token == "char" || prev_token == "float" || prev_token == "double" ||
-                prev_token == "void" || prev_token == "long" || prev_token == "short" ||
-                prev_token == "unsigned" || prev_token == "const" || prev_token == "static" {
+            if prev_token == "enum"
+                || prev_token == "struct"
+                || prev_token == "int"
+                || prev_token == "char"
+                || prev_token == "float"
+                || prev_token == "double"
+                || prev_token == "void"
+                || prev_token == "long"
+                || prev_token == "short"
+                || prev_token == "unsigned"
+                || prev_token == "const"
+                || prev_token == "static"
+            {
                 continue;
             }
 
@@ -285,8 +325,7 @@ fn is_assignment_expression(tokens: &[Token]) -> bool {
 }
 
 /// Process assignment expressions
-fn handle_assignment_expression(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_assignment_expression(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "expression_handler",
         "handle_assignment_expression",
@@ -352,8 +391,7 @@ fn is_ternary_expression(tokens: &[Token]) -> bool {
 }
 
 /// Process ternary expressions
-fn handle_ternary_expression(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_ternary_expression(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "expression_handler",
         "handle_ternary_expression",
@@ -497,8 +535,7 @@ fn is_operator(token: &str) -> bool {
 }
 
 /// Extract expression information from tokens
-fn extract_expression(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_expression(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     let _id = Id::get("extract_expression");
     report!(
         "expression_handler",
@@ -531,7 +568,8 @@ fn extract_expression(
 
 /// Extract ternary expression information
 fn extract_ternary_expression(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+    tokens: &[Token],
+) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "expression_handler",
         "extract_ternary_expression",
@@ -580,7 +618,8 @@ fn extract_ternary_expression(
 
 /// Extract assignment expression information  
 fn extract_assignment_expression(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+    tokens: &[Token],
+) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "expression_handler",
         "extract_assignment_expression",
@@ -624,7 +663,8 @@ fn extract_assignment_expression(
 
 /// Extract binary expression information
 fn extract_binary_expression(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+    tokens: &[Token],
+) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "expression_handler",
         "extract_binary_expression",
@@ -667,8 +707,7 @@ fn extract_binary_expression(
 }
 
 /// Convert extracted expression to Rust code
-fn convert_expression(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_expression(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     let _id = Id::get("convert_expression");
     report!(
         "expression_handler",
@@ -731,7 +770,8 @@ fn convert_expression(
 /// Handle redirection for expression processing
 fn redirect_expression(
     _tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("redirect_expression");
     report!(
         "expression_handler",
@@ -752,7 +792,8 @@ fn redirect_expression(
 /// Result callback: Postprocesses generated expression code, adds documentation, and enhances formatting
 fn result_expression(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_expression");
 
     report!(
@@ -770,8 +811,7 @@ fn result_expression(
             let (expr_info, expr_type) = extract_expression_info_from_tokens(tokens);
 
             // Generate documentation about the expression conversion
-            let doc_comment =
-                generate_expression_documentation(tokens, &expr_info, &expr_type);
+            let doc_comment = generate_expression_documentation(tokens, &expr_info, &expr_type);
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
@@ -815,8 +855,7 @@ fn result_expression(
         HandlerResult::Converted(element, _, rust_code, id) => {
             // Handle converted elements - enhance the code and preserve the variant
             let (expr_info, expr_type) = extract_expression_info_from_tokens(tokens);
-            let doc_comment =
-                generate_expression_documentation(tokens, &expr_info, &expr_type);
+            let doc_comment = generate_expression_documentation(tokens, &expr_info, &expr_type);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -849,8 +888,7 @@ fn result_expression(
         HandlerResult::Extracted(element, _, rust_code, id) => {
             // Handle extracted elements - enhance the code and preserve the variant
             let (expr_info, expr_type) = extract_expression_info_from_tokens(tokens);
-            let doc_comment =
-                generate_expression_documentation(tokens, &expr_info, &expr_type);
+            let doc_comment = generate_expression_documentation(tokens, &expr_info, &expr_type);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -886,8 +924,7 @@ fn result_expression(
             let (expr_info, expr_type) = extract_expression_info_from_tokens(tokens);
 
             // Generate documentation about the expression conversion
-            let doc_comment =
-                generate_expression_documentation(tokens, &expr_info, &expr_type);
+            let doc_comment = generate_expression_documentation(tokens, &expr_info, &expr_type);
 
             // Postprocess the converted Rust code for better formatting
             let mut enhanced_result = postprocess_expression_code(converted_tokens);
@@ -1064,10 +1101,7 @@ fn extract_expression_info_from_tokens(tokens: &[Token]) -> (String, String) {
 }
 
 /// Generates documentation comments for the expression conversion
-fn generate_expression_documentation(
-    tokens: &[Token],
-    expr_info: &str,
-    expr_type: &str) -> String {
+fn generate_expression_documentation(tokens: &[Token], expr_info: &str, expr_type: &str) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -1203,8 +1237,7 @@ fn postprocess_expression_code(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 /// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_expression(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_expression(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("expression_handler");
 

@@ -1,14 +1,14 @@
 use super::common::{find_matching_token, not_handled, replace_with_range};
-use crate::config::{
-    HandlerPhase::{Convert, Handle, Process, Report},
-    HandlerReport,
-    ReportLevel::{Error, Info, Warning},
-};
 use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 use crate::extract::ExtractedMacro;
 use crate::handler::HandlerResult;
-use crate::{context, report, ConvertedElement, ConvertedMacro};
+use crate::{ConvertedElement, ConvertedMacro, context, report};
+use crate::{
+    HandlerPhase::{Convert, Handle, Process, Report},
+    HandlerReport,
+    ReportLevel::{Error, Info, Warning},
+};
 use crate::{Id, Token};
 use std::collections::HashMap;
 
@@ -33,8 +33,7 @@ pub fn create_macro_handler() -> crate::handler::Handler {
 }
 
 /// Report callback: Collects and summarizes all macro-related reports from the context
-fn report_macro(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_macro(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     // Get all reports for this handler
     let reports = context.get_reports_by_handler("macro");
@@ -82,8 +81,7 @@ fn report_macro(
 }
 
 /// Process callback: Initializes and confirms this handler can handle the tokens
-pub(crate) fn process_macro(
-    tokens: &[Token]) -> Result<bool, ConversionError> {
+pub(crate) fn process_macro(tokens: &[Token]) -> Result<bool, ConversionError> {
     // Validate input
     if tokens.is_empty() {
         return Ok(false);
@@ -191,8 +189,7 @@ pub(crate) fn process_macro(
 }
 
 /// Processes a preprocessor macro
-pub(crate) fn handle_macro(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+pub(crate) fn handle_macro(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "macro_handler",
         "handle_macro",
@@ -222,8 +219,7 @@ pub(crate) fn handle_macro(
 }
 
 /// Handles #define directive
-pub(crate) fn handle_define(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+pub(crate) fn handle_define(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_define");
     if tokens.len() < 3 {
         return not_handled();
@@ -269,8 +265,7 @@ pub(crate) fn handle_define(
 }
 
 /// Handles function-like macros (#define FOO(x, y) ...)
-fn handle_function_macro(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_function_macro(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let macro_name = tokens[2].to_string();
     report!(
         "macro_handler",
@@ -323,8 +318,7 @@ fn handle_function_macro(
 }
 
 /// Handles #ifdef and #ifndef directives
-pub(crate) fn handle_ifdef(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+pub(crate) fn handle_ifdef(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_ifdef");
     if tokens.len() < 3 {
         return not_handled();
@@ -467,8 +461,7 @@ fn handle_endif(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
 }
 
 /// Handles #undef directive
-pub(crate) fn handle_undef(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+pub(crate) fn handle_undef(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_ifdef");
     if tokens.len() < 3 {
         return not_handled();
@@ -494,8 +487,7 @@ pub(crate) fn handle_undef(
 }
 
 /// Handles #pragma directive
-fn handle_pragma(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_pragma(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_pragma");
     if tokens.len() < 3 {
         return not_handled();
@@ -533,8 +525,7 @@ fn handle_pragma(
 }
 
 /// Handles #error and #warning directives
-fn handle_message(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_message(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_message");
     if tokens.len() < 3 {
         return not_handled();
@@ -574,8 +565,7 @@ fn handle_message(
 }
 
 /// Extracts a macro as an ExtractedElement
-pub fn extract_macro(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_macro(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     if tokens.is_empty() || tokens[0].to_string() != "#" || tokens.len() < 2 {
         return Ok(None);
     }
@@ -649,9 +639,7 @@ pub fn extract_macro(
 }
 
 /// Converts a C object-like macro to Rust
-fn convert_object_macro_to_rust(
-    name: &str,
-    value: &str) -> Result<String, ConversionError> {
+fn convert_object_macro_to_rust(name: &str, value: &str) -> Result<String, ConversionError> {
     let mut rust_code = String::new();
 
     // Special cases for common macros
@@ -820,8 +808,7 @@ fn convert_condition_to_cfg_expr(condition: &str) -> String {
 }
 
 /// Convert callback: Does the actual conversion of C to Rust code
-fn convert_macro(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_macro(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     report!(
         "macro_handler",
         "convert_macro",
@@ -976,9 +963,7 @@ fn convert_macro(
 }
 
 /// Result callback: Postprocesses generated macro code, adds documentation, and enhances formatting
-fn result_macro(
-    tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+fn result_macro(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_macro");
 
     report!(
@@ -1296,9 +1281,7 @@ fn extract_macro_info_from_tokens(tokens: &[Token]) -> MacroInfo {
 }
 
 /// Generates documentation comments for the macro conversion
-fn generate_macro_documentation(
-    tokens: &[Token],
-    macro_info: &MacroInfo) -> String {
+fn generate_macro_documentation(tokens: &[Token], macro_info: &MacroInfo) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -1536,7 +1519,8 @@ fn postprocess_macro_code(mut tokens: Vec<Token>) -> Vec<Token> {
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_macro(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("redirect_macro");
     report!(
         "macro_handler",

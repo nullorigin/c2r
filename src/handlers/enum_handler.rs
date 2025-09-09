@@ -7,16 +7,16 @@
 )]
 
 use super::common::{find_matching_token, not_handled, replace_with_range};
-use crate::config::{
+use crate::error::ConversionError;
+use crate::handler::HandlerResult;
+use crate::lock::Id;
+use crate::{ConvertedElement, ConvertedEnum, ExtractedElement, ExtractedEnum, Token, report};
+use crate::{
     HandlerPhase::{Convert, Process, Report},
     HandlerReport,
     ReportLevel::{Info, Warning},
 };
-use crate::error::ConversionError;
-use crate::handler::HandlerResult;
-use crate::lock::Id;
-use crate::{context, ReportLevel};
-use crate::{report, ConvertedElement, ConvertedEnum, ExtractedElement, ExtractedEnum, Token};
+use crate::{ReportLevel, context};
 use ReportLevel::Error;
 
 /// Creates an enum handler that can detect and convert C enums
@@ -140,8 +140,7 @@ fn handle_enum(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
 }
 
 /// Extracts an enum as an ExtractedElement
-pub fn extract_enum(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_enum(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     let is_typedef = tokens[0].to_string() == "typedef";
     let enum_token_idx = if is_typedef { 1 } else { 0 };
 
@@ -272,8 +271,7 @@ pub fn extract_enum(
 }
 
 /// Convert callback: Does the actual conversion of C to Rust code
-fn convert_enum(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_enum(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     report!(
         "enum_handler",
         "convert_enum",
@@ -345,7 +343,8 @@ fn convert_enum(
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_enum(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("redirect_enum");
     report!(
         "enum_handler",
@@ -450,9 +449,7 @@ fn redirect_enum(
 }
 
 /// Result callback: Postprocesses generated enum code, adds documentation, and enhances formatting
-fn result_enum(
-    tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+fn result_enum(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_enum");
 
     report!(
@@ -743,9 +740,7 @@ fn extract_enum_info_from_tokens(tokens: &[Token]) -> EnumInfo {
 }
 
 /// Generates documentation comments for the enum conversion
-fn generate_enum_documentation(
-    tokens: &[Token],
-    enum_info: &EnumInfo) -> String {
+fn generate_enum_documentation(tokens: &[Token], enum_info: &EnumInfo) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header

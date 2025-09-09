@@ -2,8 +2,8 @@ use crate::config::HandlerReport;
 use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 pub(crate) use crate::handler::{Handler, HandlerResult};
-use crate::{context, Token};
 use crate::{ConvertedElement, Id};
+use crate::{Token, context};
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 
@@ -25,19 +25,11 @@ pub fn create_handler(
     priority: u64,
     process: Option<fn(&[Token]) -> Result<bool, ConversionError>>,
     handle: Option<fn(&[Token]) -> Result<HandlerResult, ConversionError>>,
-    extract: Option<
-        fn(&[Token]) -> Result<Option<ExtractedElement>, ConversionError>,
-    >,
-    convert: Option<
-        fn(&[Token]) -> Result<Option<ConvertedElement>, ConversionError>,
-    >,
+    extract: Option<fn(&[Token]) -> Result<Option<ExtractedElement>, ConversionError>>,
+    convert: Option<fn(&[Token]) -> Result<Option<ConvertedElement>, ConversionError>>,
     report: Option<fn(&[Token]) -> Result<HandlerReport, ConversionError>>,
-    result: Option<
-        fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>,
-    >,
-    redirect: Option<
-        fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>,
-    >,
+    result: Option<fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
+    redirect: Option<fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
 ) -> Handler {
     let mut handler = Handler::new(id.clone(), role.to_string(), priority.clone());
     handler.process = process;

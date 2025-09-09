@@ -1,15 +1,16 @@
 use super::common::{not_handled, replace_with_range};
+use crate::ReportLevel;
+use crate::ReportLevel::{Info, Warning};
+use crate::Token;
+use crate::config::HandlerPhase;
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
 use crate::config::HandlerReport;
-use crate::config::ReportLevel::{Info, Warning};
-use crate::config::{HandlerPhase, ReportLevel};
 use crate::error::ConversionError;
 use crate::extract::{ExtractedComment, ExtractedElement};
 use crate::handler::HandlerResult;
 use crate::lock::Id;
-use crate::Token;
-use crate::{context, report};
 use crate::{ConvertedComment, ConvertedElement};
+use crate::{context, report};
 
 /// Creates a comment handler that can detect and convert C comments
 pub fn create_comment_handler() -> crate::handler::Handler {
@@ -57,8 +58,7 @@ fn process_comment(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Handles the conversion of comments
-fn handle_comment(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_comment(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("handle_comment");
     report!(
         "comment_handler",
@@ -87,8 +87,7 @@ fn handle_comment(
 }
 
 /// Handles inline comments: //...
-fn handle_inline_comment(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_inline_comment(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     if tokens.len() < 2 {
         return not_handled();
     }
@@ -120,8 +119,7 @@ fn handle_inline_comment(
 }
 
 /// Handles block comments: /* ... */
-fn handle_block_comment(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_block_comment(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     if tokens.len() < 3 {
         return not_handled();
     }
@@ -254,8 +252,7 @@ mod tests {
 }
 
 /// Extract comment information from tokens
-fn extract_comment(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_comment(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     let _id = Id::get("extract_comment");
     report!(
         "comment_handler",
@@ -284,8 +281,7 @@ fn extract_comment(
 }
 
 /// Extract inline comment information
-fn extract_inline_comment(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_inline_comment(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     if tokens.len() < 2 {
         return Ok(None);
     }
@@ -320,8 +316,7 @@ fn extract_inline_comment(
 }
 
 /// Extract block comment information
-fn extract_block_comment(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_block_comment(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     if tokens.len() < 3 {
         return Ok(None);
     }
@@ -369,8 +364,7 @@ fn extract_block_comment(
 }
 
 /// Convert extracted comment to Rust code - callback version to avoid name conflict
-fn convert_comment_callback(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_comment_callback(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     let _id = Id::get("convert_comment_callback");
     report!(
         "comment_handler",
@@ -405,7 +399,8 @@ fn convert_comment_callback(
 /// Handle redirection for comment processing
 fn redirect_comment(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("redirect_comment");
     report!(
         "comment_handler",
@@ -424,7 +419,8 @@ fn redirect_comment(
 /// Result callback: Postprocesses generated comment code, adds documentation, and enhances formatting
 fn result_comment(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_comment");
 
     report!(
@@ -669,7 +665,8 @@ fn extract_comment_info_from_tokens(tokens: &[Token]) -> (String, String) {
 fn generate_comment_documentation(
     tokens: &[Token],
     comment_type: &str,
-    comment_content: &str) -> String {
+    comment_content: &str,
+) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -790,8 +787,7 @@ fn postprocess_comment_code(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 /// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_comment(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_comment(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("comment_handler");
 

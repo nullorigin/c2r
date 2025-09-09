@@ -7,18 +7,16 @@
 )]
 
 use super::common::{self, find_matching_token, not_handled};
+use crate::ReportLevel::{Error, Info};
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
 use crate::config::HandlerReport;
-use crate::config::ReportLevel;
-use crate::config::ReportLevel::{Error, Info};
 use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 use crate::extract::ExtractedFunction;
 use crate::handler::HandlerResult;
 use crate::lock::Id;
-use crate::{context, report};
-use crate::{convert_type, ConvertedElement, ConvertedFunction, Token};
-use ReportLevel::Warning;
+use crate::{ConvertedElement, ConvertedFunction, Token, convert_type};
+use crate::{ReportLevel, context, report};
 
 /// Creates a function handler that can detect and convert C function declarations and definitions
 pub fn create_function_handler() -> crate::handler::Handler {
@@ -79,8 +77,7 @@ fn process_function(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Processes a function declaration or definition
-fn handle_function(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_function(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_function");
     report!(
         "function_handler",
@@ -165,9 +162,7 @@ fn handle_function(
         let body_tokens = &tokens[body_start + 1..body_end - 1];
 
         // Convert to Rust
-        if let Some(ConvertedElement::Function(converted_function)) =
-            convert_function(tokens)?
-        {
+        if let Some(ConvertedElement::Function(converted_function)) = convert_function(tokens)? {
             // CRITICAL FIX: Use actual range from 0 to body_end to consume all processed tokens
             let token_range = 0..body_end;
             report!(
@@ -175,7 +170,10 @@ fn handle_function(
                 "handle_function",
                 Info,
                 Process,
-                format!("Function definition {} consumes tokens 0..{} ({} tokens)", func_name, body_end, body_end),
+                format!(
+                    "Function definition {} consumes tokens 0..{} ({} tokens)",
+                    func_name, body_end, body_end
+                ),
                 true
             );
             common::replace_with_range(
@@ -188,7 +186,10 @@ fn handle_function(
         }
     } else {
         // Function declaration only (no body) - find semicolon end
-        let semicolon_pos = match tokens[params_end..].iter().position(|t| t.to_string() == ";") {
+        let semicolon_pos = match tokens[params_end..]
+            .iter()
+            .position(|t| t.to_string() == ";")
+        {
             Some(pos) => params_end + pos + 1, // +1 to include the semicolon
             None => {
                 report!(
@@ -196,16 +197,17 @@ fn handle_function(
                     "handle_function",
                     Error,
                     Process,
-                    format!("Could not find semicolon for function declaration {}", func_name),
+                    format!(
+                        "Could not find semicolon for function declaration {}",
+                        func_name
+                    ),
                     false
                 );
                 return not_handled();
             }
         };
 
-        if let Some(ConvertedElement::Function(converted_function)) =
-            convert_function(tokens)?
-        {
+        if let Some(ConvertedElement::Function(converted_function)) = convert_function(tokens)? {
             // CRITICAL FIX: Use actual range from 0 to semicolon_pos to consume all processed tokens
             let token_range = 0..semicolon_pos;
             report!(
@@ -213,7 +215,10 @@ fn handle_function(
                 "handle_function",
                 Info,
                 Process,
-                format!("Function declaration {} consumes tokens 0..{} ({} tokens)", func_name, semicolon_pos, semicolon_pos),
+                format!(
+                    "Function declaration {} consumes tokens 0..{} ({} tokens)",
+                    func_name, semicolon_pos, semicolon_pos
+                ),
                 true
             );
             common::replace_with_range(
@@ -228,8 +233,7 @@ fn handle_function(
 }
 
 /// Extract callback: Finds and returns the locations this handler should handle
-pub fn extract_function(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_function(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "function_handler",
         "extract_function",
@@ -316,8 +320,7 @@ pub fn extract_function(
 }
 
 /// Convert callback: Does the actual conversion of C to Rust code
-fn convert_function(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_function(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     report!(
         "function_handler",
         "convert_function",
@@ -392,8 +395,7 @@ fn convert_function(
 }
 
 /// Report callback: Collects and returns reports from context for this handler
-fn report_function(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_function(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("function_handler");
 
@@ -409,7 +411,7 @@ fn report_function(
         .count();
     let warning_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, Warning))
+        .filter(|r| matches!(r.level, ReportLevel::Warning))
         .count();
 
     let summary_message = format!(
@@ -437,7 +439,8 @@ fn report_function(
 /// Result callback: Postprocesses generated code, adds documentation, and cleans up the result
 fn result_function(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     report!(
         "function_handler",
         "result_function",
@@ -707,11 +710,26 @@ fn convert_single_parameter(tokens: &[Token]) -> Option<String> {
         }
 
         // Skip type keywords
-        if matches!(token_str.as_str(), 
-            "const" | "static" | "volatile" | "register" | "auto" | "extern" |
-            "unsigned" | "signed" | "short" | "long" |
-            "int" | "char" | "float" | "double" | "void" |
-            "struct" | "union" | "enum"
+        if matches!(
+            token_str.as_str(),
+            "const"
+                | "static"
+                | "volatile"
+                | "register"
+                | "auto"
+                | "extern"
+                | "unsigned"
+                | "signed"
+                | "short"
+                | "long"
+                | "int"
+                | "char"
+                | "float"
+                | "double"
+                | "void"
+                | "struct"
+                | "union"
+                | "enum"
         ) {
             continue;
         }
@@ -743,9 +761,17 @@ fn convert_single_parameter(tokens: &[Token]) -> Option<String> {
         "convert_single_parameter",
         Info,
         Convert,
-        format!("Converted parameter: {} : {} -> {}: {}", 
-            tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" "),
-            param_name, param_name, rust_type),
+        format!(
+            "Converted parameter: {} : {} -> {}: {}",
+            tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            param_name,
+            param_name,
+            rust_type
+        ),
         true
     );
 
@@ -761,7 +787,12 @@ fn convert_return_type(return_type_tokens: &[Token]) -> String {
     // Filter out function modifiers that don't affect return type
     let filtered_tokens: Vec<Token> = return_type_tokens
         .iter()
-        .filter(|t| !matches!(t.to_string().as_str(), "static" | "inline" | "__inline" | "__inline__" | "extern"))
+        .filter(|t| {
+            !matches!(
+                t.to_string().as_str(),
+                "static" | "inline" | "__inline" | "__inline__" | "extern"
+            )
+        })
         .cloned()
         .collect();
 
@@ -777,9 +808,15 @@ fn convert_return_type(return_type_tokens: &[Token]) -> String {
         "convert_return_type",
         Info,
         Convert,
-        format!("Return type conversion: '{}' -> '{}'", 
-            return_type_tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(" "),
-            rust_type),
+        format!(
+            "Return type conversion: '{}' -> '{}'",
+            return_type_tokens
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            rust_type
+        ),
         true
     );
 
@@ -804,7 +841,12 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
     type_parts.retain(|part| part != "*");
 
     // Handle static/extern/inline (these don't affect parameter types)
-    type_parts.retain(|part| !matches!(part.as_str(), "static" | "extern" | "inline" | "__inline" | "__inline__"));
+    type_parts.retain(|part| {
+        !matches!(
+            part.as_str(),
+            "static" | "extern" | "inline" | "__inline" | "__inline__"
+        )
+    });
 
     let base_type_str = type_parts.join(" ");
 
@@ -842,7 +884,7 @@ fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
         "uint16_t" => "u16",
         "uint32_t" => "u32",
         "uint64_t" => "u64",
-        _ => binding.as_str()
+        _ => binding.as_str(),
     };
 
     // Apply pointer and const modifiers
@@ -891,9 +933,7 @@ fn extract_function_name(tokens: &[Token]) -> String {
 }
 
 /// Helper function to generate documentation for the function
-fn generate_function_documentation(
-    tokens: &[Token],
-    function_name: &str) -> String {
+fn generate_function_documentation(tokens: &[Token], function_name: &str) -> String {
     let mut doc = String::new();
 
     // Generate basic function documentation
@@ -988,7 +1028,8 @@ fn postprocess_function_code(mut tokens: Vec<Token>) -> Vec<Token> {
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_function(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     report!(
         "function_handler",
         "redirect_function",

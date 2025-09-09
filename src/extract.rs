@@ -7,7 +7,7 @@
 )]
 
 use crate::convert;
-use crate::{tok, Token};
+use crate::{Token, tok};
 use std::fmt;
 
 /// Represents different types of extractable C elements
@@ -558,15 +558,15 @@ fn token_to_rust(token: &Token) -> String {
         tok!(',') => ",".to_string(),
         tok!('*') => "*".to_string(),
         tok!(id)
-        if *id == "=="
-            || *id == "!="
-            || *id == "<="
-            || *id == ">="
-            || *id == "&&"
-            || *id == "||" =>
-            {
-                id.to_string()
-            }
+            if *id == "=="
+                || *id == "!="
+                || *id == "<="
+                || *id == ">="
+                || *id == "&&"
+                || *id == "||" =>
+        {
+            id.to_string()
+        }
         tok!(id) if *id == "++" => {
             // C's ++ operator has no direct equivalent in Rust
             // Best approximation is += 1

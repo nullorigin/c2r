@@ -6,16 +6,16 @@
     non_upper_case_globals
 )]
 
-use crate::config::{
+use crate::ConversionError;
+use crate::ExtractedElement;
+use crate::Id;
+use crate::ReportLevel::Info;
+use crate::{Context, ConvertedElement, Entry, HandlerRedirect, Token, context, report};
+use crate::{
     HandlerPhase::Process,
     HandlerReport,
     ReportLevel::{Error, Warning},
 };
-use crate::error::ConversionError;
-use crate::extract::ExtractedElement;
-use crate::lock::Id;
-use crate::ReportLevel::Info;
-use crate::{context, report, Context, ConvertedElement, Entry, HandlerRedirect, Token};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::Hash;
@@ -28,15 +28,11 @@ pub struct Handler {
     pub priority: u64,
     pub process: Option<fn(&[Token]) -> Result<bool, ConversionError>>,
     pub handle: Option<fn(&[Token]) -> Result<HandlerResult, ConversionError>>,
-    pub extract:
-        Option<fn(&[Token]) -> Result<Option<ExtractedElement>, ConversionError>>,
-    pub convert:
-        Option<fn(&[Token]) -> Result<Option<ConvertedElement>, ConversionError>>,
+    pub extract: Option<fn(&[Token]) -> Result<Option<ExtractedElement>, ConversionError>>,
+    pub convert: Option<fn(&[Token]) -> Result<Option<ConvertedElement>, ConversionError>>,
     pub report: Option<fn(&[Token]) -> Result<HandlerReport, ConversionError>>,
-    pub result:
-        Option<fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
-    pub redirect:
-        Option<fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
+    pub result: Option<fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
+    pub redirect: Option<fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
 }
 impl Handler {
     pub fn new(id: Id, role: String, priority: u64) -> Handler {
@@ -65,34 +61,19 @@ impl Handler {
     pub fn priority(&self) -> u64 {
         self.priority
     }
-    pub fn process(
-        &self,
-        tokens: &[Token],
-    ) -> Result<bool, ConversionError> {
+    pub fn process(&self, tokens: &[Token]) -> Result<bool, ConversionError> {
         self.process.unwrap()(tokens)
     }
-    pub fn handle(
-        &self,
-        tokens: &[Token],
-    ) -> Result<HandlerResult, ConversionError> {
+    pub fn handle(&self, tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
         self.handle.unwrap()(tokens)
     }
-    pub fn extract(
-        &self,
-        tokens: &[Token],
-    ) -> Result<Option<ExtractedElement>, ConversionError> {
+    pub fn extract(&self, tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
         self.extract.unwrap()(tokens)
     }
-    pub fn convert(
-        &self,
-        tokens: &[Token],
-    ) -> Result<Option<ConvertedElement>, ConversionError> {
+    pub fn convert(&self, tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
         self.convert.unwrap()(tokens)
     }
-    pub fn report(
-        &self,
-        tokens: &[Token],
-    ) -> Result<HandlerReport, ConversionError> {
+    pub fn report(&self, tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
         self.report.unwrap()(tokens)
     }
     pub fn result(
@@ -124,24 +105,12 @@ pub struct HandlerMap {
     pub last: Option<Id>,
     pub processors: HashMap<Id, fn(&[Token]) -> Result<bool, ConversionError>>,
     pub handlers: HashMap<Id, fn(&[Token]) -> Result<HandlerResult, ConversionError>>,
-    pub extractors: HashMap<
-        Id,
-        fn(&[Token]) -> Result<Option<ExtractedElement>, ConversionError>,
-    >,
-    pub convertors: HashMap<
-        Id,
-        fn(&[Token]) -> Result<Option<ConvertedElement>, ConversionError>,
-    >,
-    pub reporters:
-        HashMap<Id, fn(&[Token]) -> Result<HandlerReport, ConversionError>>,
-    pub results: HashMap<
-        Id,
-        fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>,
-    >,
-    pub redirectors: HashMap<
-        Id,
-        fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>,
-    >,
+    pub extractors: HashMap<Id, fn(&[Token]) -> Result<Option<ExtractedElement>, ConversionError>>,
+    pub convertors: HashMap<Id, fn(&[Token]) -> Result<Option<ConvertedElement>, ConversionError>>,
+    pub reporters: HashMap<Id, fn(&[Token]) -> Result<HandlerReport, ConversionError>>,
+    pub results: HashMap<Id, fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
+    pub redirectors:
+        HashMap<Id, fn(&[Token], HandlerResult) -> Result<HandlerResult, ConversionError>>,
 }
 /// Registry
 impl HandlerMap {
@@ -452,10 +421,7 @@ impl HandlerMap {
     }
 
     /// Process tokens with the first handler that can handle them
-    pub fn process(
-        &self,
-        tokens: &[Token],
-    ) -> Result<ProcessedResult, ConversionError> {
+    pub fn process(&self, tokens: &[Token]) -> Result<ProcessedResult, ConversionError> {
         let id = Id::get("process");
         if tokens.is_empty() {
             return Ok(ProcessedResult::new(
@@ -609,10 +575,7 @@ impl HandlerMap {
     }
 
     /// Process all tokens in a file by processing them in chunks and collecting results
-    pub fn process_all(
-        &self,
-        tokens: &[Token],
-    ) -> Result<ProcessedResults, ConversionError> {
+    pub fn process_all(&self, tokens: &[Token]) -> Result<ProcessedResults, ConversionError> {
         let mut results = ProcessedResults::new();
         let mut current_pos = 0;
 

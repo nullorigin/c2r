@@ -1,14 +1,14 @@
 use super::common::{find_matching_token, not_handled, replace_with_range};
+use crate::Id;
+use crate::ReportLevel::{Info, Warning};
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
 use crate::config::HandlerReport;
-use crate::config::ReportLevel::{Info, Warning};
-use crate::config::{HandlerPhase, ReportLevel};
 use crate::error::ConversionError;
 use crate::extract::{ExtractedControlFlow, ExtractedElement};
 use crate::handler::HandlerResult;
-use crate::Id;
-use crate::{context, report};
 use crate::{ConvertedControlFlow, ConvertedElement, Token};
+use crate::{HandlerPhase, ReportLevel};
+use crate::{context, report};
 
 /// Creates a control flow handler that can detect and convert C control flow statements
 /// This includes if-else statements, loops (for, while, do-while), and switch statements
@@ -113,8 +113,7 @@ fn process_control_flow(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Process control flow constructs
-fn handle_control_flow(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_control_flow(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("handle_control_flow");
     report!(
         "control_flow_handler",
@@ -138,8 +137,7 @@ fn handle_control_flow(
 }
 
 /// Process an if statement
-fn handle_if_statement(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_if_statement(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("handle_if_statement");
     report!(
         "control_flow_handler",
@@ -233,10 +231,7 @@ fn handle_if_statement(
                     }
 
                     let else_body_tokens = &tokens[else_body_start..else_body_end + 1];
-                    (
-                        convert_statement(else_body_tokens)?,
-                        else_body_end + 1,
-                    )
+                    (convert_statement(else_body_tokens)?, else_body_end + 1)
                 };
 
             rust_code = format!("{} else {}", rust_code, else_body);
@@ -257,8 +252,7 @@ fn handle_if_statement(
 }
 
 /// Process a for loop
-fn handle_for_loop(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_for_loop(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "control_flow_handler",
         "handle_for_loop",
@@ -305,9 +299,7 @@ fn handle_for_loop(
     let incr_tokens = &parts[2];
 
     // Try to convert to a range-based for loop if possible
-    if let Some(range_loop) =
-        convert_to_range_based_loop(init_tokens, cond_tokens, incr_tokens)?
-    {
+    if let Some(range_loop) = convert_to_range_based_loop(init_tokens, cond_tokens, incr_tokens)? {
         let id = Id::get("for_loop");
         // The existing parsing logic below will calculate body_end for the fallback
         // We need to calculate it here too for consistency
@@ -349,7 +341,8 @@ fn handle_for_loop(
 
     // Find and add the loop body
     let body_start = header_end;
-    let (body_str, body_end) = if body_start < tokens.len() && tokens[body_start].to_string() == "{" {
+    let (body_str, body_end) = if body_start < tokens.len() && tokens[body_start].to_string() == "{"
+    {
         // Block body
         let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
             Some(pos) => body_start + pos + 1,
@@ -444,8 +437,7 @@ fn convert_to_range_based_loop(
 }
 
 /// Process a while loop
-fn handle_while_loop(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_while_loop(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "control_flow_handler",
         "handle_while_loop",
@@ -485,7 +477,8 @@ fn handle_while_loop(
 
     // Find and add the loop body
     let body_start = condition_end + 1;
-    let (body_str, body_end) = if body_start < tokens.len() && tokens[body_start].to_string() == "{" {
+    let (body_str, body_end) = if body_start < tokens.len() && tokens[body_start].to_string() == "{"
+    {
         // Block body
         let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
             Some(pos) => body_start + pos + 1,
@@ -515,8 +508,7 @@ fn handle_while_loop(
 }
 
 /// Process a do-while loop
-fn handle_do_while_loop(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_do_while_loop(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "control_flow_handler",
         "handle_do_while_loop",
@@ -598,8 +590,7 @@ fn handle_do_while_loop(
 }
 
 /// Process a switch statement
-fn handle_switch_statement(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_switch_statement(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "control_flow_handler",
         "handle_switch_statement",
@@ -806,8 +797,7 @@ fn is_operator(token: &str) -> bool {
 }
 
 /// Extract callback: Extracts control flow metadata
-fn extract_control_flow(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_control_flow(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     let _id = Id::get("extract_control_flow");
     report!(
         "control_flow_handler",
@@ -943,8 +933,7 @@ fn extract_body_tokens(
 }
 
 /// Convert callback: Does the actual conversion of C to Rust code
-fn convert_control_flow(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_control_flow(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     let id = Id::get("convert_control_flow");
     report!(
         "control_flow_handler",
@@ -981,9 +970,7 @@ fn convert_control_flow(
 }
 
 /// Convert if statement to Rust
-fn convert_if_to_rust(
-    extracted: &ExtractedControlFlow
-) -> Result<String, ConversionError> {
+fn convert_if_to_rust(extracted: &ExtractedControlFlow) -> Result<String, ConversionError> {
     let condition = tokens_to_string(&extracted.condition)?;
     let body = tokens_to_string(&extracted.body)?;
 
@@ -991,9 +978,7 @@ fn convert_if_to_rust(
 }
 
 /// Convert for loop to Rust
-fn convert_for_to_rust(
-    extracted: &ExtractedControlFlow
-) -> Result<String, ConversionError> {
+fn convert_for_to_rust(extracted: &ExtractedControlFlow) -> Result<String, ConversionError> {
     // Try to convert to range-based for loop, fallback to while loop
     let condition_str = tokens_to_string(&extracted.condition)?;
     let body = tokens_to_string(&extracted.body)?;
@@ -1006,9 +991,7 @@ fn convert_for_to_rust(
 }
 
 /// Convert while loop to Rust
-fn convert_while_to_rust(
-    extracted: &ExtractedControlFlow
-) -> Result<String, ConversionError> {
+fn convert_while_to_rust(extracted: &ExtractedControlFlow) -> Result<String, ConversionError> {
     let condition = tokens_to_string(&extracted.condition)?;
     let body = tokens_to_string(&extracted.body)?;
 
@@ -1021,9 +1004,7 @@ fn convert_while_to_rust(
 }
 
 /// Convert do-while loop to Rust
-fn convert_do_while_to_rust(
-    extracted: &ExtractedControlFlow
-) -> Result<String, ConversionError> {
+fn convert_do_while_to_rust(extracted: &ExtractedControlFlow) -> Result<String, ConversionError> {
     let condition = tokens_to_string(&extracted.condition)?;
     let body = tokens_to_string(&extracted.body)?;
 
@@ -1034,9 +1015,7 @@ fn convert_do_while_to_rust(
 }
 
 /// Convert switch statement to Rust match
-fn convert_switch_to_rust(
-    extracted: &ExtractedControlFlow
-) -> Result<String, ConversionError> {
+fn convert_switch_to_rust(extracted: &ExtractedControlFlow) -> Result<String, ConversionError> {
     let condition = tokens_to_string(&extracted.condition)?;
     let body = tokens_to_string(&extracted.body)?;
 
@@ -1050,7 +1029,8 @@ fn convert_switch_to_rust(
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_control_flow(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("redirect_control_flow");
     report!(
         "control_flow_handler",
@@ -1096,11 +1076,11 @@ fn redirect_control_flow(
     // Check if this contains variable declarations
     if tokens.iter().any(|t| t.to_string() == "=")
         && !tokens.iter().any(|t| {
-        matches!(
+            matches!(
                 t.to_string().as_str(),
                 "if" | "while" | "for" | "switch" | "do"
             )
-    })
+        })
     {
         report!(
             "control_flow_handler",
@@ -1126,7 +1106,8 @@ fn redirect_control_flow(
 /// Result callback: Postprocesses generated control flow code, adds documentation, and enhances formatting
 fn result_control_flow(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_control_flow");
 
     report!(
@@ -1144,8 +1125,7 @@ fn result_control_flow(
             let control_flow_info = extract_control_flow_info_from_tokens(tokens);
 
             // Generate documentation about the control flow conversion
-            let doc_comment =
-                generate_control_flow_documentation(tokens, &control_flow_info);
+            let doc_comment = generate_control_flow_documentation(tokens, &control_flow_info);
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
@@ -1189,8 +1169,7 @@ fn result_control_flow(
         HandlerResult::Converted(element, _, rust_code, id) => {
             // Handle converted elements - enhance the code and preserve the variant
             let control_flow_info = extract_control_flow_info_from_tokens(tokens);
-            let doc_comment =
-                generate_control_flow_documentation(tokens, &control_flow_info);
+            let doc_comment = generate_control_flow_documentation(tokens, &control_flow_info);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -1223,8 +1202,7 @@ fn result_control_flow(
         HandlerResult::Extracted(element, _, rust_code, id) => {
             // Handle extracted elements - enhance the code and preserve the variant
             let control_flow_info = extract_control_flow_info_from_tokens(tokens);
-            let doc_comment =
-                generate_control_flow_documentation(tokens, &control_flow_info);
+            let doc_comment = generate_control_flow_documentation(tokens, &control_flow_info);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -1260,8 +1238,7 @@ fn result_control_flow(
             let control_flow_info = extract_control_flow_info_from_tokens(tokens);
 
             // Generate documentation about the control flow conversion
-            let doc_comment =
-                generate_control_flow_documentation(tokens, &control_flow_info);
+            let doc_comment = generate_control_flow_documentation(tokens, &control_flow_info);
 
             // Postprocess the converted Rust code for better formatting
             let mut enhanced_result = postprocess_control_flow_code(converted_tokens);
@@ -1404,7 +1381,7 @@ fn extract_control_flow_info_from_tokens(tokens: &[Token]) -> ControlFlowInfo {
             } else {
                 "moderate (C-style)"
             }
-                .to_string();
+            .to_string();
         }
         "while" => {
             info.description = "conditional loop".to_string();
@@ -1459,9 +1436,7 @@ fn extract_control_flow_info_from_tokens(tokens: &[Token]) -> ControlFlowInfo {
 }
 
 /// Generates documentation comments for the control flow conversion
-fn generate_control_flow_documentation(
-    tokens: &[Token],
-    flow_info: &ControlFlowInfo) -> String {
+fn generate_control_flow_documentation(tokens: &[Token], flow_info: &ControlFlowInfo) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -1680,8 +1655,7 @@ fn postprocess_control_flow_code(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 /// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_control_flow(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_control_flow(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("control_flow_handler");
 

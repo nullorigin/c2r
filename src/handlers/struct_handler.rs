@@ -7,15 +7,19 @@
 )]
 
 use super::common::{find_matching_token, not_handled, replace_with_range};
-use crate::config::{
+use crate::error::ConversionError;
+use crate::handler::HandlerResult;
+use crate::lock::Id;
+use crate::{
+    ConvertedElement, ConvertedStruct, ExtractedElement, ExtractedStruct, Token, context,
+    convert_type_tokens, report,
+};
+use crate::{HandlerPhase, ReportLevel};
+use crate::{
     HandlerPhase::{Extract, Handle, Process, Report},
     HandlerReport,
     ReportLevel::{Error, Info, Warning},
 };
-use crate::error::ConversionError;
-use crate::handler::HandlerResult;
-use crate::lock::Id;
-use crate::{context, convert_type_tokens, report, ConvertedElement, ConvertedStruct, ExtractedElement, ExtractedStruct, Token};
 use std::str::FromStr;
 
 /// Creates a struct handler that can detect and convert C structs
@@ -112,8 +116,7 @@ fn process_struct(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Processes a struct declaration
-fn handle_struct(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_struct(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("handle_struct");
     report!(
         "struct_handler",
@@ -126,8 +129,8 @@ fn handle_struct(
 
     if tokens[0].to_string() != "struct"
         && !(tokens.len() >= 2
-        && tokens[0].to_string() == "typedef"
-        && tokens[1].to_string() == "struct")
+            && tokens[0].to_string() == "typedef"
+            && tokens[1].to_string() == "struct")
     {
         return not_handled();
     }
@@ -243,8 +246,7 @@ fn handle_struct(
 }
 
 /// Extracts a struct as an ExtractedElement
-pub fn extract_struct(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_struct(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     let is_typedef = tokens[0].to_string() == "typedef";
     let struct_token_idx = if is_typedef { 1 } else { 0 };
 
@@ -552,8 +554,7 @@ fn parse_bit_field(tokens: &[Token]) -> Option<(String, Vec<Token>)> {
 }
 
 /// Legacy conversion function
-fn convert_struct(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_struct(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     // Get the TokenConverter from the Context
     let id = Id::get("convert_struct");
     if let ExtractedElement::Struct(element) = extract_struct(tokens)?.unwrap() {
@@ -624,7 +625,8 @@ fn convert_struct(
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_struct(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let id = Id::get("redirect_struct");
     report!(
         "struct_handler",
@@ -753,7 +755,8 @@ fn redirect_struct(
 /// Result callback: Postprocesses generated struct code, adds documentation, and enhances formatting
 fn result_struct(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_struct");
 
     report!(
@@ -771,8 +774,7 @@ fn result_struct(
             let (struct_info, field_count) = extract_struct_info_from_tokens(tokens);
 
             // Generate documentation about the struct conversion
-            let doc_comment =
-                generate_struct_documentation(tokens, &struct_info, field_count);
+            let doc_comment = generate_struct_documentation(tokens, &struct_info, field_count);
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
@@ -816,8 +818,7 @@ fn result_struct(
         HandlerResult::Converted(element, _, rust_code, id) => {
             // Handle converted elements - enhance the code and preserve the variant
             let (struct_info, field_count) = extract_struct_info_from_tokens(tokens);
-            let doc_comment =
-                generate_struct_documentation(tokens, &struct_info, field_count);
+            let doc_comment = generate_struct_documentation(tokens, &struct_info, field_count);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -850,8 +851,7 @@ fn result_struct(
         HandlerResult::Extracted(element, _, rust_code, id) => {
             // Handle extracted elements - enhance the code and preserve the variant
             let (struct_info, field_count) = extract_struct_info_from_tokens(tokens);
-            let doc_comment =
-                generate_struct_documentation(tokens, &struct_info, field_count);
+            let doc_comment = generate_struct_documentation(tokens, &struct_info, field_count);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -887,8 +887,7 @@ fn result_struct(
             let (struct_info, field_count) = extract_struct_info_from_tokens(tokens);
 
             // Generate documentation about the struct conversion
-            let doc_comment =
-                generate_struct_documentation(tokens, &struct_info, field_count);
+            let doc_comment = generate_struct_documentation(tokens, &struct_info, field_count);
 
             // Postprocess the converted Rust code for better formatting
             let mut enhanced_result = postprocess_struct_code(converted_tokens);
@@ -999,7 +998,8 @@ fn extract_struct_info_from_tokens(tokens: &[Token]) -> (String, usize) {
 fn generate_struct_documentation(
     tokens: &[Token],
     struct_info: &str,
-    field_count: usize) -> String {
+    field_count: usize,
+) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -1109,23 +1109,22 @@ fn postprocess_struct_code(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 /// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_struct(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_struct(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("struct_handler");
 
     // Count reports by level
     let info_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, crate::config::ReportLevel::Info))
+        .filter(|r| matches!(r.level, ReportLevel::Info))
         .count();
     let error_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, crate::config::ReportLevel::Error))
+        .filter(|r| matches!(r.level, ReportLevel::Error))
         .count();
     let warning_count = handler_reports
         .iter()
-        .filter(|r| matches!(r.level, crate::config::ReportLevel::Warning))
+        .filter(|r| matches!(r.level, ReportLevel::Warning))
         .count();
 
     // Create summary message
@@ -1143,8 +1142,8 @@ fn report_struct(
         handler_id: Box::new(Id::get("struct_handler")),
         handler_name: "struct_handler".to_string(),
         function_name: "report_struct".to_string(),
-        level: crate::config::ReportLevel::Info,
-        phase: crate::config::HandlerPhase::Report,
+        level: ReportLevel::Info,
+        phase: HandlerPhase::Report,
         message: summary_message,
         success: error_count == 0, // Success if no errors
         tokens_processed: handler_reports.iter().map(|r| r.tokens_processed).sum(),

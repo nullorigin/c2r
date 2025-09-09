@@ -7,19 +7,19 @@
 )]
 
 use super::common::{find_matching_token, not_handled, replace_with_range};
+use crate::Id;
+use crate::ReportLevel;
+use crate::ReportLevel::Info;
+use crate::ReportLevel::Warning;
 use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
 use crate::config::HandlerReport;
-use crate::config::ReportLevel;
 use crate::context;
 use crate::error::ConversionError;
 use crate::extract::{ExtractedArray, ExtractedElement};
 use crate::handler::HandlerResult;
 use crate::report;
-use crate::Id;
-use crate::ReportLevel::Info;
-use crate::ReportLevel::Warning;
-use crate::{convert_type, Token};
 use crate::{ConvertedArray, ConvertedElement};
+use crate::{Token, convert_type};
 
 /// Creates an array handler that can detect and convert C array declarations and accesses
 pub fn create_array_handler() -> crate::handler::Handler {
@@ -58,7 +58,7 @@ fn process_array(tokens: &[Token]) -> Result<bool, ConversionError> {
         }
     }
 
-    // Check for function call patterns with member access: identifier '.' identifier '(' - REJECT these  
+    // Check for function call patterns with member access: identifier '.' identifier '(' - REJECT these
     for i in 0..tokens.len().saturating_sub(3) {
         if tokens[i + 1].to_string() == "." && tokens[i + 3].to_string() == "(" {
             // Pattern: obj.method( suggests function call
@@ -89,15 +89,32 @@ fn process_array(tokens: &[Token]) -> Result<bool, ConversionError> {
     for i in 0..tokens.len() - 3 {
         if i + 2 < tokens.len() && tokens[i + 2].to_string() == "[" {
             // Additional validation: ensure this looks like a real array declaration
-            let token1 = if i > 0 { tokens[i].to_string() } else { String::new() };
-            let token2 = if i + 1 < tokens.len() { tokens[i + 1].to_string() } else { String::new() };
+            let token1 = if i > 0 {
+                tokens[i].to_string()
+            } else {
+                String::new()
+            };
+            let token2 = if i + 1 < tokens.len() {
+                tokens[i + 1].to_string()
+            } else {
+                String::new()
+            };
 
             // Check if first token looks like a type
-            if token1 == "int" || token1 == "char" || token1 == "float" || token1 == "double" ||
-                token1 == "long" || token1 == "short" || token1 == "unsigned" || token1 == "signed" ||
-                (!token1.is_empty() && !token1.starts_with('{') && !token1.starts_with('}') &&
-                    !token1.starts_with(';') && !token1.starts_with('=')) {
-
+            if token1 == "int"
+                || token1 == "char"
+                || token1 == "float"
+                || token1 == "double"
+                || token1 == "long"
+                || token1 == "short"
+                || token1 == "unsigned"
+                || token1 == "signed"
+                || (!token1.is_empty()
+                    && !token1.starts_with('{')
+                    && !token1.starts_with('}')
+                    && !token1.starts_with(';')
+                    && !token1.starts_with('='))
+            {
                 // Look for closing bracket to confirm array pattern
                 let mut j = i + 3;
                 while j < tokens.len() {
@@ -116,10 +133,15 @@ fn process_array(tokens: &[Token]) -> Result<bool, ConversionError> {
             let identifier = tokens[i].to_string();
 
             // Additional validation: ensure identifier looks legitimate (not punctuation)
-            if !identifier.is_empty() && !identifier.starts_with('{') && !identifier.starts_with('}') &&
-                !identifier.starts_with(';') && !identifier.starts_with('=') && !identifier.starts_with(',') &&
-                !identifier.starts_with('(') && !identifier.starts_with(')') {
-
+            if !identifier.is_empty()
+                && !identifier.starts_with('{')
+                && !identifier.starts_with('}')
+                && !identifier.starts_with(';')
+                && !identifier.starts_with('=')
+                && !identifier.starts_with(',')
+                && !identifier.starts_with('(')
+                && !identifier.starts_with(')')
+            {
                 // Look for closing bracket
                 let mut j = i + 2;
                 while j < tokens.len() {
@@ -183,8 +205,7 @@ fn is_array_declaration(tokens: &[Token]) -> bool {
 }
 
 /// Process array declaration
-fn process_array_declaration(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn process_array_declaration(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "array_handler",
         "process_array_declaration",
@@ -276,8 +297,7 @@ fn is_array_access(tokens: &[Token]) -> bool {
 }
 
 /// Process array access
-fn process_array_access(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn process_array_access(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "array_handler",
         "process_array_access",
@@ -385,8 +405,7 @@ fn is_operator(token: &str) -> bool {
 }
 
 /// Extract array information from tokens
-fn extract_array(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_array(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     let _id = Id::get("extract_array");
     report!(
         "array_handler",
@@ -410,7 +429,8 @@ fn extract_array(
 
 /// Extract array declaration information
 fn extract_array_declaration(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+    tokens: &[Token],
+) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "array_handler",
         "extract_array_declaration",
@@ -463,8 +483,7 @@ fn extract_array_declaration(
 }
 
 /// Extract array access information
-fn extract_array_access(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+fn extract_array_access(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     report!(
         "array_handler",
         "extract_array_access",
@@ -512,8 +531,7 @@ fn extract_array_access(
 }
 
 /// Convert extracted array to Rust code
-fn convert_array(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+fn convert_array(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     let _id = Id::get("convert_array");
     report!(
         "array_handler",
@@ -568,7 +586,8 @@ fn convert_array(
 /// Handle redirection for array processing
 fn redirect_array(
     _tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("redirect_array");
     report!(
         "array_handler",
@@ -586,9 +605,7 @@ fn redirect_array(
 }
 
 /// Result callback: Postprocesses generated array code, adds documentation, and enhances formatting
-fn result_array(
-    tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+fn result_array(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult, ConversionError> {
     let _id = Id::get("result_array");
 
     report!(
@@ -606,8 +623,7 @@ fn result_array(
             let (array_info, array_type) = extract_array_info_from_tokens(tokens);
 
             // Generate documentation about the array conversion
-            let doc_comment =
-                generate_array_documentation(tokens, &array_info, &array_type);
+            let doc_comment = generate_array_documentation(tokens, &array_info, &array_type);
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
@@ -648,8 +664,7 @@ fn result_array(
         HandlerResult::Converted(element, _, rust_code, id) => {
             // Handle converted elements - enhance the code and preserve the variant
             let (array_info, array_type) = extract_array_info_from_tokens(tokens);
-            let doc_comment =
-                generate_array_documentation(tokens, &array_info, &array_type);
+            let doc_comment = generate_array_documentation(tokens, &array_info, &array_type);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -679,8 +694,7 @@ fn result_array(
         HandlerResult::Extracted(element, _, rust_code, id) => {
             // Handle extracted elements - enhance the code and preserve the variant
             let (array_info, array_type) = extract_array_info_from_tokens(tokens);
-            let doc_comment =
-                generate_array_documentation(tokens, &array_info, &array_type);
+            let doc_comment = generate_array_documentation(tokens, &array_info, &array_type);
 
             let mut enhanced_code = String::new();
             let metadata_comment = format!(
@@ -713,8 +727,7 @@ fn result_array(
             let (array_info, array_type) = extract_array_info_from_tokens(tokens);
 
             // Generate documentation about the array conversion
-            let doc_comment =
-                generate_array_documentation(tokens, &array_info, &array_type);
+            let doc_comment = generate_array_documentation(tokens, &array_info, &array_type);
 
             // Postprocess the converted Rust code for better formatting
             let mut enhanced_result = postprocess_array_code(converted_tokens);
@@ -868,10 +881,7 @@ fn extract_array_info_from_tokens(tokens: &[Token]) -> (String, String) {
 }
 
 /// Generates documentation comments for the array conversion
-fn generate_array_documentation(
-    tokens: &[Token],
-    array_info: &str,
-    array_type: &str) -> String {
+fn generate_array_documentation(tokens: &[Token], array_info: &str, array_type: &str) -> String {
     let mut doc_lines = Vec::new();
 
     // Add main documentation header
@@ -986,8 +996,7 @@ fn postprocess_array_code(mut tokens: Vec<Token>) -> Vec<Token> {
 }
 
 /// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_array(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_array(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     let context = context!();
     let handler_reports = context.get_reports_by_handler("array_handler");
 

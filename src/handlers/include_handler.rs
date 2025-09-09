@@ -1,15 +1,15 @@
 use super::common::not_handled;
-use crate::config::{
-    HandlerPhase::{Handle, Process, Report},
-    HandlerReport,
-    ReportLevel::{Error, Info, Warning},
-};
 use crate::error::ConversionError;
 use crate::extract::ExtractedElement;
 use crate::extract::ExtractedInclude;
 use crate::handler::HandlerResult;
 use crate::macro_handler::{handle_define, handle_ifdef, handle_undef, process_macro};
-use crate::{context, report, ConvertedElement, ConvertedInclude, Id, Token};
+use crate::{ConvertedElement, ConvertedInclude, Id, Token, context, report};
+use crate::{
+    HandlerPhase::{Handle, Process, Report},
+    HandlerReport,
+    ReportLevel::{Error, Info, Warning},
+};
 use std::path::{Path, PathBuf};
 
 /// Creates an include handler that can detect and convert C include directives
@@ -33,8 +33,7 @@ pub fn create_include_handler() -> crate::handler::Handler {
 }
 
 /// Report callback: Collects and summarizes all include-related reports from the context
-fn report_include(
-    _tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
+fn report_include(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
     // Get all reports for this handler
     let context = context!();
     let reports = context.get_reports_by_handler("include");
@@ -84,7 +83,8 @@ fn report_include(
 /// Result callback: Postprocesses generated code, adds documentation, and cleans up the result
 fn result_include(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     report!(
         "include_handler",
         "result_include",
@@ -210,9 +210,7 @@ fn extract_include_path(tokens: &[Token]) -> String {
 }
 
 /// Helper function to generate documentation for the include
-fn generate_include_documentation(
-    tokens: &[Token],
-    include_path: &str) -> String {
+fn generate_include_documentation(tokens: &[Token], include_path: &str) -> String {
     let mut doc = String::new();
 
     // Generate basic include documentation
@@ -356,8 +354,7 @@ fn process_include(tokens: &[Token]) -> Result<bool, ConversionError> {
 }
 
 /// Processes an include directive
-fn handle_include(
-    tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn handle_include(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
     report!(
         "include_handler",
         "handle_include",
@@ -437,8 +434,7 @@ fn handle_include(
 }
 
 /// Extracts an include directive as an ExtractedElement
-pub fn extract_include(
-    tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
+pub fn extract_include(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
     if tokens.len() < 3 || tokens[0].to_string() != "#" || tokens[1].to_string() != "include" {
         return Ok(None);
     }
@@ -476,8 +472,7 @@ pub fn extract_include(
 
     Ok(Some(ExtractedElement::Include(extracted_include)))
 }
-pub fn convert_include(
-    tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
+pub fn convert_include(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
     let id = Id::get("convert_include");
     let mut rust_code = String::new();
     let mut path: String = String::new();
@@ -651,7 +646,8 @@ pub fn convert_include(
 /// Redirect callback: Handles cases where this handler should pass tokens to a different handler
 fn redirect_include(
     tokens: &[Token],
-    result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+    result: HandlerResult,
+) -> Result<HandlerResult, ConversionError> {
     report!(
         "include_handler",
         "redirect_include",

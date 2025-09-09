@@ -23,8 +23,8 @@ use std::ops::Div;
 use std::ops::Mul;
 use std::ops::Rem;
 use std::ops::Sub;
-use std::str::from_utf8;
 use std::str::FromStr;
+use std::str::from_utf8;
 use std::time::Instant;
 
 const TOKEN_MAX: usize = 4096;
@@ -41,6 +41,8 @@ pub enum Token {
     l(&'static str),
     u(u128),
     v(Vec<u8>),
+    w(String),    // Whitespace token variant - stores whitespace sequences
+    d(Vec<char>), // Delimiter token variant - stores delimiter character sequences
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tokenizer {
@@ -72,6 +74,8 @@ impl Clone for Token {
             Token::l(s) => Token::l(*s),
             Token::u(u) => Token::u(*u),
             Token::v(v) => Token::v(v.clone()),
+            Token::w(w) => Token::w(w.clone()),
+            Token::d(d) => Token::d(d.clone()),
         }
     }
 }
@@ -87,6 +91,8 @@ impl Hash for Token {
             Token::l(s) => s.hash(state),
             Token::u(u) => u.hash(state),
             Token::v(v) => v.hash(state),
+            Token::w(w) => w.hash(state),
+            Token::d(d) => d.hash(state),
         }
     }
 }
@@ -106,6 +112,8 @@ impl Display for Token {
             Token::l(s) => write!(f, "{}", s.to_string()),
             Token::u(n) => write!(f, "{}", n.to_string()),
             Token::v(v) => write!(f, "{}", Tokenizer::from_utf8(v.as_slice())),
+            Token::w(w) => write!(f, "{}", w),
+            Token::d(d) => write!(f, "{}", d.iter().collect::<String>()),
         }
     }
 }
@@ -279,6 +287,77 @@ impl Ord for Token {
                 .cmp(&b.to_ne_bytes().len())
                 .then(a.cmp(&b.to_ne_bytes().to_vec())),
             (Token::v(a), Token::v(b)) => a.cmp(b),
+
+            // Token::w matches - whitespace tokens
+            (Token::w(a), Token::a(b, s)) => unsafe {
+                a.cmp(&String::from_utf8_unchecked(b[..*s].to_vec()))
+            },
+            (Token::w(a), Token::b(b)) => a.cmp(&(*b as char).to_string()),
+            (Token::w(a), Token::c(b)) => a.cmp(&b.to_string()),
+            (Token::w(a), Token::f(b)) => a.cmp(&b.to_string()),
+            (Token::w(a), Token::i(b)) => a.cmp(&b.to_string()),
+            (Token::w(a), Token::s(b)) => a.cmp(b),
+            (Token::w(a), Token::l(b)) => a.cmp(&b.to_string()),
+            (Token::w(a), Token::u(b)) => a.cmp(&b.to_string()),
+            (Token::w(a), Token::v(b)) => {
+                a.cmp(&String::from_utf8(b.clone()).unwrap_or("Invalid UTF-8".to_string()))
+            }
+            (Token::w(a), Token::w(b)) => a.cmp(b),
+
+            // Reverse matches for Token::w (all other variants compared to Token::w)
+            (Token::a(a, s), Token::w(b)) => unsafe {
+                String::from_utf8_unchecked(a[..*s].to_vec()).cmp(b)
+            },
+            (Token::b(a), Token::w(b)) => (*a as char).to_string().cmp(b),
+            (Token::c(a), Token::w(b)) => a.to_string().cmp(b),
+            (Token::f(a), Token::w(b)) => a.to_string().cmp(b),
+            (Token::i(a), Token::w(b)) => a.to_string().cmp(b),
+            (Token::s(a), Token::w(b)) => a.cmp(b),
+            (Token::l(a), Token::w(b)) => a.to_string().cmp(b),
+            (Token::u(a), Token::w(b)) => a.to_string().cmp(b),
+            (Token::v(a), Token::w(b)) => String::from_utf8(a.clone())
+                .unwrap_or("Invalid UTF-8".to_string())
+                .cmp(b),
+
+            // Token::d matches - delimiter tokens
+            (Token::d(a), Token::a(b, s)) => {
+                let a_str = a.iter().collect::<String>();
+                unsafe { a_str.cmp(&String::from_utf8_unchecked(b[..*s].to_vec())) }
+            }
+            (Token::d(a), Token::b(b)) => {
+                a.iter().collect::<String>().cmp(&(*b as char).to_string())
+            }
+            (Token::d(a), Token::c(b)) => a.iter().collect::<String>().cmp(&b.to_string()),
+            (Token::d(a), Token::f(b)) => a.iter().collect::<String>().cmp(&b.to_string()),
+            (Token::d(a), Token::i(b)) => a.iter().collect::<String>().cmp(&b.to_string()),
+            (Token::d(a), Token::s(b)) => a.iter().collect::<String>().cmp(b),
+            (Token::d(a), Token::l(b)) => a.iter().collect::<String>().cmp(&b.to_string()),
+            (Token::d(a), Token::u(b)) => a.iter().collect::<String>().cmp(&b.to_string()),
+            (Token::d(a), Token::v(b)) => a
+                .iter()
+                .collect::<String>()
+                .cmp(&String::from_utf8(b.clone()).unwrap_or("Invalid UTF-8".to_string())),
+            (Token::d(a), Token::w(b)) => a.iter().collect::<String>().cmp(b),
+            (Token::d(a), Token::d(b)) => a.cmp(b),
+
+            // Reverse matches for Token::d (all other variants compared to Token::d)
+            (Token::a(a, s), Token::d(b)) => {
+                let b_str = b.iter().collect::<String>();
+                unsafe { String::from_utf8_unchecked(a[..*s].to_vec()).cmp(&b_str) }
+            }
+            (Token::b(a), Token::d(b)) => {
+                (*a as char).to_string().cmp(&b.iter().collect::<String>())
+            }
+            (Token::c(a), Token::d(b)) => a.to_string().cmp(&b.iter().collect::<String>()),
+            (Token::f(a), Token::d(b)) => a.to_string().cmp(&b.iter().collect::<String>()),
+            (Token::i(a), Token::d(b)) => a.to_string().cmp(&b.iter().collect::<String>()),
+            (Token::s(a), Token::d(b)) => a.cmp(&b.iter().collect::<String>()),
+            (Token::l(a), Token::d(b)) => a.to_string().cmp(&b.iter().collect::<String>()),
+            (Token::u(a), Token::d(b)) => a.to_string().cmp(&b.iter().collect::<String>()),
+            (Token::v(a), Token::d(b)) => String::from_utf8(a.clone())
+                .unwrap_or("Invalid UTF-8".to_string())
+                .cmp(&b.iter().collect::<String>()),
+            (Token::w(a), Token::d(b)) => a.cmp(&b.iter().collect::<String>()),
         }
     }
 }
@@ -372,14 +451,13 @@ macro_rules! tok {
 impl Token {
     /// Check if the token is whitespace
     pub fn is_whitespace(&self) -> bool {
-        matches(vec![
-            self.clone(),
-            tok!(' '),
-            tok!('\t'),
-            tok!('\n'),
-            tok!('\r'),
-            tok!('\0'),
-        ])
+        match self {
+            Token::w(_) => true, // Direct whitespace token variant
+            Token::s(s) => s.chars().all(|c| c.is_whitespace()), // String containing only whitespace
+            Token::c(c) => c.is_whitespace(),                    // Single whitespace character
+            Token::b(b) => (*b as char).is_whitespace(), // Byte representing whitespace character
+            _ => false,
+        }
     }
 
     pub fn is_numeric(&self) -> bool {
@@ -426,6 +504,8 @@ impl Token {
             Token::l(s) => s.len(),
             Token::u(n) => n.to_string().len(),
             Token::v(v) => v.len(),
+            Token::w(w) => w.len(),
+            Token::d(d) => d.len(),
         }
     }
     pub fn stok(&self) -> Token {
@@ -439,6 +519,8 @@ impl Token {
             Token::l(s) => Token::s(s.to_string()),
             Token::u(u) => Token::s(u.to_string()),
             Token::v(v) => Token::s(String::from_utf8(v).unwrap()),
+            Token::w(w) => Token::s(w), // Convert whitespace token to string token
+            Token::d(d) => Token::s(d.iter().collect::<String>()), // Convert delimiter token to string token
         }
     }
     pub fn matches(&self, others: Vec<Token>) -> Vec<Option<Token>> {
@@ -733,6 +815,60 @@ impl PartialEq for Token {
             (Token::v(a), Token::s(b)) => a == b.as_bytes(),
             (Token::v(a), Token::l(b)) => a == b.as_bytes(),
             (Token::v(a), Token::v(b)) => a == b,
+
+            // Token::w matches - whitespace tokens
+            (Token::w(a), Token::a(b, s)) => a.len() == *s && a.as_bytes() == &b[..*s],
+            (Token::w(a), Token::b(b)) => a.len() == 1 && a.chars().next().unwrap() as u8 == *b,
+            (Token::w(a), Token::c(b)) => a.len() == 1 && a.chars().next().unwrap() == *b,
+            (Token::w(a), Token::f(b)) => a == &b.to_string(),
+            (Token::w(a), Token::i(b)) => a == &b.to_string(),
+            (Token::w(a), Token::u(b)) => a == &b.to_string(),
+            (Token::w(a), Token::s(b)) => a == b,
+            (Token::w(a), Token::l(b)) => a == b,
+            (Token::w(a), Token::v(b)) => a.as_bytes() == b,
+            (Token::w(a), Token::w(b)) => a == b,
+
+            // Reverse matches for Token::w (all other variants compared to Token::w)
+            (Token::a(a, s), Token::w(b)) => *s == b.len() && &a[..*s] == b.as_bytes(),
+            (Token::b(a), Token::w(b)) => b.len() == 1 && *a == b.chars().next().unwrap() as u8,
+            (Token::c(a), Token::w(b)) => b.len() == 1 && *a == b.chars().next().unwrap(),
+            (Token::f(a), Token::w(b)) => a.to_string() == *b,
+            (Token::i(a), Token::w(b)) => a.to_string() == *b,
+            (Token::u(a), Token::w(b)) => a.to_string() == *b,
+            (Token::s(a), Token::w(b)) => a == b,
+            (Token::l(a), Token::w(b)) => *a == b,
+            (Token::v(a), Token::w(b)) => a == b.as_bytes(),
+
+            // Token::d matches - delimiter tokens
+            (Token::d(a), Token::a(b, s)) => {
+                let a_str = a.iter().collect::<String>();
+                a_str.len() == *s && a_str.as_bytes() == &b[..*s]
+            }
+            (Token::d(a), Token::b(b)) => a.len() == 1 && a[0] as u8 == *b,
+            (Token::d(a), Token::c(b)) => a.len() == 1 && a[0] == *b,
+            (Token::d(a), Token::f(b)) => a.iter().collect::<String>() == b.to_string(),
+            (Token::d(a), Token::i(b)) => a.iter().collect::<String>() == b.to_string(),
+            (Token::d(a), Token::u(b)) => a.iter().collect::<String>() == b.to_string(),
+            (Token::d(a), Token::s(b)) => a.iter().collect::<String>() == *b,
+            (Token::d(a), Token::l(b)) => a.iter().collect::<String>() == *b,
+            (Token::d(a), Token::v(b)) => a.iter().collect::<String>().as_bytes() == b,
+            (Token::d(a), Token::w(b)) => a.iter().collect::<String>() == *b,
+            (Token::d(a), Token::d(b)) => a == b,
+
+            // Reverse matches for Token::d (all other variants compared to Token::d)
+            (Token::a(a, s), Token::d(b)) => {
+                let b_str = b.iter().collect::<String>();
+                *s == b_str.len() && &a[..*s] == b_str.as_bytes()
+            }
+            (Token::b(a), Token::d(b)) => b.len() == 1 && *a == b[0] as u8,
+            (Token::c(a), Token::d(b)) => b.len() == 1 && *a == b[0],
+            (Token::f(a), Token::d(b)) => a.to_string() == b.iter().collect::<String>(),
+            (Token::i(a), Token::d(b)) => a.to_string() == b.iter().collect::<String>(),
+            (Token::u(a), Token::d(b)) => a.to_string() == b.iter().collect::<String>(),
+            (Token::s(a), Token::d(b)) => *a == b.iter().collect::<String>(),
+            (Token::l(a), Token::d(b)) => *a == b.iter().collect::<String>(),
+            (Token::v(a), Token::d(b)) => a == b.iter().collect::<String>().as_bytes(),
+            (Token::w(a), Token::d(b)) => *a == b.iter().collect::<String>(),
         }
     }
 }
@@ -746,10 +882,7 @@ impl Tokenizer {
         }
     }
 
-    pub fn tokenize(
-        mut self,
-        content: Vec<u8>,
-    ) -> Result<Vec<Token>, ConversionError> {
+    pub fn tokenize(mut self, content: Vec<u8>) -> Result<Vec<Token>, ConversionError> {
         let mut tokens = Vec::new();
         self.content = content.clone();
         // Debug: Print total content length
@@ -877,8 +1010,8 @@ impl Tokenizer {
         if b.is_ascii_alphabetic() || b == b'_' {
             while self.cursor < self.content.len()
                 && (self.cursor_byte().is_ascii_alphanumeric()
-                || self.cursor_byte() == b'_'
-                || self.cursor_byte() == b'.')
+                    || self.cursor_byte() == b'_'
+                    || self.cursor_byte() == b'.')
             {
                 self.cursor += 1;
             }
@@ -935,10 +1068,10 @@ impl Tokenizer {
             // Handle numeric literals - create proper Token::i() or Token::f() variants using tok! macro
             if b.is_ascii_digit()
                 || (b == b'.'
-                && self
-                .content
-                .get(start + 1)
-                .map_or(false, |&next| next.is_ascii_digit()))
+                    && self
+                        .content
+                        .get(start + 1)
+                        .map_or(false, |&next| next.is_ascii_digit()))
             {
                 if content.contains('.') || content.contains('e') || content.contains('E') {
                     // Parse as float
@@ -1524,8 +1657,8 @@ impl Tokenizer {
                         let before_paren = &line[pattern.len()..paren_pos].trim();
                         if !before_paren.is_empty()
                             && before_paren
-                            .chars()
-                            .all(|c| c.is_alphanumeric() || c == '_')
+                                .chars()
+                                .all(|c| c.is_alphanumeric() || c == '_')
                         {
                             candidates.push((pos, line.to_string()));
                             debug!(
@@ -1668,10 +1801,7 @@ impl Tokenizer {
 
     /// Process tokens incrementally with registered handlers
     /// Returns a vector of ProcessedResults that can be used to generate Rust code
-    pub fn process_tokens(
-        &mut self,
-        tokens: &[Token],
-    ) -> Result<ProcessedResult, ConversionError> {
+    pub fn process_tokens(&mut self, tokens: &[Token]) -> Result<ProcessedResult, ConversionError> {
         let start_time = Instant::now();
         // Track statistics if debug mode is enabled
         let total_tokens = tokens.len();
@@ -1749,8 +1879,8 @@ impl Tokenizer {
                     // Only warn about non-trivial unhandled tokens (not just whitespace or comments)
                     if !unhandled_token_str.trim().is_empty()
                         && !unhandled_tokens
-                        .iter()
-                        .all(|t| t.to_string().trim().is_empty())
+                            .iter()
+                            .all(|t| t.to_string().trim().is_empty())
                     {
                         warn!("Unhandled tokens: {}", unhandled_token_str);
 

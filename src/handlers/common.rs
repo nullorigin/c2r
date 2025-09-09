@@ -1,6 +1,6 @@
 use crate::error::ConversionError;
 use crate::handler::HandlerResult;
-use crate::{context, Id, Token};
+use crate::{Id, Token, context};
 
 /// Common utility functions for handlers
 
@@ -126,7 +126,7 @@ pub fn is_type(tokens: &[Token]) -> bool {
         .get(&Id::new(0, "typedefs".to_string()))
     {
         match typedefs {
-            crate::config::Entry::StrMap(map) => {
+            crate::Entry::StrMap(map) => {
                 if map.contains_key(&first_token.to_string()) {
                     return true;
                 }
@@ -188,7 +188,11 @@ pub fn replace_with(rust_code: String, id: Id) -> Result<HandlerResult, Conversi
 
 /// Create a handler result that replaces the processed tokens with the given Rust code
 /// and specifies the exact range of tokens consumed
-pub fn replace_with_range(rust_code: String, token_range: std::ops::Range<usize>, id: Id) -> Result<HandlerResult, ConversionError> {
+pub fn replace_with_range(
+    rust_code: String,
+    token_range: std::ops::Range<usize>,
+    id: Id,
+) -> Result<HandlerResult, ConversionError> {
     Ok(HandlerResult::Completed(None, token_range, rust_code, id))
 }
 

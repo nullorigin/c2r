@@ -10,10 +10,14 @@ pub mod lock;
 pub mod logging;
 pub mod token;
 
+pub mod entry;
 pub mod pattern;
+pub mod registry;
+pub mod table;
 // Re-export public APIs for external use
 pub use crate::config::*;
 pub use crate::convert::*;
+pub use crate::entry::*;
 pub use crate::error::*;
 pub use crate::extract::*;
 pub use crate::handler::*;
@@ -23,8 +27,11 @@ pub use crate::handlers::common::*;
 pub use crate::handlers::macro_handler::*;
 pub use crate::handlers::*;
 pub use crate::lock::*;
+pub use crate::logging::*;
+pub use crate::pattern::*;
+pub use crate::registry::*;
+pub use crate::table::*;
 pub use crate::token::*;
-
 // Tests module (only compiled during testing)
 #[cfg(test)]
 pub mod tests;
