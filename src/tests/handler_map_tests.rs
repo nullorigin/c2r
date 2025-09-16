@@ -3,25 +3,35 @@
 
 use crate::config::Context;
 use crate::convert::{ConvertedComment, ConvertedElement};
-use crate::error::ConversionError;
+use crate::error::C2RError;
 use crate::handler::{HandlerMap, HandlerResult, ProcessedResult};
 use crate::lock::Id;
 use crate::token::Token;
+use crate::{Kind, Reason, tokens};
+use core::option::Option::None;
+use std::ops::Range;
 
 // Helper functions that match HandlerMap function pointer signatures
 
 /// Simple processor function that accepts any non-empty tokens
-fn test_processor_accept_any(tokens: &[Token]) -> Result<bool, ConversionError> {
-    Ok(!tokens.is_empty())
+fn test_processor_accept_any(_token_range: Range<usize>) -> Result<bool, C2RError> {
+    Ok(true)
 }
 
 /// Processor function for failing handler tests - always returns false to avoid infinite loops
-fn test_processor_reject_all(_tokens: &[Token]) -> Result<bool, ConversionError> {
+fn test_processor_reject_all(_token_range: Range<usize>) -> Result<bool, C2RError> {
     Ok(false)
 }
 
 /// Test handler that always handles tokens successfully
-fn test_success_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_success_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let tokens = crate::tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, crate::Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     if !tokens.is_empty() {
         Ok(HandlerResult::Handled(
             Some(tokens.to_vec()),
@@ -39,17 +49,28 @@ fn test_success_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionErr
 
 /// Test handler that always returns NotHandled
 
-fn test_fail_handler(_tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_fail_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
     Ok(HandlerResult::NotHandled(None, 0..0, Id::get("failed")))
 }
 
 /// Test handler that returns an error
-fn test_error_handler(_tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    Err(ConversionError::new("Test error from handler"))
+fn test_error_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    Err(C2RError::new(
+        Kind::Other,
+        Reason::Other("Test error from handler"),
+        None,
+    ))
 }
 
 /// Test handler for first priority
-fn test_first_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_first_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let tokens = tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     if tokens.iter().any(|t| match t {
         Token::s(s) => s == "skip_first",
         _ => false,
@@ -69,7 +90,14 @@ fn test_first_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError
 }
 
 /// Test handler for second priority
-fn test_second_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_second_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let tokens = tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     Ok(HandlerResult::Handled(
         Some(tokens.to_vec()),
         0..1,
@@ -78,7 +106,14 @@ fn test_second_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionErro
 }
 
 /// Test handler that returns Processed result
-fn test_processor_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_processor_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let tokens = tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     Ok(HandlerResult::Processed(
         Some(tokens.to_vec()),
         0..1,
@@ -88,7 +123,14 @@ fn test_processor_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionE
 }
 
 /// Test handler that redirects to another handler
-fn test_redirect_source_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_redirect_source_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let tokens = tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     Ok(HandlerResult::Redirected(
         Some(tokens.to_vec()),
         0..1,
@@ -99,7 +141,14 @@ fn test_redirect_source_handler(tokens: &[Token]) -> Result<HandlerResult, Conve
 }
 
 /// Test handler that processes redirected tokens
-fn test_redirect_target_handler(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+fn test_redirect_target_handler(_token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let tokens = tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     Ok(HandlerResult::Handled(
         Some(tokens.to_vec()),
         0..1,
@@ -110,7 +159,14 @@ fn test_redirect_target_handler(tokens: &[Token]) -> Result<HandlerResult, Conve
 // Helper processor functions
 
 /// Test processor that accepts tokens containing "accept"
-fn test_processor_accept(tokens: &[Token]) -> Result<bool, ConversionError> {
+fn test_processor_accept(_token_range: Range<usize>) -> Result<bool, C2RError> {
+    let tokens = tokens!(_token_range.clone());
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     Ok(tokens.iter().any(|t| match t {
         Token::s(s) => s.contains("accept"),
         _ => false,
@@ -121,21 +177,19 @@ fn test_processor_accept(tokens: &[Token]) -> Result<bool, ConversionError> {
 
 /// Test result callback that transforms Processed to Converted
 fn test_result_callback(
-    _tokens: &[Token],
+    _token_range: Range<usize>,
     result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
+) -> Result<HandlerResult, C2RError> {
     match result {
         HandlerResult::Processed(tokens, _, _id, _) => {
             let converted = match tokens {
                 Some(t) => ConvertedElement::Comment(ConvertedComment {
-                    content: format!("converted_{}", t.len()),
-                    rust_code: format!("// converted_{}", t.len()),
+                    code: format!("// converted_{}", t.len()),
                     is_block: false,
                     is_doc_comment: false,
                 }),
                 None => ConvertedElement::Comment(ConvertedComment {
-                    content: "converted_empty".to_string(),
-                    rust_code: "// converted_empty".to_string(),
+                    code: "// converted_empty".to_string(),
                     is_block: false,
                     is_doc_comment: false,
                 }),
@@ -204,9 +258,9 @@ fn test_handler_map_add_handler() {
 
 /// Test HandlerMap process function with empty tokens
 #[test]
-fn test_handler_map_process_empty_tokens() -> Result<(), ConversionError> {
-    let handler_map = HandlerMap::new("empty_test");
-    let mut context = Context::new("test_context");
+fn test_handler_map_process_empty_tokens() -> Result<(), C2RError> {
+    let mut handler_map = HandlerMap::new("empty_test");
+    let _context = Context::new("test_context");
     let tokens: Vec<Token> = vec![];
 
     let result = handler_map.process(&tokens)?;
@@ -226,9 +280,9 @@ fn test_handler_map_process_empty_tokens() -> Result<(), ConversionError> {
 
 /// Test HandlerMap process function with no handlers
 #[test]
-fn test_handler_map_process_no_handlers() -> Result<(), ConversionError> {
-    let handler_map = HandlerMap::new("no_handlers_test");
-    let mut context = Context::new("test_context");
+fn test_handler_map_process_no_handlers() -> Result<(), C2RError> {
+    let mut handler_map = HandlerMap::new("no_handlers_test");
+    let _context = Context::new("test_context");
     let tokens = vec![Token::s("test".to_string())];
 
     let result = handler_map.process(&tokens)?;
@@ -245,9 +299,9 @@ fn test_handler_map_process_no_handlers() -> Result<(), ConversionError> {
 
 /// Test HandlerMap process function with successful handler
 #[test]
-fn test_handler_map_process_successful_handler() -> Result<(), ConversionError> {
+fn test_handler_map_process_successful_handler() -> Result<(), C2RError> {
     let mut handler_map = HandlerMap::new("success_test");
-    let mut context = Context::new("test_context");
+    let _context = Context::new("test_context");
 
     // Set up a handler
     let handler_id = Id::get("success_handler");
@@ -284,9 +338,8 @@ fn test_handler_map_process_successful_handler() -> Result<(), ConversionError> 
 
 /// Test HandlerMap process function with failing handler
 #[test]
-fn test_handler_map_process_failing_handler() -> Result<(), ConversionError> {
+fn test_handler_map_process_failing_handler() -> Result<(), C2RError> {
     let mut handler_map = HandlerMap::new("fail_test");
-    let mut context = Context::new("test_context");
 
     // Set up a handler that returns NotHandled
     let handler_id = Id::get("fail_handler");
@@ -317,9 +370,8 @@ fn test_handler_map_process_failing_handler() -> Result<(), ConversionError> {
 
 /// Test HandlerMap process function with processor callback
 #[test]
-fn test_handler_map_process_with_processor() -> Result<(), ConversionError> {
+fn test_handler_map_process_with_processor() -> Result<(), C2RError> {
     let mut handler_map = HandlerMap::new("processor_test");
-    let mut context = Context::new("test_context");
 
     let handler_id = Id::get("processor_handler");
     handler_map
@@ -356,9 +408,8 @@ fn test_handler_map_process_with_processor() -> Result<(), ConversionError> {
 
 /// Test HandlerMap process function with redirect handling
 #[test]
-fn test_handler_map_process_redirect() -> Result<(), ConversionError> {
+fn test_handler_map_process_redirect() -> Result<(), C2RError> {
     let mut handler_map = HandlerMap::new("redirect_test");
-    let mut context = Context::new("test_context");
 
     // Set up source handler that redirects
     let source_id = Id::get("source_handler");
@@ -404,9 +455,9 @@ fn test_handler_map_process_redirect() -> Result<(), ConversionError> {
 
 /// Test HandlerMap process function with result callback
 #[test]
-fn test_handler_map_process_with_result_callback() -> Result<(), ConversionError> {
+fn test_handler_map_process_with_result_callback() -> Result<(), C2RError> {
     let mut handler_map = HandlerMap::new("result_test");
-    let mut context = Context::new("test_context");
+    let _context = Context::new("test_context");
 
     let handler_id = Id::get("result_handler");
     handler_map
@@ -442,7 +493,7 @@ fn test_handler_map_process_with_result_callback() -> Result<(), ConversionError
 /// Test HandlerMap calculate_tokens_consumed function
 #[test]
 fn test_calculate_tokens_consumed() {
-    let handler_map = HandlerMap::new("consume_test");
+    let _handler_map = HandlerMap::new("consume_test");
 
     let test_tokens = vec![Token::s("a".to_string()), Token::s("b".to_string())];
 
@@ -466,8 +517,7 @@ fn test_calculate_tokens_consumed() {
     );
 
     let converted = ConvertedElement::Comment(ConvertedComment {
-        content: "test".to_string(),
-        rust_code: "// test".to_string(),
+        code: "// test".to_string(),
         is_block: false,
         is_doc_comment: false,
     });
@@ -481,9 +531,8 @@ fn test_calculate_tokens_consumed() {
 
 /// Test HandlerMap with multiple handlers in priority order
 #[test]
-fn test_handler_map_priority_order() -> Result<(), ConversionError> {
+fn test_handler_map_priority_order() -> Result<(), C2RError> {
     let mut handler_map = HandlerMap::new("priority_test");
-    let mut context = Context::new("test_context");
 
     // Set up multiple handlers
     let first_id = Id::get("first_handler");
@@ -555,7 +604,6 @@ fn test_processed_result() {
 #[test]
 fn test_handler_map_error_handling() {
     let mut handler_map = HandlerMap::new("error_test");
-    let mut context = Context::new("test_context");
 
     let handler_id = Id::get("error_handler");
     handler_map

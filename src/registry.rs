@@ -2,9 +2,9 @@ use crate::Entry;
 use crate::Handler;
 use crate::HandlerReport;
 use crate::Id;
-use crate::Pattern;
 use crate::Table;
 use crate::TableCell;
+use crate::pattern::Pattern;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
 use std::fmt::Debug;
@@ -19,8 +19,8 @@ pub struct Registry {
 impl Registry {
     pub fn new(name: &str) -> Self {
         Registry {
-            id: Id::get("registry"),
-            entries: HashMap::new(),
+            id: Id::get(name),
+            entries: HashMap::<Id, Entry>::new(),
             entry_count: 0,
         }
     }
@@ -60,6 +60,13 @@ impl Registry {
                 Entry::PairMap(map) => Box::new(map.clone()),
                 Entry::AnyMap(map) => Box::new(map.clone()),
                 Entry::Patternizer(pattern) => Box::new(pattern.clone()),
+                Entry::PatternRule(rule) => Box::new(rule.clone()),
+                Entry::PatternMetrics(metrics) => Box::new(metrics.clone()),
+                Entry::TokenPattern(token_pattern) => Box::new(token_pattern.clone()),
+                Entry::SamplizerPattern(pattern) => Box::new(pattern.clone()),
+                Entry::SamplizerFilePair(pair) => Box::new(pair.clone()),
+                Entry::SamplizerValidation(validation) => Box::new(validation.clone()),
+                Entry::SamplizerStats(stats) => Box::new(stats.clone()),
             };
             entry_type
                 .downcast::<T>()
@@ -119,32 +126,32 @@ impl Registry {
     }
 
     /// Store a Patternizer directly in the registry (bypasses dyn Any)
-    pub fn store_pattern(&mut self, pattern_id: &str, pattern: Pattern) {
-        let key = format!("pattern_{}", pattern_id);
+    pub fn store_pattern(&mut self, pattern_name: &str, pattern: Pattern) {
+        let key = format!("pattern_{}", pattern_name);
         let id = Id::get(&key);
+        let name = pattern.name.clone();
         self.entries.insert(id, Entry::Patternizer(pattern.clone()));
         self.entry_count += 1;
         println!(
             "📋 Stored pattern '{}' in registry with key '{}'",
-            pattern.name, key
+            name, key
         );
     }
 
     /// Retrieve a Patternizer directly from the registry (bypasses dyn Any)
-    pub fn get_pattern(&self, pattern_id: &str) -> Option<Pattern> {
-        let key = format!("pattern_{}", pattern_id);
-        match self.entries.get(&Id::get(&key)) {
+    pub fn get_pattern(&self, pattern_name: &str) -> Option<Pattern> {
+        let key = format!("pattern_{}", pattern_name);
+        let id = Id::get(&key);
+        let name = pattern_name;
+        match self.entries.get(&id) {
             Some(Entry::Patternizer(pattern)) => {
-                println!(
-                    "✅ Found pattern '{}' in registry with key '{}'",
-                    pattern.name, key
-                );
+                println!("✅ Found pattern '{}' in registry with key '{}'", name, key);
                 Some(pattern.clone())
             }
             _ => {
                 println!(
                     "❌ Pattern '{}' not found in registry (key: '{}')",
-                    pattern_id, key
+                    name, key
                 );
                 None
             }
@@ -152,7 +159,7 @@ impl Registry {
     }
 
     /// Get all entries in the registry
-    pub fn get_all_entries(&self) -> &HashMap<Id, Entry> {
+    pub fn entries(&self) -> &HashMap<Id, Entry> {
         &self.entries
     }
     pub fn insert(&mut self, id: Id, entry: Entry) -> Option<Entry> {
@@ -182,14 +189,14 @@ impl Registry {
         self.entry_count
     }
 
-    pub fn get_root_entry(&self, id: &Id) -> Option<&Entry> {
+    pub fn root(&self, id: &Id) -> Option<&Entry> {
         self.entries.get(id)
     }
 
-    pub fn get_root_entry_mut(&mut self, id: &Id) -> Option<&mut Entry> {
+    pub fn root_mut(&mut self, id: &Id) -> Option<&mut Entry> {
         self.entries.get_mut(id)
     }
-    pub fn get_entry(&self, name: &str, depth: u64) -> Option<Entry> {
+    pub fn nested(&self, name: &str, depth: u64) -> Option<Entry> {
         let parts: Vec<&str> = name.split('/').collect();
         if parts.is_empty() {
             return None;
@@ -200,17 +207,17 @@ impl Registry {
 
         // Debug: Print registry state for pattern lookups
         if name.starts_with("pattern_") {
-            println!("🔍 Registry lookup for '{}', root_id: {}", name, root_id);
+            println!("🔍 Registry lookup for '{}', root_name: {}", name, root_id);
             println!("🔍 Registry has {} entries:", self.entries.len());
             for (id, entry) in self.entries.iter() {
-                let clean_id = id.name.to_string().replace('\n', " | ");
+                let clean_name = id.name().to_string().replace('\n', " | ");
                 let clean_entry = match entry {
                     Entry::Patternizer(p) => {
                         format!("Patternizer({})", p.name.replace('\n', " | "))
                     }
                     _ => "Other".to_string(),
                 };
-                println!("  - ID: {} -> {}", clean_id, clean_entry);
+                println!("  - ID: {} -> {}", clean_name, clean_entry);
             }
         }
 
@@ -222,10 +229,10 @@ impl Registry {
         }
 
         let remaining_path = &parts[1..];
-        self.traverse_entry(entry, remaining_path, depth - 1)
+        self.traverse(entry, remaining_path, depth - 1)
     }
 
-    fn traverse_entry(&self, entry: &Entry, path: &[&str], remaining_depth: u64) -> Option<Entry> {
+    fn traverse(&self, entry: &Entry, path: &[&str], remaining_depth: u64) -> Option<Entry> {
         if path.is_empty() {
             return Some(entry.clone());
         }
@@ -243,7 +250,7 @@ impl Registry {
                             if next_path.len() == 1 || remaining_depth == 1 {
                                 Some(Entry::TableCell(cell.clone()))
                             } else {
-                                self.traverse_entry(
+                                self.traverse(
                                     &Entry::TableCell(cell.clone()),
                                     &next_path[1..],
                                     remaining_depth - 1,
@@ -266,7 +273,7 @@ impl Registry {
                         if next_path.is_empty() || remaining_depth == 0 {
                             Some(nested_entry.clone())
                         } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                            self.traverse(nested_entry, next_path, remaining_depth - 1)
                         }
                     } else {
                         None
@@ -280,7 +287,7 @@ impl Registry {
                     if next_path.is_empty() || remaining_depth == 0 {
                         Some(nested_entry.clone())
                     } else {
-                        self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                        self.traverse(nested_entry, next_path, remaining_depth - 1)
                     }
                 } else {
                     None
@@ -293,7 +300,7 @@ impl Registry {
                         if next_path.is_empty() || remaining_depth == 0 {
                             Some(nested_entry.clone())
                         } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                            self.traverse(nested_entry, next_path, remaining_depth - 1)
                         }
                     } else {
                         None
@@ -307,14 +314,14 @@ impl Registry {
                     if next_path.is_empty() || remaining_depth == 0 {
                         Some(pair.0.clone())
                     } else {
-                        self.traverse_entry(&pair.0, next_path, remaining_depth - 1)
+                        self.traverse(&pair.0, next_path, remaining_depth - 1)
                     }
                 }
                 "right" => {
                     if next_path.is_empty() || remaining_depth == 0 {
                         Some(pair.1.clone())
                     } else {
-                        self.traverse_entry(&pair.1, next_path, remaining_depth - 1)
+                        self.traverse(&pair.1, next_path, remaining_depth - 1)
                     }
                 }
                 _ => None,
@@ -325,7 +332,7 @@ impl Registry {
                     if next_path.is_empty() || remaining_depth == 0 {
                         Some(nested_entry.clone())
                     } else {
-                        self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                        self.traverse(nested_entry, next_path, remaining_depth - 1)
                     }
                 } else {
                     None
@@ -337,7 +344,7 @@ impl Registry {
                         if next_path.is_empty() || remaining_depth == 0 {
                             Some(nested_entry.clone())
                         } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                            self.traverse(nested_entry, next_path, remaining_depth - 1)
                         }
                     } else {
                         None
@@ -352,7 +359,7 @@ impl Registry {
                         if next_path.is_empty() || remaining_depth == 0 {
                             Some(nested_entry.clone())
                         } else {
-                            self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                            self.traverse(nested_entry, next_path, remaining_depth - 1)
                         }
                     } else {
                         None
@@ -367,7 +374,7 @@ impl Registry {
                     if next_path.is_empty() || remaining_depth == 0 {
                         Some(nested_entry.clone())
                     } else {
-                        self.traverse_entry(nested_entry, next_path, remaining_depth - 1)
+                        self.traverse(nested_entry, next_path, remaining_depth - 1)
                     }
                 } else {
                     None
@@ -392,16 +399,12 @@ impl Registry {
                         // Try to traverse into the pair
                         if next_path.len() > 0 {
                             match next_path[0] {
-                                "left" => self.traverse_entry(
-                                    &pair.0,
-                                    &next_path[1..],
-                                    remaining_depth - 1,
-                                ),
-                                "right" => self.traverse_entry(
-                                    &pair.1,
-                                    &next_path[1..],
-                                    remaining_depth - 1,
-                                ),
+                                "left" => {
+                                    self.traverse(&pair.0, &next_path[1..], remaining_depth - 1)
+                                }
+                                "right" => {
+                                    self.traverse(&pair.1, &next_path[1..], remaining_depth - 1)
+                                }
                                 _ => None,
                             }
                         } else {
@@ -420,7 +423,7 @@ impl Registry {
                             if next_path.is_empty() || remaining_depth == 0 {
                                 return Some(v.clone());
                             } else {
-                                return self.traverse_entry(v, next_path, remaining_depth - 1);
+                                return self.traverse(v, next_path, remaining_depth - 1);
                             }
                         }
                     }
@@ -429,7 +432,7 @@ impl Registry {
             }
             Entry::Any(any) => {
                 if remaining_depth > 0 {
-                    self.traverse_entry(any, path, remaining_depth - 1)
+                    self.traverse(any, path, remaining_depth - 1)
                 } else {
                     None
                 }
@@ -444,64 +447,72 @@ impl Registry {
             | Entry::Handler(_)
             | Entry::HandlerReport(_)
             | Entry::Patternizer(_)
+            | Entry::PatternRule(_)
+            | Entry::PatternMetrics(_)
+            | Entry::TokenPattern(_)
+            | Entry::SamplizerPattern(_)
+            | Entry::SamplizerFilePair(_)
+            | Entry::SamplizerValidation(_)
+            | Entry::SamplizerStats(_)
             | Entry::FuncMap(_) => None,
         }
     }
     pub fn get_str_map(&self, name: &str, depth: u64) -> Option<HashMap<String, Entry>> {
-        match self.get_entry(name, depth)? {
+        match self.nested(name, depth)? {
             Entry::StrMap(map) => Some(map),
             _ => None,
         }
     }
 
     pub fn get_str(&self, name: &str, depth: u64) -> Option<String> {
-        match self.get_entry(name, depth)? {
+        match self.nested(name, depth)? {
             Entry::Str(s) => Some(s),
             _ => None,
         }
     }
 
     pub fn get_bool(&self, name: &str, depth: u64) -> Option<bool> {
-        match self.get_entry(name, depth)? {
+        match self.nested(name, depth)? {
             Entry::Bool(b) => Some(b),
             _ => None,
         }
     }
 
     pub fn get_val(&self, name: &str, depth: u64) -> Option<u64> {
-        match self.get_entry(name, depth)? {
+        match self.nested(name, depth)? {
             Entry::Val(v) => Some(v),
             _ => None,
         }
     }
 
     pub fn get_path(&self, name: &str, depth: u64) -> Option<PathBuf> {
-        match self.get_entry(name, depth)? {
+        match self.nested(name, depth)? {
             Entry::Path(p) => Some(p),
             _ => None,
         }
     }
 
     pub fn get_list(&self, name: &str, depth: u64) -> Option<Vec<Entry>> {
-        match self.get_entry(name, depth)? {
+        match self.nested(name, depth)? {
             Entry::List(list) => Some(list),
             _ => None,
         }
     }
-
     /// Display the entire registry in a database-like format using beautiful tables
-    pub fn display_database_view(&self) {
+    pub fn display_database(&self) {
+        let entries = self.entries.clone();
+        let entry_count = entries.len();
         println!("🗃️  REGISTRY DATABASE VIEW");
         println!(
             "═══════════════════════════════════════════════════════════════════════════════════════"
         );
         println!(
             "📊 Total Entries: {}  |  Entry Count: {}",
-            self.entries.len(),
-            self.entry_count
+            entries.len(),
+            entry_count
         );
 
-        if self.entries.is_empty() {
+        if entries.is_empty() {
             println!("(Registry is empty)");
             return;
         }
@@ -514,14 +525,14 @@ impl Registry {
         let mut configs = Vec::new();
         let mut others = Vec::new();
 
-        for (id, entry) in &self.entries {
+        for (id, entry) in &entries {
             let entry_info = (id, entry);
             match entry {
                 Entry::Handler(_) => handlers.push(entry_info),
                 Entry::HandlerReport(_) => reports.push(entry_info),
                 Entry::Patternizer(_) => patterns.push(entry_info),
-                _ if id.name.starts_with("redirect_") => redirects.push(entry_info),
-                _ if id.name.starts_with("config_") || id.name.starts_with("verbosity") => {
+                _ if id.name().starts_with("redirect_") => redirects.push(entry_info),
+                _ if id.name().starts_with("config_") || id.name().starts_with("verbosity") => {
                     configs.push(entry_info)
                 }
                 _ => others.push(entry_info),
@@ -529,12 +540,12 @@ impl Registry {
         }
 
         // Display each category using our beautiful table system
-        self.display_table_category("Handler", &handlers);
-        self.display_table_category("HandlerReport", &reports);
-        self.display_table_category("Pattern", &patterns);
-        self.display_table_category("Redirect", &redirects);
-        self.display_table_category("Config", &configs);
-        self.display_table_category("Other", &others);
+        self.display_category("Handler", &handlers);
+        self.display_category("HandlerReport", &reports);
+        self.display_category("Pattern", &patterns);
+        self.display_category("Redirect", &redirects);
+        self.display_category("Config", &configs);
+        self.display_category("Other", &others);
 
         println!(
             "═══════════════════════════════════════════════════════════════════════════════════════"
@@ -542,7 +553,7 @@ impl Registry {
     }
 
     /// Display a category of registry entries using our beautiful table system
-    fn display_table_category(&self, entry_type: &str, entries: &[(&Id, &Entry)]) {
+    fn display_category(&self, entry_type: &str, entries: &[(&Id, &Entry)]) {
         if entries.is_empty() {
             return;
         }
@@ -554,13 +565,13 @@ impl Registry {
         if let Some((_, first_entry)) = entries.first() {
             match first_entry {
                 Entry::Handler(_) => {
-                    table.add_header(vec!["ID", "Role", "Priority", "Status"]);
+                    table.add_header(vec!["Name", "Role", "Priority", "Status"]);
                 }
                 Entry::HandlerReport(_) => {
-                    table.add_header(vec!["ID", "Handler", "Level", "Message", "Success"]);
+                    table.add_header(vec!["Name", "Handler", "Level", "Message", "Success"]);
                 }
                 _ => {
-                    table.add_header(vec!["ID", "Value", "Type"]);
+                    table.add_header(vec!["Name", "Value", "Type"]);
                 }
             }
         }
@@ -571,9 +582,9 @@ impl Registry {
                 Entry::Handler(handler) => {
                     let row_idx = table.add_empty_row();
 
-                    let mut id_cell = TableCell::new(row_idx, 0, &format!("id_{}", row_idx));
-                    id_cell.add_entry(Entry::Str(id.name.clone()));
-                    table.set_cell(row_idx, 0, id_cell);
+                    let mut name_cell = TableCell::new(row_idx, 0, &format!("name_{}", row_idx));
+                    name_cell.add_entry(Entry::Str(id.name().clone()));
+                    table.set_cell(row_idx, 0, name_cell);
 
                     let mut role_cell = TableCell::new(row_idx, 1, &format!("role_{}", row_idx));
                     role_cell.add_entry(Entry::Str(handler.role.clone()));
@@ -592,13 +603,13 @@ impl Registry {
                 Entry::HandlerReport(report) => {
                     let row_idx = table.add_empty_row();
 
-                    let mut id_cell = TableCell::new(row_idx, 0, &format!("id_{}", row_idx));
-                    id_cell.add_entry(Entry::Str(id.name.clone()));
-                    table.set_cell(row_idx, 0, id_cell);
+                    let mut name_cell = TableCell::new(row_idx, 0, &format!("name_{}", row_idx));
+                    name_cell.add_entry(Entry::Str(id.name().clone()));
+                    table.set_cell(row_idx, 0, name_cell);
 
                     let mut handler_cell =
                         TableCell::new(row_idx, 1, &format!("handler_{}", row_idx));
-                    handler_cell.add_entry(Entry::Str(report.handler_id.name.clone()));
+                    handler_cell.add_entry(Entry::Str(report.handler_id.name().to_string()));
                     table.set_cell(row_idx, 1, handler_cell);
 
                     let mut level_cell = TableCell::new(row_idx, 2, &format!("level_{}", row_idx));
@@ -619,9 +630,9 @@ impl Registry {
                     // For other entry types, use a generic format
                     let row_idx = table.add_empty_row();
 
-                    let mut id_cell = TableCell::new(row_idx, 0, &format!("id_{}", row_idx));
-                    id_cell.add_entry(Entry::Str(id.name.clone()));
-                    table.set_cell(row_idx, 0, id_cell);
+                    let mut name_cell = TableCell::new(row_idx, 0, &format!("name_{}", row_idx));
+                    name_cell.add_entry(Entry::Str(id.name().clone()));
+                    table.set_cell(row_idx, 0, name_cell);
 
                     let mut content_cell =
                         TableCell::new(row_idx, 1, &format!("content_{}", row_idx));
@@ -643,15 +654,11 @@ impl Registry {
 
     /// Display registry statistics
     pub fn display_stats(&self) {
-        println!(
-            "
-┌───────────────────┐
-│REGISTRY STATISTICS│
-├───────────────────┤
-│   Entry Types     │
-└───────────────────┘
-"
-        );
+        // Create a new table for registry statistics
+        let mut stats_table = Table::new_registry_table("Registry Statistics");
+        stats_table.add_header(vec!["Entry Type", "Count"]);
+
+        // Count entry types
         let mut type_counts = std::collections::HashMap::new();
         for entry in self.entries.values() {
             let type_name = match entry {
@@ -678,20 +685,46 @@ impl Registry {
                 Entry::PairMap(_) => "PairMap",
                 Entry::AnyMap(_) => "AnyMap",
                 Entry::Patternizer(_) => "Patternizer",
+                Entry::PatternRule(_) => "PatternRule",
+                Entry::PatternMetrics(_) => "PatternMetrics",
+                Entry::TokenPattern(_) => "TokenPattern",
+                Entry::SamplizerPattern(_) => "SamplizerPattern",
+                Entry::SamplizerFilePair(_) => "SamplizerFilePair",
+                Entry::SamplizerValidation(_) => "SamplizerValidation",
+                Entry::SamplizerStats(_) => "SamplizerStats",
             };
             *type_counts.entry(type_name).or_insert(0) += 1;
         }
 
-        println!(
-            "│Entry Types:                                                                         │"
-        );
+        // Add type counts to table
         for (type_name, count) in type_counts.iter() {
-            println!("│{:<20} : {:<8}│", type_name, count);
+            let row_idx = stats_table.add_empty_row();
+
+            let mut type_cell = TableCell::new(row_idx, 0, &format!("type_{}", row_idx));
+            type_cell.add_entry(Entry::Str(type_name.to_string()));
+            stats_table.set_cell(row_idx, 0, type_cell);
+
+            let mut count_cell = TableCell::new(row_idx, 1, &format!("count_{}", row_idx));
+            count_cell.add_entry(Entry::Str(count.to_string()));
+            stats_table.set_cell(row_idx, 1, count_cell);
         }
-        println!("┌──────────────────────┐────────┤");
-        println!("│ Total Entries:{:<5}  │", self.entry_count);
-        println!("│ Tracked Count:{:<5}  │", self.entries.len());
-        println!("└──────────────────────┘");
+
+        // Add summary rows
+        let total_row = stats_table.add_empty_row();
+        let mut total_type_cell =
+            TableCell::new(total_row, 0, &format!("total_type_{}", total_row));
+        total_type_cell.add_entry(Entry::Str("Total Entries".to_string()));
+        stats_table.set_cell(total_row, 0, total_type_cell);
+
+        let mut total_count_cell =
+            TableCell::new(total_row, 1, &format!("total_count_{}", total_row));
+        total_count_cell.add_entry(Entry::Str(self.entries.len().to_string()));
+        stats_table.set_cell(total_row, 1, total_count_cell);
+
+        // Display the table
+        println!("📊 REGISTRY STATISTICS");
+        println!("═══════════════════════");
+        print!("{}", stats_table.display_formatted());
     }
 }
 impl Default for Registry {

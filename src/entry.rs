@@ -4,10 +4,9 @@ use std::path::{Path, PathBuf};
 
 // Import all the types that Entry references
 use crate::config::HandlerReport;
-use crate::handler::Handler;
-use crate::lock::Id;
 use crate::pattern::Pattern;
 use crate::table::{Table, TableCell};
+use crate::{handler::Handler, lock::Id};
 
 #[derive(Debug, Clone)]
 pub enum Entry {
@@ -34,6 +33,13 @@ pub enum Entry {
     PairMap(HashMap<String, Box<(Entry, Entry)>>),
     AnyMap(HashMap<Entry, Entry>),
     Patternizer(Pattern),
+    PatternRule(crate::pattern::PatternRule),
+    PatternMetrics(crate::pattern::PatternMetrics),
+    TokenPattern(crate::pattern::TokenPattern),
+    SamplizerPattern(crate::sample::SamplizerPattern),
+    SamplizerFilePair(crate::sample::FilePair),
+    SamplizerValidation(crate::sample::ValidationResult),
+    SamplizerStats(crate::sample::IntegrationStats),
 }
 impl Default for Entry {
     fn default() -> Self {
@@ -66,6 +72,13 @@ impl Hash for Entry {
             Entry::PairMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
             Entry::AnyMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
             Entry::Patternizer(p) => p.id.hash(state),
+            Entry::PatternRule(r) => r.pattern.hash(state),
+            Entry::PatternMetrics(m) => m.total_matches.hash(state),
+            Entry::TokenPattern(t) => t.hash(state),
+            Entry::SamplizerPattern(p) => p.pattern_id.hash(state),
+            Entry::SamplizerFilePair(f) => f.c_file_path.hash(state),
+            Entry::SamplizerValidation(v) => v.pattern_id.hash(state),
+            Entry::SamplizerStats(s) => s.patterns_generated.hash(state),
         }
     }
 }
@@ -165,6 +178,13 @@ impl Entry {
             Entry::PairMap(_) => "PairMap".to_string(),
             Entry::AnyMap(_) => "AnyMap".to_string(),
             Entry::Patternizer(_) => "Patternizer".to_string(),
+            Entry::PatternRule(_) => "PatternRule".to_string(),
+            Entry::PatternMetrics(_) => "PatternMetrics".to_string(),
+            Entry::TokenPattern(_) => "TokenPattern".to_string(),
+            Entry::SamplizerPattern(_) => "SamplizerPattern".to_string(),
+            Entry::SamplizerFilePair(_) => "SamplizerFilePair".to_string(),
+            Entry::SamplizerValidation(_) => "SamplizerValidation".to_string(),
+            Entry::SamplizerStats(_) => "SamplizerStats".to_string(),
         }
     }
 
@@ -174,8 +194,8 @@ impl Entry {
             Entry::Id(id) => id.name.clone(),
             Entry::Val(v) => v.to_string(),
             Entry::Str(s) => {
-                if s.len() > 40 {
-                    format!("{}...", &s[..37])
+                if s.len() > 120 {
+                    format!("{}...", &s[..117])
                 } else {
                     s.clone()
                 }
@@ -200,6 +220,16 @@ impl Entry {
             Entry::PairMap(m) => format!("PairMap[{}]", m.len()),
             Entry::AnyMap(m) => format!("AnyMap[{}]", m.len()),
             Entry::Patternizer(p) => p.name.clone(),
+            Entry::PatternRule(r) => format!("PatternRule[{:?}]", r.pattern),
+            Entry::PatternMetrics(m) => format!(
+                "PatternMetrics[matches:{}, misses:{}]",
+                m.total_matches, m.total_misses
+            ),
+            Entry::TokenPattern(t) => format!("TokenPattern[{:?}]", t),
+            Entry::SamplizerPattern(p) => format!("SamplizerPattern[{}]", p.pattern_name),
+            Entry::SamplizerFilePair(f) => format!("SamplizerFilePair[{}]", f.c_file_path),
+            Entry::SamplizerValidation(v) => format!("SamplizerValidation[{}]", v.pattern_id),
+            Entry::SamplizerStats(s) => format!("SamplizerStats[{}]", s.patterns_generated),
         }
     }
 
@@ -224,11 +254,21 @@ impl Entry {
             Entry::StrMap(m) => format!("{}strs", m.len()),
             Entry::BoolMap(m) => format!("{}bools", m.len()),
             Entry::FuncMap(m) => format!("{}funcs", m.len()),
-            Entry::PathMap(m) => format!("{}hdlrs", m.len()),
-            Entry::HandlerMap(m) => format!("{}hdlrs", m.len()),
-            Entry::PairMap(m) => format!("{}pairs", m.len()),
-            Entry::AnyMap(m) => format!("{}any", m.len()),
-            Entry::Patternizer(p) => format!("{}pats", p.token_patterns.len()),
+            Entry::PathMap(m) => format!("Handler Entries[{}]", m.len()),
+            Entry::HandlerMap(m) => format!("HandlerMap Entries[{}]", m.len()),
+            Entry::PairMap(m) => format!("Pair Entries[{}]", m.len()),
+            Entry::AnyMap(m) => format!("Any Entries[{}]", m.len()),
+            Entry::Patternizer(p) => format!("Pattern[{}]", p.token_patterns.len()),
+            Entry::PatternRule(_) => "1rule".to_string(),
+            Entry::PatternMetrics(m) => format!("{}metrics", m.total_matches + m.total_misses),
+            Entry::TokenPattern(_) => "1pattern".to_string(),
+            Entry::SamplizerPattern(p) => format!(
+                "Rules[{}]",
+                p.extraction_pattern.as_ref().map_or(0, |s| s.len())
+            ),
+            Entry::SamplizerFilePair(f) => format!("file pair[{}]", f.c_file_path),
+            Entry::SamplizerValidation(v) => format!("samplizer Validation[{}]", v.pattern_id),
+            Entry::SamplizerStats(s) => format!("Patterns Generated[{}]", s.patterns_generated),
         }
     }
 }
@@ -292,6 +332,29 @@ impl std::fmt::Display for Entry {
             Entry::PairMap(m) => write!(f, "PairMap[{}]", m.len()),
             Entry::AnyMap(m) => write!(f, "AnyMap[{}]", m.len()),
             Entry::Patternizer(p) => write!(f, "Pattern({})", p.name.replace('\n', " | ")),
+            Entry::PatternRule(r) => write!(f, "PatternRule({:?})", r.pattern),
+            Entry::PatternMetrics(m) => write!(
+                f,
+                "PatternMetrics(matches:{}, misses:{})",
+                m.total_matches, m.total_misses
+            ),
+            Entry::TokenPattern(t) => write!(f, "TokenPattern({:?})", t),
+            Entry::SamplizerPattern(p) => write!(
+                f,
+                "SamplizerPattern({})",
+                p.pattern_name.replace('\n', " | ")
+            ),
+            Entry::SamplizerFilePair(fp) => write!(
+                f,
+                "SamplizerFilePair({})",
+                fp.c_file_path.replace('\n', " | ")
+            ),
+            Entry::SamplizerValidation(v) => write!(
+                f,
+                "SamplizerValidation({})",
+                v.pattern_id.replace('\n', " | ")
+            ),
+            Entry::SamplizerStats(s) => write!(f, "SamplizerStats({})", s.patterns_generated),
         }
     }
 }

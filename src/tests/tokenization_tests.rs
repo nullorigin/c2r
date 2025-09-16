@@ -1,10 +1,8 @@
 //! Comprehensive tests for tokenization functionality
 //! Tests the tokenizer's ability to process C code and generate proper Token sequences
 
-use crate::config::Context;
-use crate::error::ConversionError;
-use crate::token::Token;
-use crate::token::Tokenizer;
+use crate::error::C2RError;
+use crate::token::{Token, Tokenizer};
 
 /// Test basic tokenizer creation and initialization
 #[test]
@@ -21,9 +19,8 @@ fn test_tokenizer_creation() {
 
 /// Test tokenizing simple C identifiers
 #[test]
-fn test_tokenize_identifiers() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_identifiers() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"int main variable_name".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -61,9 +58,8 @@ fn test_tokenize_identifiers() -> Result<(), ConversionError> {
 
 /// Test tokenizing C keywords
 #[test]
-fn test_tokenize_keywords() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_keywords() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"if while for return struct typedef".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -110,9 +106,8 @@ fn test_tokenize_keywords() -> Result<(), ConversionError> {
 
 /// Test tokenizing numeric literals
 #[test]
-fn test_tokenize_numbers() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_numbers() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"42 3.14 0x1A 077".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -150,9 +145,8 @@ fn test_tokenize_numbers() -> Result<(), ConversionError> {
 
 /// Test tokenizing operators and punctuation
 #[test]
-fn test_tokenize_operators() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_operators() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"+ - * / = == != < > <= >= && ||".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -198,9 +192,8 @@ fn test_tokenize_operators() -> Result<(), ConversionError> {
 
 /// Test tokenizing string literals
 #[test]
-fn test_tokenize_string_literals() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_string_literals() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"\"hello world\" 'x' \"escape\\\"test\"".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -245,9 +238,8 @@ fn test_tokenize_string_literals() -> Result<(), ConversionError> {
 
 /// Test tokenizing C comments
 #[test]
-fn test_tokenize_comments() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_comments() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"// single line comment\n/* multi line\n   comment */\nint x;".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -274,9 +266,8 @@ fn test_tokenize_comments() -> Result<(), ConversionError> {
 
 /// Test tokenizing preprocessor directives
 #[test]
-fn test_tokenize_preprocessor() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_preprocessor() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"#include <stdio.h>\n#define MAX 100\n#ifdef DEBUG".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -324,9 +315,8 @@ fn test_tokenize_preprocessor() -> Result<(), ConversionError> {
 
 /// Test tokenizing function declarations
 #[test]
-fn test_tokenize_function_declaration() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_function_declaration() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"int main(int argc, char* argv[]) { return 0; }".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -336,39 +326,36 @@ fn test_tokenize_function_declaration() -> Result<(), ConversionError> {
         .iter()
         .filter_map(|t| if let Token::l(s) = t { Some(*s) } else { None })
         .collect();
-    let string_tokens: Vec<String> = tokens
+    let string_tokens: Vec<&str> = tokens
         .iter()
         .filter_map(|t| {
             if let Token::s(s) = t {
-                Some(s.clone())
+                Some(s.as_str())
             } else {
                 None
             }
         })
         .collect();
-    let int_tokens: Vec<i128> = tokens
+    let int_tokens: Vec<&i128> = tokens
         .iter()
-        .filter_map(|t| if let Token::i(n) = t { Some(*n) } else { None })
+        .filter_map(|t| if let Token::i(n) = t { Some(n) } else { None })
         .collect();
 
     // Should have tokens representing the function declaration
     assert!(!tokens.is_empty(), "Should have tokens");
 
     // Check for function declaration components
+    assert!(string_tokens.contains(&"int"), "Should tokenize 'int' type");
     assert!(
-        string_tokens.contains(&"int".to_string()),
-        "Should tokenize 'int' type"
-    );
-    assert!(
-        string_tokens.contains(&"main".to_string()),
+        string_tokens.contains(&"main"),
         "Should tokenize 'main' function name"
     );
     assert!(
-        string_tokens.contains(&"argc".to_string()),
+        string_tokens.contains(&"argc"),
         "Should tokenize 'argc' parameter"
     );
     assert!(
-        string_tokens.contains(&"return".to_string()),
+        string_tokens.contains(&"return"),
         "Should tokenize 'return' keyword"
     );
 
@@ -391,16 +378,14 @@ fn test_tokenize_function_declaration() -> Result<(), ConversionError> {
     );
 
     // Check for integer literal
-    assert!(int_tokens.contains(&0), "Should tokenize '0' as integer");
+    assert!(int_tokens.contains(&&0), "Should tokenize '0' as integer");
 
     Ok(())
 }
-
 /// Test tokenizing struct definitions
 #[test]
-fn test_tokenize_struct_definition() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_struct_definition() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"struct Point { int x; int y; };".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -468,9 +453,8 @@ fn test_tokenize_struct_definition() -> Result<(), ConversionError> {
 
 /// Test tokenizing array declarations
 #[test]
-fn test_tokenize_array_declaration() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_array_declaration() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"int arr[10]; char buffer[256];".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -480,42 +464,36 @@ fn test_tokenize_array_declaration() -> Result<(), ConversionError> {
         .iter()
         .filter_map(|t| if let Token::l(s) = t { Some(*s) } else { None })
         .collect();
-    let string_tokens: Vec<String> = tokens
+    let string_tokens: Vec<&str> = tokens
         .iter()
         .filter_map(|t| {
             if let Token::s(s) = t {
-                Some(s.clone())
+                Some(s.as_str())
             } else {
                 None
             }
         })
         .collect();
-    let int_tokens: Vec<i128> = tokens
+    let int_tokens: Vec<&i128> = tokens
         .iter()
-        .filter_map(|t| if let Token::i(n) = t { Some(*n) } else { None })
+        .filter_map(|t| if let Token::i(n) = t { Some(n) } else { None })
         .collect();
 
     // Check array declaration components
+    assert!(string_tokens.contains(&"int"), "Should have 'int' type");
     assert!(
-        string_tokens.contains(&"int".to_string()),
-        "Should have 'int' type"
-    );
-    assert!(
-        string_tokens.contains(&"arr".to_string()),
+        string_tokens.contains(&"arr"),
         "Should have 'arr' identifier"
     );
+    assert!(string_tokens.contains(&"char"), "Should have 'char' type");
     assert!(
-        string_tokens.contains(&"char".to_string()),
-        "Should have 'char' type"
-    );
-    assert!(
-        string_tokens.contains(&"buffer".to_string()),
+        string_tokens.contains(&"buffer"),
         "Should have 'buffer' identifier"
     );
 
     // Check for numeric literals
-    assert!(int_tokens.contains(&10), "Should have array size 10");
-    assert!(int_tokens.contains(&256), "Should have array size 256");
+    assert!(int_tokens.contains(&&10), "Should have array size 10");
+    assert!(int_tokens.contains(&&256), "Should have array size 256");
 
     // Check for punctuation
     assert!(
@@ -536,9 +514,8 @@ fn test_tokenize_array_declaration() -> Result<(), ConversionError> {
 
 /// Test tokenizing complex expressions
 #[test]
-fn test_tokenize_complex_expression() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_complex_expression() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"result = (a + b) * c / d - e % f;".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -548,11 +525,11 @@ fn test_tokenize_complex_expression() -> Result<(), ConversionError> {
         .iter()
         .filter_map(|t| if let Token::l(s) = t { Some(*s) } else { None })
         .collect();
-    let string_tokens: Vec<String> = tokens
+    let string_tokens: Vec<&str> = tokens
         .iter()
         .filter_map(|t| {
             if let Token::s(s) = t {
-                Some(s.clone())
+                Some(s.as_str())
             } else {
                 None
             }
@@ -565,7 +542,7 @@ fn test_tokenize_complex_expression() -> Result<(), ConversionError> {
 
     // Check expression variables - multi-character identifiers are string tokens
     assert!(
-        string_tokens.contains(&"result".to_string()),
+        string_tokens.contains(&"result"),
         "Should have 'result' variable"
     );
 
@@ -603,20 +580,18 @@ fn test_tokenize_complex_expression() -> Result<(), ConversionError> {
     assert!(literal_tokens.contains(&"%"), "Should have '%' operator");
     assert!(literal_tokens.contains(&"="), "Should have '=' operator");
 
-    // Check opening parenthesis as literal token
+    // Check punctuation as literal tokens
     assert!(literal_tokens.contains(&"("), "Should have '(' parenthesis");
-
-    // Note: Closing parenthesis and semicolon are not being produced by tokenizer in current run
-    // This might indicate the tokenizer is stopping early or there's a parsing issue
+    assert!(literal_tokens.contains(&")"), "Should have ')' parenthesis");
+    assert!(literal_tokens.contains(&";"), "Should have ';' semicolon");
 
     Ok(())
 }
 
 /// Test empty input handling
 #[test]
-fn test_tokenize_empty_input() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_empty_input() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = Vec::new();
     let tokens = tokenizer.tokenize(c_code)?;
@@ -633,9 +608,8 @@ fn test_tokenize_empty_input() -> Result<(), ConversionError> {
 
 /// Test whitespace handling
 #[test]
-fn test_tokenize_whitespace_handling() -> Result<(), ConversionError> {
-    let mut context = Context::new("test_context");
-    let tokenizer = Tokenizer::new("test_tokenizer");
+fn test_tokenize_whitespace_handling() -> Result<(), C2RError> {
+    let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"   int   main   (   )   {   }   ".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;

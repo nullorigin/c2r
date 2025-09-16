@@ -1,5 +1,7 @@
+pub mod analysis;
 pub mod config;
 pub mod convert;
+pub mod document;
 pub mod entry;
 pub mod error;
 pub mod extract;
@@ -10,14 +12,16 @@ pub mod lock;
 pub mod logging;
 pub mod pattern;
 pub mod registry;
+pub mod sample;
 pub mod table;
 pub mod tests;
+pub mod thread;
 pub mod token;
-
+pub use crate::analysis::*;
 pub use crate::config::Context;
-// pub use crate::report; // Commented out to avoid macro conflict
 pub use crate::config::*;
 pub use crate::convert::*;
+pub use crate::document::*;
 pub use crate::entry::*;
 pub use crate::error::*;
 pub use crate::extract::*;
@@ -27,14 +31,17 @@ pub use crate::lock::*;
 pub use crate::logging::*;
 pub use crate::pattern::*;
 pub use crate::registry::*;
+pub use crate::sample::*;
 pub use crate::table::*;
 pub use crate::token::*;
+
+use core::clone::Clone;
 // Import logging macros
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-
+#[allow(unused)]
 fn main() {
     let args: Vec<String> = env::args().collect();
     let mut args_iter = args.iter();
@@ -45,16 +52,15 @@ fn main() {
     let mut output_file = String::new();
     let mut output_to_stdout = true;
     let mut command = "convert".to_string();
+    #[allow(unused)]
     let mut run_tests = false;
-    let mut display_registry = false;
 
     // Default verbosity level is errors only (1)
     let mut verbosity = VERBOSITY_ERROR;
     let mut verbose_count = 1; // For the new logging system
 
     // Create a configuration object with defaults
-    let mut context = &mut Context::new("default");
-
+    let mut context = Context::new("main");
     // Parse command line arguments
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -62,8 +68,10 @@ fn main() {
                 run_tests = true;
             }
             "--display-registry" => {
-                display_registry = true;
                 command = "display-registry".to_string();
+            }
+            "--analyze-patterns" => {
+                command = "analyze-patterns".to_string();
             }
             "-v" | "--verbose" => {
                 // Look for a numeric value after -v
@@ -92,7 +100,7 @@ fn main() {
             "--base-dir" => {
                 // Set the base directory
                 if let Some(base_dir) = args_iter.next() {
-                    context = context.with_base_dir(base_dir);
+                    context.with_base_dir(base_dir);
                     debug!("Set base directory: {}", base_dir);
                 } else {
                     debug!("Missing directory path after {}", arg);
@@ -100,7 +108,7 @@ fn main() {
             }
             "--system-includes" => {
                 // Enable processing of system includes
-                context = context.with_system_includes(true);
+                context.with_system_includes(true);
                 debug!("System include processing enabled");
             }
             "--output-file" | "-o" => {
@@ -128,7 +136,7 @@ fn main() {
                     // Automatically set the base directory to the input file's directory
                     if let Some(parent) = Path::new(&file_path).parent() {
                         if parent.to_string_lossy() != "" {
-                            context = context.with_base_dir(parent.to_string_lossy().to_string());
+                            context.with_base_dir(parent.to_string_lossy().to_string());
                             debug!("Base directory set to input file's parent: {:?}", parent);
                         }
                     }
@@ -145,7 +153,7 @@ fn main() {
                     // Automatically set the base directory to the input file's directory
                     if let Some(parent) = Path::new(&file_path).parent() {
                         if parent.to_string_lossy() != "" {
-                            context = context.with_base_dir(parent);
+                            context.with_base_dir(parent.to_string_lossy().to_string());
                             debug!("Auto-set base directory: {:?}", parent);
                         }
                     }
@@ -163,7 +171,7 @@ fn main() {
                     // Automatically set the base directory to the input file's directory
                     if let Some(parent) = Path::new(&arg).parent() {
                         if parent.to_string_lossy() != "" {
-                            context = context.with_base_dir(parent.to_string_lossy().to_string());
+                            context.with_base_dir(parent.to_string_lossy().to_string());
                             debug!("Auto-set base directory: {:?}", parent);
                         }
                     }
@@ -176,8 +184,9 @@ fn main() {
     logging::initialize(verbose_count);
 
     // Set verbosity in the context and apply it globally
-    context = context.with_verbosity(verbosity);
-    context.apply();
+    context.set_verbosity(verbosity);
+
+    context.push();
 
     // Print the current verbosity level
     match verbosity {
@@ -190,6 +199,24 @@ fn main() {
 
     // Check if we should run handler tests
 
+    // Handle pattern analysis command (doesn't require input file)
+    if command == "analyze-patterns" {
+        println!("🔍 Running Samplizer Pattern Analysis");
+        println!(
+            "═══════════════════════════════════════════════════════════════════════════════════════"
+        );
+        let mut analyzer = Analyzer::new();
+        match analyzer.analyze_patterns_with_samplizer() {
+            Ok(()) => {
+                println!("✅ Pattern analysis completed successfully");
+            }
+            Err(e) => {
+                error!("Pattern analysis failed: {}", e);
+            }
+        }
+        return; // Exit after analysis
+    }
+
     // Handle registry display command (doesn't require input file)
     if command == "display-registry" {
         println!("🗃️  Displaying Registry Database View");
@@ -201,9 +228,9 @@ fn main() {
         println!("🔄 Initializing handlers and patterns for display...");
 
         // Register all available handlers
-        let mut handlers = context.handlers.clone();
-        handlers.register_all_shared(create_all_handlers(), Id::get("display_registry_handlers"));
-        context.handlers = handlers;
+        context
+            .handlers
+            .register_all_shared(create_all_handlers(), Id::get("display_registry_handlers"));
 
         // Register common patterns
         pattern::register_common_multi_token_patterns();
@@ -212,10 +239,7 @@ fn main() {
         let sample_handlers = create_all_handlers();
         for (i, handler) in sample_handlers.iter().enumerate() {
             let handler_id = Id::get(&format!("sample_handler_{}", i));
-            context
-                .registry
-                .entries
-                .insert(handler_id, Entry::Handler(handler.clone()));
+            context.set_entry(handler_id.name(), Entry::Handler(handler.clone()));
         }
 
         // Add some sample patterns to registry
@@ -224,10 +248,7 @@ fn main() {
         sample_pattern.description = "C Function Pattern".to_string();
         sample_pattern.id = Id::get("sample_c_function");
         let pattern_id = Id::get("sample_pattern_c_function");
-        context
-            .registry
-            .entries
-            .insert(pattern_id, Entry::Patternizer(sample_pattern));
+        context.set_entry(pattern_id.name(), Entry::Patternizer(sample_pattern));
 
         // Add some sample reports
         let sample_report = HandlerReport {
@@ -244,24 +265,12 @@ fn main() {
             metadata: std::collections::HashMap::new(),
         };
         let report_id = Id::get("sample_report_1");
-        context
-            .registry
-            .entries
-            .insert(report_id, Entry::HandlerReport(sample_report));
+        context.set_entry(report_id.name(), Entry::HandlerReport(sample_report));
 
         // Add some sample string entries
-        context.registry.entries.insert(
-            Id::get("sample_string"),
-            Entry::Str("Sample C code".to_string()),
-        );
-        context
-            .registry
-            .entries
-            .insert(Id::get("sample_bool"), Entry::Bool(true));
-        context
-            .registry
-            .entries
-            .insert(Id::get("sample_val"), Entry::Val(42));
+        context.set_entry("sample_string", Entry::Str("Sample C code".to_string()));
+        context.set_entry("sample_bool", Entry::Bool(true));
+        context.set_entry("sample_val", Entry::Val(42));
 
         println!(
             "✅ Initialization completed - {} handlers registered, {} registry entries populated",
@@ -277,6 +286,7 @@ fn main() {
         return; // Exit after displaying registry
     }
 
+    context.push();
     // Check if we have an input file
     if !input_file.is_empty() {
         // Process based on command
@@ -343,20 +353,39 @@ fn main() {
         info!("  --stdout               Force output to stdout (default)");
     }
 }
-
-fn process_file(input_path: &str) -> Result<ProcessedResults, ConversionError> {
+#[allow(unused)]
+fn process_file(input_path: &str) -> Result<ProcessedResults> {
     info!("Processing file {}", input_path);
 
     match fs::read_to_string(input_path) {
         Ok(content) => {
-            let tokenizer = context!().tokenizer.clone();
-            let mut handlers = context!().handlers.clone();
-            handlers.register_all_shared(create_all_handlers(), Id::get("all_handlers_shared"));
-            let tokens = tokenizer.tokenize(content.as_bytes().to_vec())?;
-            let result = handlers.process_all(tokens.as_slice());
-            result
+            let mut context: Context = context!();
+            context
+                .handlers
+                .register_all_shared(create_all_handlers(), Id::get("all_handlers_shared"));
+            let tokens = &context.tokenizer.tokenize(content.as_bytes().to_vec())?;
+            context.original_tokens = tokens.clone();
+            context.tokens = tokens.clone();
+            context.initialize_patterns();
+            // Push tokens and patterns to Global context - essential for handler processing
+            context.push(); // Push context to Global to initialize patterns in Global patternizer
+
+            let results = context.handlers.process_all(&tokens)?;
+
+            context.pull();
+
+            context.display_full_context();
+
+            Ok(results)
         }
-        Err(e) => Err(ConversionError::new("Failed to process result")),
+        Err(e) => {
+            eprintln!("File read error: {}", e);
+            Err(C2RError::new(
+                Kind::Io,
+                Reason::Failed("to read file"),
+                Some(e.to_string()),
+            ))
+        }
     }
 }
 
@@ -412,7 +441,7 @@ fn extract_converted_code_from_results(results: &ProcessedResults) -> String {
                     target
                 );
             }
-            HandlerResult::Extracted(element, _, code, id) => {
+            HandlerResult::Extracted(_element, _, code, id) => {
                 debug!(
                     "DEBUG: Result {}: HandlerResult::Extracted from handler {} with code: '{}'",
                     i,
@@ -420,7 +449,7 @@ fn extract_converted_code_from_results(results: &ProcessedResults) -> String {
                     code
                 );
             }
-            HandlerResult::Converted(element, _, code, id) => {
+            HandlerResult::Converted(_element, _, code, id) => {
                 debug!(
                     "DEBUG: Result {}: HandlerResult::Converted from handler {} with code: '{}'",
                     i,
@@ -454,48 +483,6 @@ fn extract_converted_code_from_results(results: &ProcessedResults) -> String {
     }
 }
 
-/// Extract Rust code from a HandlerResult
-fn extract_code_from_handler_result(result: &HandlerResult) -> Option<String> {
-    match result {
-        HandlerResult::Converted(element, _, rust_code, _id) => {
-            // Use the string from HandlerResult if available, otherwise extract from element
-            if !rust_code.trim().is_empty() {
-                Some(rust_code.clone())
-            } else {
-                Some(extract_code_from_converted_element(element))
-            }
-        }
-        HandlerResult::Extracted(element, _, rust_code, _id) => {
-            // For extracted elements, use the rust_code string
-            if !rust_code.trim().is_empty() {
-                Some(rust_code.clone())
-            } else {
-                None // ExtractedElement doesn't have rust_code field
-            }
-        }
-        HandlerResult::Completed(_tokens, _, rust_code, _id) => Some(rust_code.clone()),
-        HandlerResult::Processed(_tokens, _, rust_code, _id) => Some(rust_code.clone()),
-        _ => None,
-    }
-}
-
-/// Extract Rust code from a ConvertedElement
-fn extract_code_from_converted_element(element: &ConvertedElement) -> String {
-    match element {
-        ConvertedElement::Function(func) => func.rust_code.clone(),
-        ConvertedElement::Struct(s) => s.rust_code.clone(),
-        ConvertedElement::Enum(e) => e.rust_code.clone(),
-        ConvertedElement::Typedef(t) => t.rust_code.clone(),
-        ConvertedElement::Global(g) => g.rust_code.clone(),
-        ConvertedElement::Macro(m) => m.rust_code.clone(),
-        ConvertedElement::Include(i) => i.rust_code.clone(),
-        ConvertedElement::Array(a) => a.rust_code.clone(),
-        ConvertedElement::Comment(c) => c.rust_code.clone(),
-        ConvertedElement::Expression(expr) => expr.rust_code.clone(),
-        ConvertedElement::ControlFlow(cf) => cf.rust_code.clone(),
-    }
-}
-
 /// Format the final output with proper structure and comments
 fn format_final_output(code: &str) -> String {
     let mut output = String::new();
@@ -523,7 +510,7 @@ fn format_final_output(code: &str) -> String {
 }
 
 /// Write converted code to an output file
-fn write_output_file(file_path: &str, code: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn write_output_file(file_path: &str, code: &str) -> Result<()> {
     // Create parent directories if they don't exist
     if let Some(parent) = Path::new(file_path).parent() {
         fs::create_dir_all(parent)?;

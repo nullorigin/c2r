@@ -1,17 +1,290 @@
-use super::common::{not_handled, replace_with_range};
-use crate::error::ConversionError;
-use crate::extract::ExtractedElement;
-use crate::extract::ExtractedGlobal;
-use crate::handler::HandlerResult;
-use crate::{ConvertedElement, ConvertedGlobal, Id, Token, context, convert_type, report};
-use crate::{
-    HandlerPhase::{Convert, Extract, Handle, Report},
-    HandlerReport,
-    ReportLevel::{Error, Info, Warning},
-};
-use std::collections::HashMap;
+//! Global handler for C to Rust global variable conversion
+//! Uses Patternizer exclusively for detection and conversion
 
-/// Creates a global variable handler that can detect and convert C global variables
+use super::common::not_handled;
+use crate::convert::convert_type;
+use crate::pattern::{PatternResult, Patternizer};
+use crate::token::Token;
+use crate::{
+    C2RError, ConvertedElement, ConvertedGlobal, ElementInfo, ExtractedElement, ExtractedGlobal,
+    GlobalInfo, HandlerPhase, HandlerReport, HandlerResult, Id, Kind, Reason, ReportLevel,
+};
+use crate::{
+    HandlerPhase::{Process, Report},
+    ReportLevel::{Info, Warning},
+};
+use crate::{context, report};
+use std::ops::Range;
+
+/// Report callback: Collects global handler reports
+pub fn report_global() -> Result<HandlerReport, C2RError> {
+    let context = context!();
+    let reports = context.get_reports_by_handler("global_handler");
+
+    let (info_count, warning_count, error_count) =
+        reports
+            .iter()
+            .fold((0, 0, 0), |acc, report| match report.level {
+                ReportLevel::Error => (acc.0, acc.1, acc.2 + 1),
+                ReportLevel::Warning => (acc.0, acc.1 + 1, acc.2),
+                _ => (acc.0 + 1, acc.1, acc.2),
+            });
+
+    Ok(HandlerReport {
+        report_id: Box::new(Id::get(&Id::gen_name("global_handler"))),
+        handler_id: Box::new(Id::get("global_handler")),
+        handler_name: "global_handler".to_string(),
+        function_name: "report_global".to_string(),
+        message: format!(
+            "Global handler summary: {} reports ({} info, {} warnings, {} errors)",
+            reports.len(),
+            info_count,
+            warning_count,
+            error_count
+        ),
+        level: match (error_count, warning_count) {
+            (0, 0) => ReportLevel::Info,
+            (0, _) => ReportLevel::Warning,
+            _ => ReportLevel::Error,
+        },
+        tokens_processed: reports.len(),
+        tokens_consumed: 0,
+        phase: HandlerPhase::Report,
+        success: error_count == 0,
+        metadata: std::collections::HashMap::new(),
+    })
+}
+
+/// Handle callback: Sets up patternizer and registers global patterns
+fn handle_global(token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    report!(
+        "global_handler",
+        "handle_global",
+        ReportLevel::Info,
+        HandlerPhase::Handle,
+        format!("HANDLE DEBUG: Processing {} tokens", {
+            let mut context = crate::context!();
+            context.pull();
+            context.tokens[token_range.clone()].len()
+        }),
+        true
+    );
+    let mut context = context!();
+
+    // Register global patterns in the global registry via context
+    let global_patterns = [
+        "global_variable",
+        "global_const",
+        "global_static",
+        "global_extern",
+        "global",
+    ];
+    for pattern in &global_patterns {
+        let mut temp_context = crate::context!();
+        temp_context.pull();
+        match context
+            .patternizer
+            .match_pattern(pattern, &temp_context.tokens[token_range.clone()])
+        {
+            PatternResult::Match { consumed_tokens } => {
+                report!(
+                    "global_handler",
+                    "handle_global",
+                    ReportLevel::Info,
+                    HandlerPhase::Handle,
+                    format!(
+                        "HANDLE DEBUG: Patternizer pattern '{}' matched with {} tokens",
+                        pattern, consumed_tokens
+                    ),
+                    true
+                );
+                // Convert using pattern data
+                match convert_global(token_range.clone())? {
+                    Some(ConvertedElement::Global(converted_global)) => {
+                        let code = converted_global.code.clone();
+                        return Ok(HandlerResult::Converted(
+                            ConvertedElement::Global(converted_global),
+                            token_range.clone(),
+                            code,
+                            Id::get("global_handler"),
+                        ));
+                    }
+                    _ => {
+                        report!(
+                            "global_handler",
+                            "handle_global",
+                            ReportLevel::Error,
+                            HandlerPhase::Handle,
+                            "Failed to convert global after pattern match",
+                            false
+                        );
+                        return not_handled();
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    // Fallback: Use same logic as process_global for consistency
+    let mut context_temp = crate::context!();
+    context_temp.pull();
+    let first_token = context_temp.tokens[token_range.clone()][0].to_string();
+    if ["static", "extern", "const"]
+        .iter()
+        .any(|&kw| first_token == kw)
+        || (context_temp.tokens[token_range.clone()].len() >= 3
+            && context_temp.tokens[token_range.clone()]
+                .iter()
+                .any(|t| t.to_string() == "="))
+    {
+        report!(
+            "global_handler",
+            "handle_global",
+            ReportLevel::Info,
+            HandlerPhase::Handle,
+            format!(
+                "HANDLE DEBUG: Fallback logic matched for token: '{}'",
+                first_token
+            ),
+            true
+        );
+
+        // Convert using fallback detection
+        match convert_global(token_range.clone())? {
+            Some(ConvertedElement::Global(converted_global)) => {
+                let code = converted_global.code.clone();
+                return Ok(HandlerResult::Converted(
+                    ConvertedElement::Global(converted_global),
+                    token_range.clone(),
+                    code,
+                    Id::get("global_handler"),
+                ));
+            }
+            _ => {
+                report!(
+                    "global_handler",
+                    "handle_global",
+                    ReportLevel::Error,
+                    HandlerPhase::Handle,
+                    "Failed to convert global using fallback logic",
+                    false
+                );
+                return not_handled();
+            }
+        }
+    }
+
+    report!(
+        "global_handler",
+        "handle_global",
+        ReportLevel::Info,
+        HandlerPhase::Handle,
+        "HANDLE DEBUG: No patterns matched, returning NotHandled",
+        true
+    );
+
+    not_handled()
+}
+
+/// Process callback: Uses Patternizer to detect global variable patterns
+fn process_global(token_range: Range<usize>) -> Result<bool, C2RError> {
+    let mut context = crate::context!();
+
+    // Add bounds checking to prevent slice index out of bounds
+    if token_range.end > context.tokens.len() || token_range.start >= context.tokens.len() {
+        return Ok(false);
+    }
+
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, crate::Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+
+    if token_range.start >= tokens.len() {
+        return Ok(false);
+    }
+
+    // Debug: Show what tokens we're checking
+    let token_preview = tokens
+        .iter()
+        .take(10)
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    report!(
+        "global_handler",
+        "process_global",
+        Info,
+        Process,
+        format!(
+            "GLOBAL DEBUG: Checking {} tokens: [{}{}]",
+            tokens.len(),
+            token_preview,
+            if tokens.len() > 10 { "..." } else { "" }
+        ),
+        true
+    );
+
+    // Check for global variable patterns
+    let global_patterns = [
+        "global_variable",
+        "global_const",
+        "global_static",
+        "global_extern",
+        "global",
+    ];
+
+    for pattern in &global_patterns {
+        if let PatternResult::Match { consumed_tokens: _ } =
+            context.patternizer.match_pattern(pattern, tokens)
+        {
+            report!(
+                "global_handler",
+                "process_global",
+                Info,
+                Process,
+                format!("Global pattern '{}' matched!", pattern),
+                true
+            );
+            return Ok(true);
+        }
+    }
+
+    // Fallback: check for global variable indicators
+    let first_token = tokens[0].to_string();
+    let result = ["static", "extern", "const"]
+        .iter()
+        .any(|&kw| first_token == kw)
+        || (tokens.len() >= 3 && tokens.iter().any(|t| t.to_string() == "="));
+
+    if result {
+        report!(
+            "global_handler",
+            "process_global",
+            Info,
+            Process,
+            format!("Global fallback matched for token: '{}'", first_token),
+            true
+        );
+    }
+
+    Ok(result)
+}
+
+/// Represents the kind of global variable
+#[derive(Debug, Clone, PartialEq)]
+pub enum GlobalKind {
+    Variable,
+    Constant,
+    Array,
+    Pointer,
+}
+
+/// Creates a global handler that uses Patternizer exclusively
 pub fn create_global_handler() -> crate::handler::Handler {
     let handler_id = Id::get("global_handler");
     let handler_role = "global";
@@ -25,500 +298,19 @@ pub fn create_global_handler() -> crate::handler::Handler {
         Some(handle_global),
         Some(extract_global),
         Some(convert_global),
+        Some(document_global),
         Some(report_global),
-        Some(result_global),
-        Some(redirect_global),
+        Some(result_global),   // Result callback for final processing
+        Some(redirect_global), // Redirect callback for nested structures
     )
 }
 
-/// Report callback: Collects and summarizes all global-related reports from the context
-fn report_global(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
-    let context = context!();
-    // Get all reports for this handler
-    let reports = context.get_reports_by_handler("global");
-
-    // Count reports by level
-    let mut info_count = 0;
-    let mut warning_count = 0;
-    let mut error_count = 0;
-
-    for report in &reports {
-        match report.level {
-            Info => info_count += 1,
-            Warning => warning_count += 1,
-            Error => error_count += 1,
-            _ => info_count += 1, // Handle Debug and other variants as info
-        }
-    }
-
-    // Create summary report
-    Ok(HandlerReport {
-        report_id: Box::new(Id::get(&Id::gen_name("global_handler"))),
-        handler_id: Box::new(Id::get("global_handler")),
-        handler_name: "global".to_string(),
-        function_name: "report_global".to_string(),
-        message: format!(
-            "Global handler summary: {} reports ({} info, {} warnings, {} errors)",
-            reports.len(),
-            info_count,
-            warning_count,
-            error_count
-        ),
-        level: if error_count > 0 {
-            Error
-        } else if warning_count > 0 {
-            Warning
-        } else {
-            Info
-        },
-        tokens_processed: reports.len(),
-        tokens_consumed: 0,
-        phase: Report,
-        success: error_count == 0,
-        metadata: HashMap::new(),
-    })
-}
-
-/// Process callback: Initializes and confirms this handler can handle the tokens
-fn process_global(tokens: &[Token]) -> Result<bool, ConversionError> {
-    let _id = Id::get("process_global");
-
-    if tokens.is_empty() {
-        return Ok(false);
-    }
-
-    // Skip function, struct, enum, typedef, etc.
-    if contains_keyword(tokens, "function")
-        || contains_keyword(tokens, "struct")
-        || contains_keyword(tokens, "enum")
-        || contains_keyword(tokens, "typedef")
-        || contains_keyword(tokens, "return")
-    {
-        return Ok(false);
-    }
-
-    // Check if it's a variable declaration (ends with semicolon)
-    // and doesn't have local storage class specifiers
-    let has_semicolon = tokens.last().map_or(false, |t| t.to_string() == ";");
-
-    if !has_semicolon {
-        return Ok(false);
-    }
-
-    // Check for static or extern keywords which are common for globals
-    if contains_keyword(tokens, "static") || contains_keyword(tokens, "extern") {
-        return Ok(true);
-    }
-
-    // Check if this starts with a type name (simple check)
-    // A more robust implementation would check against a type registry
-    if is_type_keyword(&tokens[0].to_string()) {
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-/// Processes a global variable declaration
-fn handle_global(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_global");
-    report!(
-        "global_handler",
-        "handle_global",
-        Info,
-        Handle,
-        "Global handler processing tokens",
-        true
-    );
-
-    // Skip certain patterns that aren't globals
-    if contains_keyword(tokens, "function")
-        || contains_keyword(tokens, "struct")
-        || contains_keyword(tokens, "enum")
-        || contains_keyword(tokens, "typedef")
-        || contains_keyword(tokens, "return")
-    {
-        return not_handled();
-    }
-
-    // Ensure it ends with semicolon
-    if !tokens.last().map_or(false, |t| t.to_string() == ";") {
-        return not_handled();
-    }
-
-    // Extract the declaration components
-    if let Some(ExtractedElement::Global(element)) = extract_global(tokens)? {
-        report!(
-            "global_handler",
-            "handle_global",
-            Info,
-            Handle,
-            format!(
-                "Found global: {} {} {}{}",
-                element.storage_class.as_deref().unwrap_or(""),
-                element.type_name,
-                element.name,
-                if let Some(size) = &element.array_size {
-                    format!("[{}]", size)
-                } else {
-                    String::new()
-                }
-            ),
-            true
-        );
-
-        // Convert to Rust
-        let rust_code = convert_global_to_rust(
-            element.storage_class.as_deref(),
-            element.is_const,
-            &element.type_name,
-            &element.name,
-            element.array_size.as_deref(),
-            element.initializer.as_deref(),
-        )?;
-        // Global variable definitions process all input tokens
-        let token_range = 0..tokens.len();
-        replace_with_range(rust_code, token_range, id)
-    } else {
-        Err(ConversionError::new(
-            "Global handler failed to extract global",
-        ))
-    }
-}
-/// Extracts a global variable as an ExtractedElement
-pub fn extract_global(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    report!(
-        "global_handler",
-        "extract_global",
-        Info,
-        Extract,
-        "Global handler processing tokens",
-        true
-    );
-
-    // Skip certain patterns that aren't globals
-    if contains_keyword(tokens, "function")
-        || contains_keyword(tokens, "struct")
-        || contains_keyword(tokens, "enum")
-        || contains_keyword(tokens, "typedef")
-        || contains_keyword(tokens, "return")
-    {
-        return Ok(None);
-    }
-
-    // Ensure it ends with semicolon
-    if !tokens.last().map_or(false, |t| t.to_string() == ";") {
-        return Ok(None);
-    }
-
-    // Extract the declaration components inline
-    let mut storage_class = None;
-    let mut is_const = false;
-    let mut type_tokens = Vec::new();
-    let mut name = String::new();
-    let mut array_size = None;
-    let mut initializer = None;
-
-    let mut i = 0;
-
-    // Process storage class and type qualifiers
-    while i < tokens.len() - 1 {
-        // Skip the semicolon at the end
-        let token = tokens[i].to_string();
-
-        match token.as_str() {
-            "static" | "extern" => {
-                storage_class = Some(token.clone());
-                i += 1;
-                continue;
-            }
-            "const" => {
-                is_const = true;
-                i += 1;
-                continue;
-            }
-            _ => {}
-        }
-
-        // Process type name until we find the variable name
-        if name.is_empty() {
-            // Check if this is an identifier that could be the variable name
-            if i > 0 && !is_keyword(&token) && !token.starts_with("*") {
-                // The previous tokens form the type
-                if let Some(next_token) = tokens.get(i + 1) {
-                    let next = next_token.to_string();
-
-                    // Check if this is actually the variable name
-                    if next == ";" || next == "=" || next == "[" {
-                        name = token;
-                        i += 1;
-                        continue;
-                    }
-                }
-            }
-
-            // Still part of the type
-            type_tokens.push(tokens[i].clone());
-            i += 1;
-            continue;
-        }
-
-        // Process array size if present
-        if token == "[" {
-            i += 1;
-            if i < tokens.len() - 1 {
-                array_size = Some(tokens[i].to_string());
-                i += 1;
-
-                // Skip the closing bracket
-                if i < tokens.len() && tokens[i].to_string() == "]" {
-                    i += 1;
-                }
-            }
-            continue;
-        }
-
-        // Process initializer if present
-        if token == "=" {
-            i += 1;
-
-            // Extract initializer (everything up to the semicolon)
-            let init_start = i;
-            let init_end = tokens.len() - 1; // Skip the semicolon
-
-            let mut initializer_tokens = Vec::new();
-            for j in init_start..init_end {
-                initializer_tokens.push(tokens[j].to_string());
-            }
-
-            initializer = Some(initializer_tokens.join(" "));
-            break;
-        }
-
-        i += 1;
-    }
-
-    // Combine type tokens into the base type
-    let base_type = type_tokens
-        .iter()
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-
-    // If we didn't find a name, use the last token before the semicolon as the name
-    if name.is_empty() && !type_tokens.is_empty() {
-        name = type_tokens.pop().unwrap().to_string();
-    }
-
-    if name.is_empty() || base_type.is_empty() {
-        report!(
-            "global_handler",
-            "extract_global",
-            Error,
-            Extract,
-            "Could not extract global variable components",
-            true
-        );
-        return Ok(None);
-    }
-
-    report!(
-        "global_handler",
-        "extract_global",
-        Info,
-        Extract,
-        format!(
-            "Found global: {} {} {}{}",
-            storage_class.as_deref().unwrap_or(""),
-            base_type,
-            name,
-            if let Some(size) = &array_size {
-                format!("[{}]", size)
-            } else {
-                String::new()
-            }
-        ),
-        true
-    );
-
-    let is_static = storage_class.as_deref() == Some("static");
-    let is_extern = storage_class.as_deref() == Some("extern");
-
-    let extracted_global = ExtractedGlobal {
-        name,
-        array_dims: array_size
-            .as_deref()
-            .map_or_else(Vec::new, |s| vec![s.to_string()]),
-        type_name: base_type,
-        storage_class,
-        is_const,
-        is_static,
-        tokens: tokens.to_vec(),
-        is_extern,
-        array_size,
-        initializer,
-        original_code: tokens
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" "),
-        initial_value: None,
-    };
-    Ok(Some(ExtractedElement::Global(extracted_global)))
-}
-
-/// Converts a C global variable to Rust
-fn convert_global_to_rust(
-    storage_class: Option<&str>,
-    is_const: bool,
-    base_type: &str,
-    name: &str,
-    array_size: Option<&str>,
-    initializer: Option<&str>,
-) -> Result<String, ConversionError> {
-    let mut rust_code = String::new();
-
-    // Convert C type to Rust type
-    let rust_type = if let Some(rt) = convert_type(base_type) {
-        rt.to_string()
-    } else {
-        base_type.to_string()
-    };
-
-    // Determine Rust mutability
-    let is_mut = !is_const;
-
-    // Determine storage visibility
-    let storage = match storage_class {
-        Some("static") => "static",
-        Some("extern") => "extern \"C\"",
-        _ => "pub", // Default to public for globals
-    };
-
-    // Start building the Rust declaration
-    rust_code.push_str(storage);
-    rust_code.push(' ');
-
-    if is_mut {
-        rust_code.push_str("mut ");
-    }
-
-    rust_code.push_str(name);
-    rust_code.push_str(": ");
-
-    // Add array type if needed
-    if let Some(size) = array_size {
-        rust_code.push_str(&format!("[{}; {}]", rust_type, size));
-    } else {
-        rust_code.push_str(&rust_type);
-    }
-
-    // Add initializer if present
-    if let Some(init) = initializer {
-        rust_code.push_str(&format!(" = {}", init));
-    } else {
-        // Add default initializer if appropriate
-        if storage != "extern \"C\"" {
-            if let Some(size) = array_size {
-                // Default array initializer
-                rust_code.push_str(&format!(
-                    " = [{};  {}]",
-                    default_value_for_type(&rust_type),
-                    size
-                ));
-            } else {
-                // Default scalar initializer
-                rust_code.push_str(&format!(" = {}", default_value_for_type(&rust_type)));
-            }
-        }
-    }
-
-    rust_code.push_str(";\n");
-    Ok(rust_code)
-}
-/// Helper function to check if the token list contains a specific keyword
-fn contains_keyword(tokens: &[Token], keyword: &str) -> bool {
-    tokens.iter().any(|t| t.to_string() == keyword)
-}
-
-/// Helper function to check if a token is a keyword
-fn is_keyword(token: &str) -> bool {
-    match token {
-        "auto" | "break" | "case" | "char" | "const" | "continue" | "default" | "do" | "double"
-        | "else" | "enum" | "extern" | "float" | "for" | "goto" | "if" | "int" | "long"
-        | "register" | "return" | "short" | "signed" | "sizeof" | "static" | "struct"
-        | "switch" | "typedef" | "union" | "unsigned" | "void" | "volatile" | "while" => true,
-        _ => false,
-    }
-}
-
-/// Helper function to check if a token is a type keyword
-fn is_type_keyword(token: &str) -> bool {
-    match token {
-        "void" | "char" | "short" | "int" | "long" | "float" | "double" | "signed" | "unsigned"
-        | "bool" | "complex" | "_Bool" | "_Complex" | "_Imaginary" | "size_t" | "ssize_t"
-        | "intptr_t" | "uintptr_t" | "ptrdiff_t" | "FILE" | "va_list" | "int8_t" | "uint8_t"
-        | "int16_t" | "uint16_t" | "int32_t" | "uint32_t" | "int64_t" | "uint64_t" => true,
-        _ => false,
-    }
-}
-
-/// Get a default value for a Rust type
-fn default_value_for_type(rust_type: &str) -> &'static str {
-    match rust_type {
-        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => "0",
-        "f32" | "f64" => "0.0",
-        "bool" => "false",
-        "char" => "'\\0'",
-        "&str" => "\"\"",
-        "*mut _" | "*const _" => "std::ptr::null_mut()",
-        _ => "Default::default()",
-    }
-}
-
-/// Convert callback: Does the actual conversion of C to Rust code
-fn convert_global(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
-    let _id = Id::get("convert_global");
-    report!(
-        "global_handler",
-        "convert_global",
-        Info,
-        Convert,
-        format!("Converting global from {} tokens", tokens.len()),
-        true
-    );
-
-    if let Some(ExtractedElement::Global(extracted_global)) = extract_global(tokens)? {
-        let rust_code = convert_global_to_rust(
-            extracted_global.storage_class.as_deref(),
-            extracted_global.is_const,
-            &extracted_global.type_name,
-            &extracted_global.name,
-            extracted_global.array_size.as_deref(),
-            extracted_global.initializer.as_deref(),
-        )?;
-
-        let id = Id::get("convert_global");
-        Ok(Some(ConvertedElement::Global(ConvertedGlobal {
-            var_type: "".to_string(), // Default empty variable type
-            initializer: None,        // Default no initializer
-            rust_code,
-            is_const: false,
-            is_static: false,
-            is_public: false,
-        })))
-    } else {
-        Err(ConversionError::new(
-            "Could not extract global for conversion",
-        ))
-    }
-}
-
-/// Result callback: Postprocesses generated global variable code, adds documentation, and enhances formatting
+/// Result callback: Postprocesses global variable conversion with documentation
+#[allow(unused_variables)]
 fn result_global(
-    tokens: &[Token],
+    token_range: Range<usize>,
     result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
+) -> Result<HandlerResult, C2RError> {
     let _id = Id::get("result_global");
 
     report!(
@@ -531,12 +323,15 @@ fn result_global(
     );
 
     match result {
-        HandlerResult::Completed(tokens_opt, _, rust_code, id) => {
-            // Extract global variable information for documentation
-            let global_info = extract_global_info_from_tokens(tokens);
+        HandlerResult::Converted(element, token_range, code, id) => {
+            // Extract global information from tokens for documentation
+            let mut context = crate::context!();
+            context.pull();
+            let global_info = extract_global_info(&context.tokens[token_range.clone()]);
 
-            // Generate documentation about the global variable conversion
-            let doc_comment = generate_global_documentation(tokens, &global_info);
+            // Generate documentation about the global conversion
+            let doc_comment =
+                document_global(ElementInfo::Global(global_info.clone()))?.unwrap_or_default();
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
@@ -544,7 +339,7 @@ fn result_global(
             // Add metadata comment for traceability
             let metadata_comment = format!(
                 "// [C2R] Global variable converted from C to Rust - {}: {}\n",
-                global_info.name, global_info.kind_description
+                global_info.name, global_info.type_name
             );
             enhanced_code.push_str(&metadata_comment);
 
@@ -555,683 +350,786 @@ fn result_global(
             }
 
             // Add the original converted code
-            enhanced_code.push_str(&rust_code);
+            enhanced_code.push_str(&code);
 
             report!(
                 "global_handler",
                 "result_global",
                 Info,
                 Report,
-                &format!(
-                    "Enhanced global conversion: {} ({})",
-                    global_info.name, global_info.kind_description
+                format!(
+                    "Enhanced global '{}' with {} lines of documentation",
+                    global_info.name,
+                    doc_comment.lines().count()
                 ),
                 true
             );
 
-            // CRITICAL: Return HandlerResult::Completed to preserve the code!
-            Ok(HandlerResult::Completed(
-                tokens_opt,
-                0..1,
+            Ok(HandlerResult::Converted(
+                element,
+                token_range,
                 enhanced_code,
                 id,
             ))
         }
-        HandlerResult::Converted(element, _, rust_code, id) => {
-            // Handle converted elements - enhance the code and preserve the variant
-            let global_info = extract_global_info_from_tokens(tokens);
-            let doc_comment = generate_global_documentation(tokens, &global_info);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Global variable converted from C to Rust - {}: {}\n",
-                global_info.name, global_info.kind_description
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "global_handler",
-                "result_global",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced converted global: {} ({})",
-                    global_info.name, global_info.kind_description
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Converted to preserve the code!
-            Ok(HandlerResult::Converted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Extracted(element, _, rust_code, id) => {
-            // Handle extracted elements - enhance the code and preserve the variant
-            let global_info = extract_global_info_from_tokens(tokens);
-            let doc_comment = generate_global_documentation(tokens, &global_info);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Global variable converted from C to Rust - {}: {}\n",
-                global_info.name, global_info.kind_description
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "global_handler",
-                "result_global",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced extracted global: {} ({})",
-                    global_info.name, global_info.kind_description
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Extracted to preserve the code!
-            Ok(HandlerResult::Extracted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Handled(Some(converted_tokens), _, handler_id) => {
-            // Legacy support for token-based results
-            // Extract global variable information for documentation
-            let global_info = extract_global_info_from_tokens(tokens);
-
-            // Generate documentation about the global variable conversion
-            let doc_comment = generate_global_documentation(tokens, &global_info);
-
-            // Postprocess the converted Rust code for better formatting
-            let mut enhanced_result = postprocess_global_code(converted_tokens);
-
-            // Add the documentation comment before the converted global
-            if !doc_comment.is_empty() {
-                enhanced_result.insert(0, Token::s(doc_comment));
-            }
-
-            // Add metadata comment for traceability
-            let metadata_comment = format!(
-                "// [C2R] Global variable converted from C to Rust - {}: {}",
-                global_info.name, global_info.kind_description
-            );
-            enhanced_result.insert(0, Token::s(metadata_comment));
-
-            report!(
-                "global_handler",
-                "result_global",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced global conversion: {} ({})",
-                    global_info.name, global_info.kind_description
-                ),
-                true
-            );
-
-            Ok(HandlerResult::Handled(
-                Some(enhanced_result),
-                0..1,
-                handler_id,
-            ))
-        }
-        HandlerResult::Handled(None, _, handler_id) => {
+        _ => {
             report!(
                 "global_handler",
                 "result_global",
                 Warning,
                 Report,
-                "Global handler returned empty result",
+                "Global result was not in Completed state, returning as-is",
                 true
             );
-            Ok(HandlerResult::Handled(None, 0..0, handler_id))
-        }
-        other_result => {
-            // Pass through non-handled results unchanged
-            Ok(other_result)
+
+            Ok(result)
         }
     }
 }
 
-/// Global variable information extracted for documentation purposes
-#[derive(Debug, Clone)]
-struct GlobalInfo {
-    name: String,
-    kind: GlobalKind,
-    kind_description: String,
-    storage_class: Option<String>,
-    type_name: String,
-    is_const: bool,
-    is_array: bool,
-    has_initializer: bool,
-    complexity: String,
-}
+/// Extract global information from tokens for result processing
+fn extract_global_info(tokens: &[Token]) -> GlobalInfo {
+    use crate::global_handler::GlobalKind;
 
-/// Enum representing different kinds of global variables for specialized handling
-#[derive(Debug, Clone, PartialEq)]
-pub enum GlobalKind {
-    Static,
-    Extern,
-    PublicVariable,
-    ConstVariable,
-    Array,
-    Initialized,
-}
-
-/// Extracts global variable information from the original tokens for documentation purposes
-fn extract_global_info_from_tokens(tokens: &[Token]) -> GlobalInfo {
-    if tokens.is_empty() {
-        return GlobalInfo {
-            name: "unknown".to_string(),
-            kind: GlobalKind::PublicVariable,
-            kind_description: "unknown global variable".to_string(),
-            storage_class: None,
-            type_name: "unknown".to_string(),
-            is_const: false,
-            is_array: false,
-            has_initializer: false,
-            complexity: "unknown".to_string(),
-        };
-    }
-
-    // Parse tokens to extract information
+    let mut name = String::new();
+    let mut type_name = String::new();
     let mut storage_class = None;
     let mut is_const = false;
-    let mut type_tokens = Vec::new();
-    let mut name = String::new();
     let mut is_array = false;
     let mut has_initializer = false;
 
-    let mut i = 0;
-    while i < tokens.len() {
-        let token = tokens[i].to_string();
-
-        match token.as_str() {
-            "static" | "extern" => {
-                storage_class = Some(token.clone());
+    // Basic parsing to extract global information
+    for (_i, token) in tokens.iter().enumerate() {
+        match token {
+            Token::s(keyword) if keyword == "static" => storage_class = Some("static".to_string()),
+            Token::s(keyword) if keyword == "extern" => storage_class = Some("extern".to_string()),
+            Token::s(keyword) if keyword == "const" => is_const = true,
+            Token::s(keyword)
+                if keyword == "int"
+                    || keyword == "char"
+                    || keyword == "float"
+                    || keyword == "double" =>
+            {
+                type_name = keyword.clone();
             }
-            "const" => {
-                is_const = true;
+            Token::s(id) if type_name.is_empty() => {
+                type_name = id.clone();
             }
-            "[" => {
-                is_array = true;
+            Token::s(id) if !type_name.is_empty() && name.is_empty() => {
+                name = id.clone();
             }
-            "=" => {
-                has_initializer = true;
-            }
-            ";" => {
-                break;
-            }
-            _ => {
-                // Collect potential type and name tokens
-                if !is_keyword(&token) && storage_class.is_some() || i > 0 {
-                    if name.is_empty() && i > 0 && !is_keyword(&token) && !token.starts_with("*") {
-                        // Check if this might be the variable name
-                        if i + 1 < tokens.len() {
-                            let next = tokens[i + 1].to_string();
-                            if next == ";" || next == "=" || next == "[" {
-                                name = token;
-                                i += 1;
-                                continue;
-                            }
-                        }
-                    }
-
-                    if name.is_empty() {
-                        type_tokens.push(token);
-                    }
-                }
-            }
+            Token::l("[") => is_array = true,
+            Token::l("=") => has_initializer = true,
+            _ => {}
         }
-        i += 1;
     }
 
-    // If we still don't have a name, use the last type token
-    if name.is_empty() && !type_tokens.is_empty() {
-        name = type_tokens.pop().unwrap();
+    if name.is_empty() {
+        name = "unnamed_global".to_string();
+    }
+    if type_name.is_empty() {
+        type_name = "unknown".to_string();
     }
 
-    let type_name = type_tokens.join(" ");
-
-    // Determine the kind and description
-    let (kind, kind_description) = if storage_class.as_deref() == Some("static") {
-        (GlobalKind::Static, "static global variable".to_string())
-    } else if storage_class.as_deref() == Some("extern") {
-        (GlobalKind::Extern, "extern global variable".to_string())
-    } else if is_const {
-        (
-            GlobalKind::ConstVariable,
-            "const global variable".to_string(),
-        )
-    } else if is_array {
-        (GlobalKind::Array, "global array variable".to_string())
-    } else if has_initializer {
-        (
-            GlobalKind::Initialized,
-            "initialized global variable".to_string(),
-        )
+    let kind = if is_array {
+        GlobalKind::Array
     } else {
-        (
-            GlobalKind::PublicVariable,
-            "public global variable".to_string(),
-        )
+        GlobalKind::Variable
     };
 
-    // Determine complexity
-    let complexity = if is_array && has_initializer {
-        "moderate (array with initializer)".to_string()
-    } else if is_array || has_initializer {
-        "simple (basic features)".to_string()
-    } else {
-        "simple".to_string()
+    let kind_description = match kind {
+        GlobalKind::Variable => "global variable".to_string(),
+        GlobalKind::Array => "global array".to_string(),
+        _ => "global element".to_string(),
     };
 
     GlobalInfo {
         name,
         kind,
         kind_description,
-        storage_class,
         type_name,
+        storage_class: storage_class.clone(),
         is_const,
         is_array,
         has_initializer,
-        complexity,
+        complexity: if storage_class.is_some() || is_const || has_initializer {
+            "complex".to_string()
+        } else {
+            "simple".to_string()
+        },
     }
 }
 
-/// Generates documentation comments for the global variable conversion
-fn generate_global_documentation(tokens: &[Token], global_info: &GlobalInfo) -> String {
-    let mut doc_lines = Vec::new();
+/// Document callback: Generates documentation for global variables
+fn document_global(info: ElementInfo) -> Result<Option<String>, C2RError> {
+    if let ElementInfo::Global(global_info) = info {
+        let mut doc = format!("/// Converted C global variable: {}\n", global_info.name);
 
-    // Add main documentation header
-    doc_lines.push("/**".to_string());
-    doc_lines.push(" * Global Variable Conversion Documentation".to_string());
-    doc_lines.push(" *".to_string());
+        // For complex globals, use Patternizer to determine purpose
+        if global_info.complexity == "complex" {
+            let _patternizer = Patternizer::with_common_patterns();
 
-    // Add global variable information
-    doc_lines.push(format!(" * Name: {}", global_info.name));
-    doc_lines.push(format!(" * Type: {}", global_info.type_name));
-    doc_lines.push(format!(" * Kind: {}", global_info.kind_description));
-    doc_lines.push(format!(" * Complexity: {}", global_info.complexity));
-    doc_lines.push(format!(" * Original tokens: {}", tokens.len()));
+            // Determine global purpose based on patterns
+            let purpose = if let Some(ref storage) = global_info.storage_class {
+                if storage == "static" && global_info.is_const {
+                    "static constant for configuration or lookup tables"
+                } else if storage == "extern" {
+                    "external variable for inter-module communication"
+                } else if storage == "static" {
+                    "static variable for module-local state"
+                } else {
+                    "global variable for shared program data"
+                }
+            } else if global_info.has_initializer {
+                "initialized global variable for program state"
+            } else {
+                "global variable for shared program data"
+            };
 
-    if let Some(storage) = &global_info.storage_class {
-        doc_lines.push(format!(" * Storage class: {}", storage));
-    }
-
-    // Add features information
-    let mut features = Vec::new();
-    if global_info.is_const {
-        features.push("const");
-    }
-    if global_info.is_array {
-        features.push("array");
-    }
-    if global_info.has_initializer {
-        features.push("initialized");
-    }
-
-    if !features.is_empty() {
-        doc_lines.push(format!(" * Features: {}", features.join(", ")));
-    }
-
-    doc_lines.push(" *".to_string());
-
-    // Add conversion notes based on global kind
-    match global_info.kind {
-        GlobalKind::Static => {
-            doc_lines.push(" * Conversion: C static global -> Rust static variable".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - File-scoped visibility with static linkage".to_string());
-            doc_lines.push(" *   - Thread-safe access in multi-threaded contexts".to_string());
-            doc_lines.push(" *   - Zero-cost initialization at program startup".to_string());
-            doc_lines.push(" *   - Memory layout compatible with C expectations".to_string());
-            doc_lines.push(" *   - Compile-time constant evaluation when possible".to_string());
+            doc.push_str(&format!("/// Purpose: {}\n", purpose));
         }
-        GlobalKind::Extern => {
-            doc_lines.push(
-                " * Conversion: C extern global -> Rust extern \"C\" declaration".to_string(),
-            );
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - C ABI compatibility for external linkage".to_string());
-            doc_lines.push(" *   - Proper symbol naming and mangling".to_string());
-            doc_lines.push(" *   - Type safety with foreign function interface".to_string());
-            doc_lines.push(" *   - No initialization required for external symbols".to_string());
-            doc_lines.push(" *   - Memory layout matches C expectations exactly".to_string());
+
+        doc.push_str(&format!("/// Type: {}\n", global_info.type_name));
+
+        if let Some(ref storage) = global_info.storage_class {
+            doc.push_str(&format!("/// Storage class: {}\n", storage));
         }
-        GlobalKind::PublicVariable => {
-            doc_lines
-                .push(" * Conversion: C global variable -> Rust pub static variable".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Public visibility across module boundaries".to_string());
-            doc_lines.push(" *   - Memory safety with Rust ownership rules".to_string());
-            doc_lines.push(" *   - Thread-safe access with static lifetime".to_string());
-            doc_lines.push(" *   - Automatic initialization with default values".to_string());
-            doc_lines.push(" *   - Type system prevents data races".to_string());
+
+        if global_info.is_const {
+            doc.push_str("/// Mutability: Read-only\n");
         }
-        GlobalKind::ConstVariable => {
-            doc_lines.push(" * Conversion: C const global -> Rust const declaration".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Compile-time constant evaluation".to_string());
-            doc_lines.push(" *   - Immutable data with zero runtime cost".to_string());
-            doc_lines.push(" *   - Inline substitution by compiler optimization".to_string());
-            doc_lines.push(" *   - Memory safety without heap allocation".to_string());
-            doc_lines.push(" *   - Global accessibility with const semantics".to_string());
+
+        if global_info.is_array {
+            doc.push_str("/// Note: Array type\n");
         }
-        GlobalKind::Array => {
-            doc_lines.push(" * Conversion: C global array -> Rust static array".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Compile-time size verification and bounds checking".to_string());
-            doc_lines.push(" *   - Memory layout identical to C arrays".to_string());
-            doc_lines.push(" *   - Iterator support for functional programming".to_string());
-            doc_lines.push(" *   - Slice conversion for dynamic access patterns".to_string());
-            doc_lines.push(" *   - Default::default() initialization for elements".to_string());
-        }
-        GlobalKind::Initialized => {
-            doc_lines.push(
-                " * Conversion: C initialized global -> Rust static with initializer".to_string(),
-            );
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Compile-time initialization evaluation".to_string());
-            doc_lines.push(" *   - Type inference from initializer expressions".to_string());
-            doc_lines.push(" *   - Memory safety with initialized data guarantees".to_string());
-            doc_lines.push(" *   - Lazy static initialization for complex types".to_string());
-            doc_lines.push(" *   - Thread-safe initialization in concurrent contexts".to_string());
-        }
+
+        Ok(Some(doc))
+    } else {
+        Ok(None)
     }
-
-    doc_lines.push(" *".to_string());
-    doc_lines.push(" * Rust global variable benefits:".to_string());
-    doc_lines.push(" *   - Memory safety without garbage collection overhead".to_string());
-    doc_lines.push(" *   - Thread safety with compile-time verification".to_string());
-    doc_lines.push(" *   - Zero-cost abstractions with optimal performance".to_string());
-    doc_lines.push(" *   - Type system prevents common C global variable bugs".to_string());
-    doc_lines.push(" *   - Automatic cleanup and resource management".to_string());
-    doc_lines.push(" */".to_string());
-
-    report!(
-        "global_handler",
-        "generate_global_documentation",
-        Info,
-        Report,
-        &format!(
-            "Generated documentation for {} global: {}",
-            global_info.kind_description, global_info.name
-        ),
-        true
-    );
-
-    doc_lines.join("\n")
 }
 
-/// Postprocesses the converted global variable code for better formatting
-fn postprocess_global_code(mut tokens: Vec<Token>) -> Vec<Token> {
-    let original_count = tokens.len();
-
-    // Clean up and format the converted global variable tokens
-    for token in tokens.iter_mut() {
-        let mut content = token.to_string();
-
-        // Clean up extra whitespace
-        content = content.trim().to_string();
-
-        // Format static declarations
-        if content.starts_with("static") || content.starts_with("pub static") {
-            // Ensure proper spacing in static declarations
-            content = content.replace("static ", "static ");
-            content = content.replace("pub static", "pub static ");
-            content = content.replace("static  ", "static ");
-            content = content.replace("pub static  ", "pub static ");
-            content = content.replace(" mut ", " mut ");
-            content = content.replace(" : ", ": ");
-            content = content.replace(" = ", " = ");
-            content = content.replace("  ", " ");
-        }
-
-        // Format extern declarations
-        if content.starts_with("extern") {
-            // Clean up extern formatting
-            content = content.replace("extern \"C\"", "extern \"C\"");
-            content = content.replace("extern  \"C\"", "extern \"C\"");
-            content = content.replace("extern \"C\" ", "extern \"C\" ");
-            content = content.replace(" : ", ": ");
-            content = content.replace("  ", " ");
-        }
-
-        // Format const declarations
-        if content.starts_with("pub const") || content.starts_with("const") {
-            // Clean up const formatting
-            content = content.replace("pub const", "pub const ");
-            content = content.replace("pub const  ", "pub const ");
-            content = content.replace("const ", "const ");
-            content = content.replace("const  ", "const ");
-            content = content.replace(" : ", ": ");
-            content = content.replace(" = ", " = ");
-            content = content.replace("  ", " ");
-        }
-
-        // Format array types
-        if content.contains('[') && content.contains(']') {
-            // Clean up array type formatting
-            content = content.replace("[ ", "[");
-            content = content.replace(" ]", "]");
-            content = content.replace(" ;", ";");
-            content = content.replace(";  ", "; ");
-            content = content.replace("  ;", "; ");
-        }
-
-        // Format initializers
-        if content.contains('=') {
-            // Clean up initializer formatting
-            content = content.replace(" = ", " = ");
-            content = content.replace("=  ", "= ");
-            content = content.replace("  =", " =");
-
-            // Format array initializers
-            if content.contains("[") && content.contains("]") {
-                content = content.replace("[ ", "[");
-                content = content.replace(" ]", "]");
-                content = content.replace(" ,", ",");
-                content = content.replace(",  ", ", ");
-            }
-        }
-
-        // Format default values
-        if content.contains("Default::default()") {
-            content = content.replace("Default :: default ()", "Default::default()");
-            content = content.replace("Default::default ()", "Default::default()");
-            content = content.replace("Default:: default()", "Default::default()");
-        }
-
-        // Format pointer types
-        if content.contains("std::ptr::") {
-            content = content.replace("std :: ptr ::", "std::ptr::");
-            content = content.replace("std::ptr:: ", "std::ptr::");
-            content = content.replace("std:: ptr::", "std::ptr::");
-        }
-
-        // Ensure proper semicolon formatting
-        if content.ends_with(';') {
-            content = content.trim_end_matches(' ').to_string();
-            if !content.ends_with(';') {
-                content.push(';');
-            }
-        }
-
-        // Clean up multiple spaces
-        while content.contains("  ") {
-            content = content.replace("  ", " ");
-        }
-
-        *token = Token::s(content);
-    }
-
-    // Remove any empty tokens
-    tokens.retain(|token| !token.to_string().trim().is_empty());
-
-    report!(
-        "global_handler",
-        "postprocess_global_code",
-        Info,
-        Report,
-        &format!(
-            "Postprocessed {} tokens -> {} tokens",
-            original_count,
-            tokens.len()
-        ),
-        true
-    );
-
-    tokens
-}
-
-/// Redirect callback: Handles cases where this handler should pass tokens to a different handler
-fn redirect_global(
-    tokens: &[Token],
+/// Redirect callback: Handles nested structures within global variable declarations
+pub fn redirect_global(
+    token_range: Range<usize>,
     result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
-    let _id = Id::get("redirect_global");
+) -> Result<HandlerResult, C2RError> {
     report!(
         "global_handler",
         "redirect_global",
         Info,
-        Report,
-        "Checking if global tokens should be redirected",
+        HandlerPhase::Convert,
+        "Checking global declaration for nested structures",
         true
     );
 
-    // Check if this is actually a function declaration
-    if tokens.iter().any(|t| t.to_string() == "(") && tokens.iter().any(|t| t.to_string() == ")") {
-        // Look for function patterns
-        let mut paren_count = 0;
-        let mut found_identifier_before_paren = false;
+    // Check if this global variable declaration contains struct or enum definitions
+    let mut i = 0;
+    let mut processed_tokens = Vec::new();
 
-        for i in 0..tokens.len() {
-            let token = tokens[i].to_string();
-            if token == "(" {
-                paren_count += 1;
-                if i > 0 && !is_keyword(&tokens[i - 1].to_string()) {
-                    found_identifier_before_paren = true;
+    while i < token_range.len() {
+        let mut context = crate::context!();
+        context.pull();
+        let token = context.tokens[i].clone();
+
+        // Check for inline struct definitions in global variables
+        if token.to_string() == "struct" && i + 1 < token_range.len() {
+            // Look for opening brace to confirm this is a struct definition, not just a declaration
+            let mut found_brace = false;
+            let mut brace_start = i;
+
+            for j in (i + 1)..token_range.len() {
+                if context.tokens[j].to_string() == "{" {
+                    found_brace = true;
+                    brace_start = j;
+                    break;
                 }
-            } else if token == ")" {
-                paren_count -= 1;
+                if context.tokens[j].to_string() == ";" {
+                    break; // This is just a struct declaration, not definition
+                }
+            }
+
+            if found_brace {
+                // Find the matching closing brace
+                let mut brace_depth = 0;
+                let mut struct_end = brace_start;
+
+                for j in brace_start..token_range.len() {
+                    match context.tokens[j].to_string().as_str() {
+                        "{" => brace_depth += 1,
+                        "}" => {
+                            brace_depth -= 1;
+                            if brace_depth == 0 {
+                                struct_end = j;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if struct_end > brace_start {
+                    report!(
+                        "global_handler",
+                        "redirect_global",
+                        Info,
+                        HandlerPhase::Convert,
+                        "Found inline struct definition in global variable, marking tokens as processed",
+                        true
+                    );
+
+                    // Mark the struct definition tokens as processed
+                    for _k in i..=struct_end {
+                        processed_tokens.push(Token::n());
+                    }
+                    i = struct_end + 1;
+                    continue;
+                }
             }
         }
 
-        if found_identifier_before_paren && paren_count == 0 {
+        // Check for inline enum definitions
+        if token.to_string() == "enum" && i + 1 < token_range.len() {
+            let mut found_brace = false;
+            let mut brace_start = i;
+
+            for j in (i + 1)..token_range.len() {
+                if context.tokens[j].to_string() == "{" {
+                    found_brace = true;
+                    brace_start = j;
+                    break;
+                }
+                if context.tokens[j].to_string() == ";" {
+                    break;
+                }
+            }
+
+            if found_brace {
+                let mut brace_depth = 0;
+                let mut enum_end = brace_start;
+
+                for j in brace_start..token_range.len() {
+                    match context.tokens[j].to_string().as_str() {
+                        "{" => brace_depth += 1,
+                        "}" => {
+                            brace_depth -= 1;
+                            if brace_depth == 0 {
+                                enum_end = j;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if enum_end > brace_start {
+                    report!(
+                        "global_handler",
+                        "redirect_global",
+                        Info,
+                        HandlerPhase::Convert,
+                        "Found inline enum definition in global variable, marking tokens as processed",
+                        true
+                    );
+
+                    // Mark enum definition tokens as processed
+                    for _k in i..=enum_end {
+                        processed_tokens.push(Token::n());
+                    }
+                    i = enum_end + 1;
+                    continue;
+                }
+            }
+        }
+
+        processed_tokens.push(token.clone());
+        i += 1;
+    }
+
+    Ok(result)
+}
+
+/// Extract global variable information from tokens using Patternizer exclusively
+fn extract_global(token_range: Range<usize>) -> Result<Option<ExtractedElement>, C2RError> {
+    // Try to match global variable patterns
+    let global_patterns = [
+        "global_variable",
+        "global_array",
+        "global_pointer",
+        "global_const",
+        "global_static",
+        "global_extern",
+    ];
+
+    for pattern in &global_patterns {
+        let mut context = crate::context!();
+        context.pull();
+        match context
+            .patternizer
+            .match_pattern(pattern, &context.tokens[token_range.clone()])
+        {
+            PatternResult::Match { consumed_tokens: _ } => {
+                // Extract global variable components
+                let (name, var_type, initializer, storage_class) =
+                    parse_global_tokens(&context.tokens[token_range.clone()])?;
+
+                let is_const = storage_class.as_ref().map_or(false, |s| s == "const");
+                let is_static = storage_class.as_ref().map_or(false, |s| s == "static");
+                let is_extern = storage_class.as_ref().map_or(false, |s| s == "extern");
+
+                let extracted_global = ExtractedGlobal {
+                    name,
+                    type_name: var_type,
+                    initializer,
+                    storage_class,
+                    tokens: context.tokens[token_range.clone()].to_vec(),
+                    code: context.tokens[token_range.clone()]
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    array_dims: Vec::new(),
+                    initial_value: None,
+                    is_const,
+                    is_static,
+                    is_extern,
+                    array_size: None,
+                };
+
+                return Ok(Some(ExtractedElement::Global(extracted_global)));
+            }
+            _ => continue,
+        }
+    }
+
+    // Fallback for basic global variable detection
+    let mut context = crate::context!();
+    context.pull();
+    if context.tokens[token_range.clone()].len() >= 3
+        && context.tokens[token_range.clone()]
+            .iter()
+            .any(|t| t.to_string() == ";")
+    {
+        // Skip function declarations (contain parentheses)
+        if context.tokens[token_range.clone()]
+            .iter()
+            .any(|t| t.to_string() == "(")
+        {
+            return Ok(None);
+        }
+
+        // Skip typedef, struct, enum declarations
+        let first_token = context.tokens[token_range.clone()][0].to_string();
+        if first_token == "typedef" || first_token == "struct" || first_token == "enum" {
+            return Ok(None);
+        }
+
+        let (name, var_type, initializer, storage_class) =
+            parse_global_tokens(&context.tokens[token_range.clone()])?;
+
+        let is_const = storage_class.as_ref().map_or(false, |s| s == "const");
+        let is_static = storage_class.as_ref().map_or(false, |s| s == "static");
+        let is_extern = storage_class.as_ref().map_or(false, |s| s == "extern");
+
+        let extracted_global = ExtractedGlobal {
+            name,
+            type_name: var_type,
+            initializer,
+            storage_class,
+            tokens: context.tokens[token_range.clone()].to_vec(),
+            code: context.tokens[token_range.clone()]
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            array_dims: Vec::new(),
+            initial_value: None,
+            is_const,
+            is_static,
+            is_extern,
+            array_size: None,
+        };
+
+        return Ok(Some(ExtractedElement::Global(extracted_global)));
+    }
+
+    Ok(None)
+}
+
+/// Parse tokens to extract global variable components
+fn parse_global_tokens(
+    tokens: &[Token],
+) -> Result<(String, String, Option<String>, Option<String>), C2RError> {
+    if tokens.is_empty() {
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::Empty("token array"),
+            None,
+        ));
+    }
+
+    // Filter out preprocessor directives and comments first
+    let filtered_tokens: Vec<&Token> = tokens
+        .iter()
+        .filter(|t| {
+            let token_str = t.to_string();
+            !token_str.starts_with("#")
+                && !token_str.starts_with("//")
+                && !token_str.starts_with("/*")
+                && !token_str.starts_with("include")
+                && !token_str.starts_with("<")
+                && !token_str.starts_with(">")
+                && token_str != "stdio.h"
+                && token_str != "stdlib.h"
+                && token_str.trim().len() > 0
+        })
+        .collect();
+
+    if filtered_tokens.is_empty() {
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::Empty("valid tokens after filtering"),
+            None,
+        ));
+    }
+
+    // Find semicolon position in filtered tokens
+    let semicolon_pos = filtered_tokens
+        .iter()
+        .position(|t| t.to_string() == ";")
+        .unwrap_or(filtered_tokens.len());
+
+    if semicolon_pos == 0 {
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::Invalid("global variable declaration"),
+            None,
+        ));
+    }
+
+    let mut storage_class = None;
+    let mut type_start = 0;
+
+    // Check for storage class specifiers using filtered tokens
+    let first_token = filtered_tokens[0].to_string();
+    match first_token.as_str() {
+        "static" | "extern" | "const" => {
+            storage_class = Some(first_token);
+            type_start = 1;
+        }
+        _ => {}
+    }
+
+    // Find variable name and type in filtered tokens
+    let mut equals_pos = None;
+    for i in type_start..semicolon_pos {
+        if filtered_tokens[i].to_string() == "=" {
+            equals_pos = Some(i);
+            break;
+        }
+    }
+
+    let name_pos = equals_pos.unwrap_or(semicolon_pos) - 1;
+    if name_pos <= type_start {
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::Missing("global variable name or type"),
+            None,
+        ));
+    }
+
+    let name = filtered_tokens[name_pos].to_string();
+
+    // Extract type (everything from type_start to name) from filtered tokens
+    let type_tokens = &filtered_tokens[type_start..name_pos];
+    let var_type = type_tokens
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Extract initializer if present from filtered tokens
+    let initializer = if let Some(eq_pos) = equals_pos {
+        if eq_pos + 1 < semicolon_pos {
+            let init_tokens = &filtered_tokens[eq_pos + 1..semicolon_pos];
+            Some(
+                init_tokens
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    Ok((name, var_type, initializer, storage_class))
+}
+
+/// Convert extracted global to Rust code using Patternizer exclusively
+fn convert_global(token_range: Range<usize>) -> Result<Option<ConvertedElement>, C2RError> {
+    // Use cloned context to get the actual tokens from global context
+    let mut context = crate::context!();
+    context.pull();
+    let tokens_in_range = &context.tokens[token_range.clone()];
+
+    // Filter out Token::n() from the retrieved tokens
+    let filtered_tokens: Vec<Token> = tokens_in_range
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+
+    let token_preview = filtered_tokens
+        .iter()
+        .take(10)
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    report!(
+        "global_handler",
+        "convert_global",
+        ReportLevel::Info,
+        HandlerPhase::Convert,
+        format!(
+            "CONVERT DEBUG: Converting {} tokens: [{}{}]",
+            filtered_tokens.len(),
+            token_preview,
+            if filtered_tokens.len() > 10 {
+                "..."
+            } else {
+                ""
+            }
+        ),
+        true
+    );
+
+    let mut processed_tokens = filtered_tokens.to_vec();
+
+    // Try to match global variable patterns
+    let global_patterns = [
+        "global_variable",
+        "global_array",
+        "global_pointer",
+        "global_const",
+        "global_static",
+        "global_extern",
+    ];
+
+    for pattern in &global_patterns {
+        match context.patternizer.match_pattern(pattern, &filtered_tokens) {
+            PatternResult::Match { consumed_tokens } => {
+                report!(
+                    "global_handler",
+                    "convert_global",
+                    ReportLevel::Info,
+                    HandlerPhase::Convert,
+                    format!(
+                        "CONVERT DEBUG: Patternizer pattern '{}' matched, converting...",
+                        pattern
+                    ),
+                    true
+                );
+
+                // Parse global components
+                let (name, var_type, initializer, storage_class) =
+                    parse_global_tokens(&filtered_tokens)?;
+
+                // Mark processed tokens as consumed
+                for i in 0..consumed_tokens.min(processed_tokens.len()) {
+                    processed_tokens[i] = Token::n();
+                }
+
+                let code = convert_global_to_rust(&name, &var_type, &initializer, &storage_class)?;
+
+                let converted_global = ConvertedGlobal {
+                    var_type: var_type.clone(),
+                    initializer: initializer.clone(),
+                    code,
+                    is_const: storage_class.as_ref().map_or(false, |s| s == "const"),
+                    is_static: storage_class.as_ref().map_or(false, |s| s == "static"),
+                    is_public: true,
+                };
+
+                return Ok(Some(ConvertedElement::Global(converted_global)));
+            }
+            _ => continue,
+        }
+    }
+
+    report!(
+        "global_handler",
+        "convert_global",
+        ReportLevel::Info,
+        HandlerPhase::Convert,
+        "CONVERT DEBUG: No patternizer patterns matched, trying fallback...",
+        true
+    );
+
+    // Fallback conversion for basic global variables
+    if filtered_tokens.len() >= 3 && filtered_tokens.iter().any(|t| t.to_string() == ";") {
+        report!(
+            "global_handler",
+            "convert_global",
+            ReportLevel::Info,
+            HandlerPhase::Convert,
+            "CONVERT DEBUG: Fallback conditions met (>= 3 tokens, has semicolon), checking exclusions...",
+            true
+        );
+
+        // Skip function declarations and other constructs
+        if filtered_tokens.iter().any(|t| t.to_string() == "(") {
             report!(
                 "global_handler",
-                "redirect_global",
-                Info,
-                Report,
-                "Redirecting to function handler (function declaration)",
+                "convert_global",
+                ReportLevel::Info,
+                HandlerPhase::Convert,
+                "CONVERT DEBUG: Skipping - contains parenthesis (likely function)",
                 true
             );
-            return Ok(HandlerResult::Redirected(
-                Some(tokens.to_vec()),
-                0..1,
-                "global_handler".to_string(),
-                _id,
-                Id::get("function_handler"),
+            return Ok(None);
+        }
+
+        let first_token = filtered_tokens[0].to_string();
+        if matches!(
+            first_token.as_str(),
+            "int"
+                | "void"
+                | "char"
+                | "float"
+                | "double"
+                | "long"
+                | "short"
+                | "unsigned"
+                | "signed"
+                | "struct"
+                | "enum"
+                | "typedef"
+        ) || filtered_tokens[1].to_string() == "*"
+        {
+            report!(
+                "global_handler",
+                "convert_global",
+                ReportLevel::Info,
+                HandlerPhase::Convert,
+                format!("CONVERT DEBUG: Skipping - first token is '{}'", first_token),
+                true
+            );
+            return Ok(None);
+        }
+
+        report!(
+            "global_handler",
+            "convert_global",
+            ReportLevel::Info,
+            HandlerPhase::Convert,
+            "CONVERT DEBUG: All checks passed, parsing and converting...",
+            true
+        );
+
+        let (name, var_type, initializer, storage_class) = parse_global_tokens(&filtered_tokens)?;
+        let code = convert_global_to_rust(&name, &var_type, &initializer, &storage_class)?;
+
+        let converted_global = ConvertedGlobal {
+            var_type: var_type.clone(),
+            initializer: initializer.clone(),
+            code: code.clone(),
+            is_const: storage_class.as_ref().map_or(false, |s| s == "const"),
+            is_static: storage_class.as_ref().map_or(false, |s| s == "static"),
+            is_public: true,
+        };
+
+        report!(
+            "global_handler",
+            "convert_global",
+            ReportLevel::Info,
+            HandlerPhase::Convert,
+            format!("CONVERT DEBUG: Successfully converted global: {}", code),
+            true
+        );
+
+        return Ok(Some(ConvertedElement::Global(converted_global)));
+    }
+
+    report!(
+        "global_handler",
+        "convert_global",
+        ReportLevel::Info,
+        HandlerPhase::Convert,
+        format!(
+            "CONVERT DEBUG: Fallback failed - filtered_tokens.len()={}, has_semicolon={}",
+            filtered_tokens.len(),
+            filtered_tokens.iter().any(|t| t.to_string() == ";")
+        ),
+        true
+    );
+
+    Ok(None)
+}
+
+/// Convert global variable to Rust code
+fn convert_global_to_rust(
+    name: &str,
+    var_type: &str,
+    initializer: &Option<String>,
+    storage_class: &Option<String>,
+) -> Result<String, C2RError> {
+    // Convert C type to Rust type
+    let rust_type = convert_type(var_type).unwrap_or_else(|| var_type.to_string());
+
+    let mut code = String::new();
+
+    // Determine mutability and visibility
+    let is_const = storage_class.as_ref().map_or(false, |s| s == "const") || initializer.is_some();
+    let is_static = storage_class.as_ref().map_or(false, |s| s == "static");
+    let is_extern = storage_class.as_ref().map_or(false, |s| s == "extern");
+
+    if is_extern {
+        // External declaration
+        code.push_str(&format!(
+            "extern \"C\" {{\n    pub static {}: {};\n}}\n",
+            name, rust_type
+        ));
+    } else if is_const || (initializer.is_some() && !is_static) {
+        // Constant
+        let init_value = initializer
+            .as_ref()
+            .map(|s| s.as_str())
+            .unwrap_or("Default::default()");
+        code.push_str(&format!(
+            "pub const {}: {} = {};\n",
+            name, rust_type, init_value
+        ));
+    } else if is_static {
+        // Static variable
+        if let Some(init_value) = initializer {
+            code.push_str(&format!(
+                "pub static {}: {} = {};\n",
+                name, rust_type, init_value
+            ));
+        } else {
+            code.push_str(&format!(
+                "pub static mut {}: {} = Default::default();\n",
+                name, rust_type
+            ));
+        }
+    } else {
+        // Regular global (converted to static)
+        if let Some(init_value) = initializer {
+            code.push_str(&format!(
+                "pub static {}: {} = {};\n",
+                name, rust_type, init_value
+            ));
+        } else {
+            code.push_str(&format!(
+                "pub static mut {}: {} = Default::default();\n",
+                name, rust_type
             ));
         }
     }
 
-    // Check if this is actually a struct/enum/typedef
-    if tokens
-        .iter()
-        .any(|t| matches!(t.to_string().as_str(), "struct" | "enum" | "typedef"))
-    {
-        let first_keyword = tokens
-            .iter()
-            .find(|t| matches!(t.to_string().as_str(), "struct" | "enum" | "typedef"))
-            .unwrap()
-            .to_string();
-
-        match first_keyword.as_str() {
-            "struct" => {
-                report!(
-                    "global_handler",
-                    "redirect_global",
-                    Info,
-                    Report,
-                    "Redirecting to struct handler",
-                    true
-                );
-                return Ok(HandlerResult::Redirected(
-                    Some(tokens.to_vec()),
-                    0..1,
-                    "global_handler".to_string(),
-                    _id,
-                    Id::get("struct_handler"),
-                ));
-            }
-            "enum" => {
-                report!(
-                    "global_handler",
-                    "redirect_global",
-                    Info,
-                    Report,
-                    "Redirecting to enum handler",
-                    true
-                );
-                return Ok(HandlerResult::Redirected(
-                    Some(tokens.to_vec()),
-                    0..1,
-                    "global_handler".to_string(),
-                    _id,
-                    Id::get("enum_handler"),
-                ));
-            }
-            "typedef" => {
-                report!(
-                    "global_handler",
-                    "redirect_global",
-                    Info,
-                    Report,
-                    "Redirecting to typedef handler",
-                    true
-                );
-                return Ok(HandlerResult::Redirected(
-                    Some(tokens.to_vec()),
-                    0..1,
-                    "global_handler".to_string(),
-                    _id,
-                    Id::get("typedef_handler"),
-                ));
-            }
-            _ => {}
-        }
-    }
-
-    // Check if this contains preprocessor directives
-    if tokens.iter().any(|t| t.to_string().starts_with("#")) {
-        report!(
-            "global_handler",
-            "redirect_global",
-            Info,
-            Report,
-            "Redirecting to macro handler (preprocessor directive)",
-            true
-        );
-        return Ok(HandlerResult::Redirected(
-            Some(tokens.to_vec()),
-            0..1,
-            "global_handler".to_string(),
-            _id,
-            Id::get("macro_handler"),
-        ));
-    }
-
-    // No redirection needed
-    Ok(result)
+    Ok(code)
 }

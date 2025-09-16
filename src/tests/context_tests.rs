@@ -1,10 +1,8 @@
 //! Clean Context tests using correct API patterns
 //! Tests basic Context functionality, Registry operations, and reporting system
 
-use crate::Id;
-// Import the report macro
-use crate::{Entry, HandlerPhase, HandlerReport, ReportLevel};
-use crate::{Global, context, report};
+use crate::{Entry, HandlerPhase, HandlerReport, Id, ReportLevel, context, report};
+use core::assert_eq;
 use std::collections::HashMap;
 
 /// Test basic Context creation
@@ -34,7 +32,7 @@ fn test_registry_operations() {
     context.registry.insert(test_id.clone(), entry);
 
     // Test retrieving the entry
-    if let Some(Entry::Str(retrieved_value)) = context.registry.get_root_entry(&test_id) {
+    if let Some(Entry::Str(retrieved_value)) = context.registry.root(&test_id) {
         assert_eq!(
             &test_value, retrieved_value,
             "Retrieved value should match inserted value"
@@ -44,7 +42,7 @@ fn test_registry_operations() {
     }
 
     // Test get_root_entry
-    if let Some(Entry::Str(root_value)) = context.registry.get_root_entry(&test_id) {
+    if let Some(Entry::Str(root_value)) = context.registry.root(&test_id) {
         assert_eq!(
             &test_value, root_value,
             "Root entry should match inserted value"
@@ -66,7 +64,7 @@ fn test_registry_remove() {
 
     // Verify it exists
     assert!(
-        context.registry.get_root_entry(&test_id).is_some(),
+        context.registry.root(&test_id).is_some(),
         "Entry should exist before removal"
     );
 
@@ -76,7 +74,7 @@ fn test_registry_remove() {
 
     // Verify it's gone
     assert!(
-        context.registry.get_root_entry(&test_id).is_none(),
+        context.registry.root(&test_id).is_none(),
         "Entry should not exist after removal"
     );
 }
@@ -176,7 +174,7 @@ fn test_report_macro() {
     );
 
     // Verify the report was created using shared global Context
-    let reports = Global::context_fn(|ctx| {
+    let reports = Global::write(|ctx| {
         ctx.get_reports_by_handler("test_handler")
             .into_iter()
             .cloned()
@@ -266,7 +264,7 @@ fn test_entry_variants() {
         .registry
         .insert(string_id.clone(), Entry::Str("test".to_string()));
     assert!(matches!(
-        context.registry.get_root_entry(&string_id),
+        context.registry.root(&string_id),
         Some(Entry::Str(_))
     ));
 
@@ -274,7 +272,7 @@ fn test_entry_variants() {
     let int_id = Id::get("int_test");
     context.registry.insert(int_id.clone(), Entry::Val(42));
     assert!(matches!(
-        context.registry.get_root_entry(&int_id),
+        context.registry.root(&int_id),
         Some(Entry::Val(42))
     ));
 
@@ -282,7 +280,7 @@ fn test_entry_variants() {
     let bool_id = Id::get("bool_test");
     context.registry.insert(bool_id.clone(), Entry::Bool(true));
     assert!(matches!(
-        context.registry.get_root_entry(&bool_id),
+        context.registry.root(&bool_id),
         Some(Entry::Bool(true))
     ));
 }
@@ -303,7 +301,7 @@ fn test_registry_bulk_operations() {
 
     // Verify all entries exist
     for (i, id) in ids.iter().enumerate() {
-        if let Some(Entry::Val(value)) = context.registry.get_root_entry(id) {
+        if let Some(Entry::Val(value)) = context.registry.root(id) {
             assert_eq!(*value, (i * 10) as u64, "Bulk inserted value should match");
         } else {
             panic!("Bulk inserted entry not found or wrong type");
@@ -326,13 +324,13 @@ fn test_registry_error_handling() {
 
     // Test getting nonexistent entry
     assert!(
-        context.registry.get_root_entry(&nonexistent_id).is_none(),
+        context.registry.root(&nonexistent_id).is_none(),
         "Getting nonexistent entry should return None"
     );
 
     // Test getting nonexistent root entry
     assert!(
-        context.registry.get_root_entry(&nonexistent_id).is_none(),
+        context.registry.root(&nonexistent_id).is_none(),
         "Getting nonexistent root entry should return None"
     );
 }
@@ -340,7 +338,7 @@ fn test_registry_error_handling() {
 /// Test Context available fields and state management
 #[test]
 fn test_context_state_management() {
-    let mut context = context!();
+    let context = context!();
 
     // Test available Context fields
     assert!(

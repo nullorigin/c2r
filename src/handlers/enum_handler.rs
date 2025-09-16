@@ -1,29 +1,164 @@
-#![allow(
-    unused_variables,
-    unused_assignments,
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals
-)]
+//! Enum handler for C to Rust enum conversion
+//! Uses Patternizer exclusively for detection and conversion
 
-use super::common::{find_matching_token, not_handled, replace_with_range};
-use crate::error::ConversionError;
-use crate::handler::HandlerResult;
-use crate::lock::Id;
-use crate::{ConvertedElement, ConvertedEnum, ExtractedElement, ExtractedEnum, Token, report};
 use crate::{
-    HandlerPhase::{Convert, Process, Report},
-    HandlerReport,
-    ReportLevel::{Info, Warning},
+    C2RError, ConvertedElement, ConvertedEnum, ElementInfo, EnumInfo, ExtractedElement,
+    ExtractedEnum,
+    HandlerPhase::{self, Extract, Handle, Process, Report},
+    HandlerReport, HandlerResult, Id,
+    ReportLevel::{self, Info, Warning},
+    context, not_handled,
+    pattern::{PatternResult, Patternizer},
+    report,
+    token::Token,
 };
-use crate::{ReportLevel, context};
-use ReportLevel::Error;
+use std::ops::Range;
 
-/// Creates an enum handler that can detect and convert C enums
+/// Report callback: Collects enum handler reports
+pub fn report_enum() -> Result<HandlerReport, C2RError> {
+    let context = context!();
+    let reports = context.get_reports_by_handler("enum_handler");
+
+    let (info_count, warning_count, error_count) =
+        reports
+            .iter()
+            .fold((0, 0, 0), |acc, report| match report.level {
+                ReportLevel::Error => (acc.0, acc.1, acc.2 + 1),
+                ReportLevel::Warning => (acc.0, acc.1 + 1, acc.2),
+                _ => (acc.0 + 1, acc.1, acc.2),
+            });
+
+    Ok(HandlerReport {
+        report_id: Box::new(Id::get(&Id::gen_name("enum_handler"))),
+        handler_id: Box::new(Id::get("enum_handler")),
+        handler_name: "enum_handler".to_string(),
+        function_name: "report_enum".to_string(),
+        message: format!(
+            "Enum handler summary: {} reports ({} info, {} warnings, {} errors)",
+            reports.len(),
+            info_count,
+            warning_count,
+            error_count
+        ),
+        level: match (error_count, warning_count) {
+            (0, 0) => ReportLevel::Info,
+            (0, _) => ReportLevel::Warning,
+            _ => ReportLevel::Error,
+        },
+        tokens_processed: reports.len(),
+        tokens_consumed: 0,
+        phase: HandlerPhase::Report,
+        success: error_count == 0,
+        metadata: std::collections::HashMap::new(),
+    })
+}
+
+/// Handle callback: Delegates to extract for recursive window expansion
+fn handle_enum(token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    report!(
+        "enum_handler",
+        "handle_enum",
+        Info,
+        Handle,
+        "Delegating to extract for recursive window expansion",
+        true
+    );
+
+    // Delegate to extract callback for recursive processing
+    match extract_enum(token_range.clone())? {
+        Some(ExtractedElement::Enum(extracted_enum)) => {
+            let code = extracted_enum.code.clone();
+            let consumed_tokens = extracted_enum.tokens.len();
+
+            // Convert the extracted enum to a ConvertedElement
+            let converted_enum = ConvertedEnum {
+                variants: Vec::new(),
+                code,
+                is_public: true,
+                repr: Some("C".to_string()),
+            };
+
+            Ok(HandlerResult::Converted(
+                ConvertedElement::Enum(converted_enum),
+                0..consumed_tokens,
+                extracted_enum.code,
+                Id::get("enum_handler"),
+            ))
+        }
+        _ => {
+            report!(
+                "enum_handler",
+                "handle_enum",
+                Warning,
+                Handle,
+                "Extract did not find valid enum",
+                false
+            );
+            not_handled()
+        }
+    }
+}
+
+/// Process callback: Lightweight detection using Patternizer
+fn process_enum(token_range: Range<usize>) -> Result<bool, C2RError> {
+    let mut context = crate::context!();
+    context.pull();
+
+    // Add bounds checking to prevent slice index out of bounds
+    if token_range.end > context.tokens.len() || token_range.start >= context.tokens.len() {
+        return Ok(false);
+    }
+
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+
+    if tokens.len() < 2 {
+        return Ok(false);
+    }
+
+    report!(
+        "enum_handler",
+        "process_enum",
+        Info,
+        Process,
+        format!("Enum pattern detection on {} tokens", tokens.len()),
+        true
+    );
+
+    // Try typedef_enum pattern first (higher priority)
+    let typedef_pattern_result = context.patternizer.match_pattern("typedef_enum", tokens);
+    let enum_pattern_result = context
+        .patternizer
+        .match_pattern("enum_declaration", tokens);
+
+    let has_enum = matches!(typedef_pattern_result, PatternResult::Match { .. })
+        || matches!(enum_pattern_result, PatternResult::Match { .. });
+
+    if has_enum {
+        report!(
+            "enum_handler",
+            "process_enum",
+            Info,
+            Process,
+            "Found enum pattern using Patternizer",
+            true
+        );
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Creates an enum handler that uses Patternizer exclusively
 pub fn create_enum_handler() -> crate::handler::Handler {
     let handler_id = Id::get("enum_handler");
     let handler_role = "enum";
-    let priority = 100; // Standard priority
+    let priority = 100;
 
     super::create_handler(
         handler_id,
@@ -33,423 +168,19 @@ pub fn create_enum_handler() -> crate::handler::Handler {
         Some(handle_enum),
         Some(extract_enum),
         Some(convert_enum),
+        Some(document_enum),
         Some(report_enum),
-        Some(result_enum),
-        Some(redirect_enum),
+        Some(result_enum),   // Result callback for final processing
+        Some(redirect_enum), // Redirect callback for nested structures
     )
 }
 
-/// Process callback: Initializes and confirms this handler can handle the tokens
-fn process_enum(tokens: &[Token]) -> Result<bool, ConversionError> {
-    // Validate input
-    if tokens.is_empty() {
-        return Ok(false);
-    }
-
-    // Check for enum keyword patterns
-    if tokens[0].to_string() == "enum" {
-        // enum name { ... }
-        if tokens.len() >= 3 && tokens[2].to_string() == "{" {
-            report!(
-                "enum_handler",
-                "process_enum",
-                Info,
-                Process,
-                format!("Enum definition detected: {}", tokens[1].to_string()),
-                true
-            );
-            return Ok(true);
-        }
-
-        // enum name;
-        if tokens.len() >= 3 && tokens[2].to_string() == ";" {
-            report!(
-                "enum_handler",
-                "process_enum",
-                Info,
-                Process,
-                format!(
-                    "Enum forward declaration detected: {}",
-                    tokens[1].to_string()
-                ),
-                true
-            );
-            return Ok(true);
-        }
-
-        // Anonymous enum: enum { ... }
-        if tokens.len() >= 2 && tokens[1].to_string() == "{" {
-            report!(
-                "enum_handler",
-                "process_enum",
-                Info,
-                Process,
-                "Anonymous enum detected",
-                true
-            );
-            return Ok(true);
-        }
-    }
-
-    // Check for typedef enum patterns
-    if tokens.len() >= 3 && tokens[0].to_string() == "typedef" && tokens[1].to_string() == "enum" {
-        report!(
-            "enum_handler",
-            "process_enum",
-            Info,
-            Process,
-            "Typedef enum pattern detected",
-            true
-        );
-        return Ok(true);
-    }
-
-    Ok(false)
-}
-
-/// Processes an enum declaration
-fn handle_enum(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("enum");
-    if let Some(enum_name_token) = tokens.get(1) {
-        let enum_name = enum_name_token.to_string();
-
-        // Find the start and end of the enum body
-        if let Some(body_start) = tokens.iter().position(|t| t.to_string() == "{") {
-            if let Some(body_end) = find_matching_token(tokens, "{", "}") {
-                let variants = &tokens[body_start + 1..body_end];
-                let rust_variants = variants
-                    .iter()
-                    .filter(|t| t.to_string() != ",")
-                    .map(|t| t.to_string())
-                    .collect::<Vec<String>>()
-                    .join(",\n    ");
-
-                let rust_code = format!(
-                    "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {} {{\n    {}\n}}",
-                    enum_name, rust_variants
-                );
-
-                // Enum definitions process all input tokens
-                let token_range = 0..tokens.len();
-                return replace_with_range(rust_code, token_range, id);
-            }
-        }
-    }
-
-    not_handled()
-}
-
-/// Extracts an enum as an ExtractedElement
-pub fn extract_enum(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    let is_typedef = tokens[0].to_string() == "typedef";
-    let enum_token_idx = if is_typedef { 1 } else { 0 };
-
-    // Extract the enum name
-    let name_idx = enum_token_idx + 1;
-
-    // Check if this is an anonymous enum
-    let is_anonymous = name_idx >= tokens.len() || tokens[name_idx].to_string() == "{";
-    let enum_name = if is_anonymous {
-        "AnonymousEnum".to_string()
-    } else {
-        tokens[name_idx].to_string()
-    };
-
-    // Look for the opening brace
-    let brace_idx = if is_anonymous { name_idx } else { name_idx + 1 };
-
-    if brace_idx >= tokens.len() || tokens[brace_idx].to_string() != "{" {
-        // This might be a forward declaration
-        return if !is_anonymous
-            && name_idx + 1 < tokens.len()
-            && tokens[name_idx + 1].to_string() == ";"
-        {
-            // Forward declaration
-            let extracted_enum = ExtractedEnum {
-                name: enum_name,
-                values: vec![],
-                is_typedef,
-                typedef_name: None,
-                is_forward_declaration: true,
-                original_code: tokens
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" "),
-                tokens: tokens.to_vec(),
-            };
-
-            Ok(Some(ExtractedElement::Enum(extracted_enum)))
-        } else {
-            Err(ConversionError::new(
-                "Could not find opening brace for enum",
-            ))
-        };
-    }
-
-    // Find the closing brace
-    let body_start = brace_idx;
-    let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
-        Some(pos) => body_start + pos + 1,
-        None => return Ok(None),
-    };
-
-    // Extract body tokens (excluding braces)
-    let body_tokens = &tokens[body_start + 1..body_end - 1];
-
-    // Look for typedef name (if this is a typedef enum)
-    let mut typedef_name = None;
-    if is_typedef && body_end + 1 < tokens.len() {
-        for i in body_end..tokens.len() {
-            if tokens[i].to_string() == ";" {
-                if i > body_end {
-                    typedef_name = Some(tokens[i - 1].to_string());
-                }
-                break;
-            }
-        }
-    }
-
-    // Extract enum values
-    let mut values = Vec::new();
-    let mut i = 0;
-
-    // Extract enum values from body tokens
-    while i < body_tokens.len() {
-        // Skip commas and whitespace
-        if body_tokens[i].to_string() == "," {
-            i += 1;
-            continue;
-        }
-
-        // Extract the enum value name
-        if i < body_tokens.len() {
-            let enum_name = body_tokens[i].to_string();
-            i += 1;
-
-            // Check if this value has an explicit assignment
-            let mut explicit_value = None;
-            if i < body_tokens.len() && body_tokens[i].to_string() == "=" {
-                i += 1; // Skip the equals sign
-
-                // Parse the value - this is simplified
-                // A real implementation would handle complex expressions
-                if i < body_tokens.len() {
-                    // Try to parse as integer
-                    if let Ok(value) = body_tokens[i].to_string().parse::<i64>() {
-                        explicit_value = Some(value);
-                    }
-                    i += 1;
-                }
-            }
-
-            // Add the enum value to our list
-            values.push((enum_name, explicit_value));
-
-            // Skip to next comma or end
-            while i < body_tokens.len() && body_tokens[i].to_string() != "," {
-                i += 1;
-            }
-        }
-    }
-
-    let extracted_enum = ExtractedEnum {
-        name: enum_name,
-        values,
-        is_typedef,
-        typedef_name,
-        is_forward_declaration: false,
-        original_code: tokens
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" "),
-        tokens: tokens.to_vec(),
-    };
-
-    Ok(Some(ExtractedElement::Enum(extracted_enum)))
-}
-
-/// Convert callback: Does the actual conversion of C to Rust code
-fn convert_enum(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
-    report!(
-        "enum_handler",
-        "convert_enum",
-        Info,
-        Convert,
-        format!("Converting enum from {} tokens", tokens.len()),
-        true
-    );
-    if let Some(ExtractedElement::Enum(extracted_enum)) = extract_enum(tokens)? {
-        let typedef_name = extracted_enum
-            .typedef_name
-            .clone()
-            .unwrap_or_else(|| extracted_enum.name.clone());
-        let enum_name = extracted_enum.name.clone();
-        let values = extracted_enum.values.clone();
-        let mut rust_code = String::new();
-
-        // Add documentation comment if available
-        if let Some(docs) = super::common::extract_docs(extracted_enum.tokens.as_slice()) {
-            rust_code.push_str("/// ");
-            rust_code.push_str(&docs.replace("\n", "\n/// "));
-            rust_code.push_str("\n");
-        }
-
-        // Add enum declaration with common derives
-        rust_code.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n");
-
-        // Add representation attribute to match C enum size
-        rust_code.push_str("#[repr(C)]\n");
-
-        // Use typedef name if available, otherwise use the enum name
-        let display_name = typedef_name.clone();
-
-        rust_code.push_str(&format!("pub enum {} {{\n", display_name));
-
-        // Convert enum values
-        for (value_name, explicit_value) in values.iter() {
-            // Add the enum variant
-            if let Some(value) = explicit_value {
-                rust_code.push_str(&format!("    {} = {},\n", value_name, value));
-            } else {
-                rust_code.push_str(&format!("    {},\n", value_name));
-            }
-        }
-
-        rust_code.push_str("}\n");
-
-        // If this is a typedef enum, add a type alias
-        if extracted_enum.is_typedef
-            && extracted_enum.typedef_name.is_some()
-            && !typedef_name.is_empty()
-            && typedef_name != enum_name
-        {
-            rust_code.push_str(&format!("pub type {} = {};\n", enum_name, typedef_name));
-        }
-
-        let id = Id::get("convert_enum");
-        Ok(Some(ConvertedElement::Enum(ConvertedEnum {
-            variants: Vec::new(), // Default empty variants
-            rust_code,
-            is_public: false,
-            repr: None,
-        })))
-    } else {
-        Err(ConversionError::new("Unsupported enum element"))
-    }
-}
-
-/// Redirect callback: Handles cases where this handler should pass tokens to a different handler
-fn redirect_enum(
-    tokens: &[Token],
+/// Result callback: Postprocesses enum conversion with documentation
+#[allow(unused_variables)]
+fn result_enum(
+    token_range: Range<usize>,
     result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("redirect_enum");
-    report!(
-        "enum_handler",
-        "redirect_enum",
-        Info,
-        Report,
-        "Checking if enum tokens should be redirected",
-        true
-    );
-
-    // Check if this is actually a struct disguised as an enum
-    if tokens.iter().any(|t| t.to_string() == "struct") {
-        report!(
-            "enum_handler",
-            "redirect_enum",
-            Info,
-            Report,
-            "Redirecting to struct handler",
-            true
-        );
-        return Ok(HandlerResult::Redirected(
-            Some(tokens.to_vec()),
-            0..1,
-            "enum_handler".to_string(),
-            id,
-            Id::get("struct_handler"),
-        ));
-    }
-
-    // Check if this is actually a union
-    if tokens.iter().any(|t| t.to_string() == "union") {
-        report!(
-            "enum_handler",
-            "redirect_enum",
-            Info,
-            Report,
-            "Redirecting to union handler",
-            true
-        );
-        return Ok(HandlerResult::Redirected(
-            Some(tokens.to_vec()),
-            0..1,
-            "enum_handler".to_string(),
-            id,
-            Id::get("union_handler"),
-        ));
-    }
-
-    // Check if this is a typedef that doesn't involve enum definition
-    if tokens.len() >= 2 && tokens[0].to_string() == "typedef" && tokens[1].to_string() != "enum" {
-        report!(
-            "enum_handler",
-            "redirect_enum",
-            Info,
-            Report,
-            "Redirecting to typedef handler",
-            true
-        );
-        return Ok(HandlerResult::Redirected(
-            Some(tokens.to_vec()),
-            0..1,
-            "enum_handler".to_string(),
-            id,
-            Id::get("typedef_handler"),
-        ));
-    }
-
-    // Check if this is actually a variable declaration with enum type
-    let mut has_assignment = false;
-    let mut brace_count = 0;
-
-    for token in tokens {
-        match token.to_string().as_str() {
-            "{" => brace_count += 1,
-            "}" => brace_count -= 1,
-            "=" => has_assignment = true,
-            _ => {}
-        }
-    }
-
-    // If we have an assignment but no enum definition braces, might be a variable declaration
-    if has_assignment && brace_count == 0 {
-        report!(
-            "enum_handler",
-            "redirect_enum",
-            Info,
-            Report,
-            "Redirecting to global handler (enum variable)",
-            true
-        );
-        return Ok(HandlerResult::Redirected(
-            Some(tokens.to_vec()),
-            0..1,
-            "enum_handler".to_string(),
-            id,
-            Id::get("global_handler"),
-        ));
-    }
-
-    // No redirection needed
-    Ok(result)
-}
-
-/// Result callback: Postprocesses generated enum code, adds documentation, and enhances formatting
-fn result_enum(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+) -> Result<HandlerResult, C2RError> {
     let _id = Id::get("result_enum");
 
     report!(
@@ -462,19 +193,22 @@ fn result_enum(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult,
     );
 
     match result {
-        HandlerResult::Completed(tokens_opt, _, rust_code, id) => {
-            // Extract enum information for documentation
-            let enum_info = extract_enum_info_from_tokens(tokens);
+        HandlerResult::Converted(element, token_range, code, id) => {
+            // Extract enum information from tokens for documentation
+            let mut context = crate::context!();
+            context.pull();
+            let enum_info = extract_enum_info(&context.tokens[token_range.clone()]);
 
             // Generate documentation about the enum conversion
-            let doc_comment = generate_enum_documentation(tokens, &enum_info);
+            let doc_comment =
+                document_enum(ElementInfo::Enum(enum_info.clone()))?.unwrap_or_default();
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
 
             // Add metadata comment for traceability
             let metadata_comment = format!(
-                "// [C2R] Enum converted from C to Rust - {}: {} variant(s)\n",
+                "// [C2R] Enum converted from C to Rust - {}: {} variants\n",
                 enum_info.name, enum_info.variant_count
             );
             enhanced_code.push_str(&metadata_comment);
@@ -486,459 +220,682 @@ fn result_enum(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult,
             }
 
             // Add the original converted code
-            enhanced_code.push_str(&rust_code);
+            enhanced_code.push_str(&code);
 
             report!(
                 "enum_handler",
                 "result_enum",
                 Info,
                 Report,
-                &format!(
-                    "Enhanced enum conversion: {} with {} variants",
-                    enum_info.name, enum_info.variant_count
+                format!(
+                    "Enhanced enum '{}' with {} lines of documentation",
+                    enum_info.name,
+                    doc_comment.lines().count()
                 ),
                 true
             );
 
-            // CRITICAL: Return HandlerResult::Completed to preserve the code!
-            Ok(HandlerResult::Completed(
-                tokens_opt,
-                0..1,
+            Ok(HandlerResult::Converted(
+                element,
+                token_range,
                 enhanced_code,
                 id,
             ))
         }
-        HandlerResult::Converted(element, _, rust_code, id) => {
-            // Handle converted elements - enhance the code and preserve the variant
-            let enum_info = extract_enum_info_from_tokens(tokens);
-            let doc_comment = generate_enum_documentation(tokens, &enum_info);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Enum converted from C to Rust - {}: {} variant(s)\n",
-                enum_info.name, enum_info.variant_count
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "enum_handler",
-                "result_enum",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced converted enum: {} with {} variants",
-                    enum_info.name, enum_info.variant_count
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Converted to preserve the code!
-            Ok(HandlerResult::Converted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Extracted(element, _, rust_code, id) => {
-            // Handle extracted elements - enhance the code and preserve the variant
-            let enum_info = extract_enum_info_from_tokens(tokens);
-            let doc_comment = generate_enum_documentation(tokens, &enum_info);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Enum converted from C to Rust - {}: {} variant(s)\n",
-                enum_info.name, enum_info.variant_count
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "enum_handler",
-                "result_enum",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced extracted enum: {} with {} variants",
-                    enum_info.name, enum_info.variant_count
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Extracted to preserve the code!
-            Ok(HandlerResult::Extracted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Handled(Some(converted_tokens), _, handler_id) => {
-            // Legacy support for token-based results
-            // Extract enum information for documentation
-            let enum_info = extract_enum_info_from_tokens(tokens);
-
-            // Generate documentation about the enum conversion
-            let doc_comment = generate_enum_documentation(tokens, &enum_info);
-
-            // Postprocess the converted Rust code for better formatting
-            let mut enhanced_result = postprocess_enum_code(converted_tokens);
-
-            // Add the documentation comment before the converted enum
-            if !doc_comment.is_empty() {
-                enhanced_result.insert(0, Token::s(doc_comment));
-            }
-
-            // Add metadata comment for traceability
-            let metadata_comment = format!(
-                "// [C2R] Enum converted from C to Rust - {}: {} variant(s)",
-                enum_info.name, enum_info.variant_count
-            );
-            enhanced_result.insert(0, Token::s(metadata_comment));
-
-            report!(
-                "enum_handler",
-                "result_enum",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced enum conversion: {} with {} variants",
-                    enum_info.name, enum_info.variant_count
-                ),
-                true
-            );
-
-            Ok(HandlerResult::Handled(
-                Some(enhanced_result),
-                0..1,
-                handler_id,
-            ))
-        }
-        HandlerResult::Handled(None, _, handler_id) => {
+        _ => {
             report!(
                 "enum_handler",
                 "result_enum",
                 Warning,
                 Report,
-                "Enum handler returned empty result",
+                "Enum result was not in Completed state, returning as-is",
                 true
             );
-            Ok(HandlerResult::Handled(None, 0..0, handler_id))
-        }
-        other_result => {
-            // Pass through non-handled results unchanged
-            Ok(other_result)
+
+            Ok(result)
         }
     }
 }
 
-/// Enum information extracted for documentation purposes
-#[derive(Debug, Clone)]
-struct EnumInfo {
-    name: String,
-    variant_count: usize,
-    is_typedef: bool,
-    is_anonymous: bool,
-    is_forward_declaration: bool,
-    has_explicit_values: bool,
-    typedef_name: Option<String>,
-}
-
-/// Extracts enum information from the original tokens for documentation purposes
-fn extract_enum_info_from_tokens(tokens: &[Token]) -> EnumInfo {
-    if tokens.is_empty() {
-        return EnumInfo {
-            name: "unknown".to_string(),
-            variant_count: 0,
-            is_typedef: false,
-            is_anonymous: true,
-            is_forward_declaration: false,
-            has_explicit_values: false,
-            typedef_name: None,
-        };
-    }
-
-    let is_typedef = tokens[0].to_string() == "typedef";
-    let enum_token_idx = if is_typedef { 1 } else { 0 };
-    let name_idx = enum_token_idx + 1;
-
-    // Check if this is an anonymous enum
-    let is_anonymous = name_idx >= tokens.len() || tokens[name_idx].to_string() == "{";
-    let enum_name = if is_anonymous {
-        "AnonymousEnum".to_string()
-    } else {
-        tokens[name_idx].to_string()
-    };
-
-    // Check for forward declaration
-    let is_forward_declaration =
-        tokens.iter().any(|t| t.to_string() == ";") && !tokens.iter().any(|t| t.to_string() == "{");
-
-    // Count variants and check for explicit values
+/// Extract enum information from tokens for result processing
+fn extract_enum_info(tokens: &[Token]) -> EnumInfo {
+    let mut name = String::new();
     let mut variant_count = 0;
+    let mut is_typedef = false;
+    let mut is_anonymous = false;
     let mut has_explicit_values = false;
+    let mut typedef_name = None;
 
-    if let Some(brace_start) = tokens.iter().position(|t| t.to_string() == "{") {
-        if let Some(brace_end) = find_matching_token(tokens, "{", "}") {
-            let body_tokens = &tokens[brace_start + 1..brace_end];
-
-            // Count variants by counting identifiers before commas or closing brace
-            let mut i = 0;
-            while i < body_tokens.len() {
-                if body_tokens[i].to_string() == "," {
-                    i += 1;
-                    continue;
-                }
-
-                // Found a variant name
-                if i < body_tokens.len() && !body_tokens[i].to_string().trim().is_empty() {
-                    variant_count += 1;
-                    i += 1;
-
-                    // Check for explicit value assignment
-                    if i < body_tokens.len() && body_tokens[i].to_string() == "=" {
-                        has_explicit_values = true;
-                        // Skip the value
-                        i += 1;
-                        while i < body_tokens.len() && body_tokens[i].to_string() != "," {
-                            i += 1;
-                        }
+    // Basic parsing to extract enum information
+    for (i, token) in tokens.iter().enumerate() {
+        match token {
+            Token::s(keyword) if keyword == "typedef" => is_typedef = true,
+            Token::s(keyword) if keyword == "enum" => {
+                if i + 1 < tokens.len() {
+                    if let Token::s(id) = &tokens[i + 1] {
+                        name = id.clone();
+                    } else {
+                        is_anonymous = true;
+                        name = "anonymous_enum".to_string();
                     }
                 }
             }
+            Token::l("{") => {
+                // Count variants by counting identifiers within braces
+                let mut brace_count = 1;
+                let mut j = i + 1;
+                while j < tokens.len() && brace_count > 0 {
+                    match &tokens[j] {
+                        Token::l("{") => brace_count += 1,
+                        Token::l("}") => brace_count -= 1,
+                        Token::s(_) if brace_count == 1 => variant_count += 1,
+                        Token::l("=") if brace_count == 1 => has_explicit_values = true,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+            }
+            _ => {}
         }
     }
 
-    // Extract typedef name if present
-    let mut typedef_name = None;
+    if name.is_empty() {
+        name = "unnamed_enum".to_string();
+    }
+
+    // Check for typedef name (appears after closing brace)
     if is_typedef {
-        // Find the typedef name (should be after the closing brace and before semicolon)
-        if let Some(brace_end) = find_matching_token(tokens, "{", "}") {
-            if brace_end + 1 < tokens.len() {
-                for i in brace_end + 1..tokens.len() {
-                    if tokens[i].to_string() == ";" {
-                        if i > brace_end + 1 {
-                            typedef_name = Some(tokens[i - 1].to_string());
-                        }
-                        break;
+        for (i, token) in tokens.iter().enumerate() {
+            if let Token::l("}") = token {
+                if i + 1 < tokens.len() {
+                    if let Token::s(id) = &tokens[i + 1] {
+                        typedef_name = Some(id.clone());
                     }
                 }
+                break;
             }
         }
     }
 
     EnumInfo {
-        name: enum_name,
+        name,
         variant_count,
         is_typedef,
         is_anonymous,
-        is_forward_declaration,
+        is_forward_declaration: variant_count == 0,
         has_explicit_values,
         typedef_name,
+        complexity: if has_explicit_values || variant_count > 5 {
+            "complex".to_string()
+        } else {
+            "simple".to_string()
+        },
     }
 }
 
-/// Generates documentation comments for the enum conversion
-fn generate_enum_documentation(tokens: &[Token], enum_info: &EnumInfo) -> String {
-    let mut doc_lines = Vec::new();
+/// Document callback: Generates documentation for enums
+fn document_enum(info: ElementInfo) -> Result<Option<String>, C2RError> {
+    if let ElementInfo::Enum(enum_info) = info {
+        let mut doc = format!("/// Converted C enum: {}\n", enum_info.name);
 
-    // Add main documentation header
-    doc_lines.push("/**".to_string());
-    doc_lines.push(" * Enum Conversion Documentation".to_string());
-    doc_lines.push(" *".to_string());
+        // For complex enums, use Patternizer to determine purpose
+        if enum_info.complexity == "complex" {
+            let _patternizer = Patternizer::with_common_patterns();
 
-    // Add enum information
-    doc_lines.push(format!(" * Enum name: {}", enum_info.name));
-    if let Some(ref typedef_name) = enum_info.typedef_name {
-        doc_lines.push(format!(" * Typedef name: {}", typedef_name));
-    }
-    doc_lines.push(format!(" * Variant count: {}", enum_info.variant_count));
-    doc_lines.push(format!(" * Original tokens: {}", tokens.len()));
+            // Determine enum purpose based on patterns
+            let purpose = if enum_info.has_explicit_values {
+                "enumeration with explicit values for specific mappings"
+            } else if enum_info.variant_count > 10 {
+                "large enumeration for comprehensive state management"
+            } else if enum_info.is_typedef {
+                "type-aliased enumeration for enhanced type safety"
+            } else if enum_info.is_anonymous {
+                "anonymous enumeration for local constants"
+            } else {
+                "standard enumeration for categorizing values"
+            };
 
-    // Add enum type information
-    let mut enum_type_info = Vec::new();
-    if enum_info.is_typedef {
-        enum_type_info.push("typedef enum");
-    } else {
-        enum_type_info.push("enum");
-    }
-    if enum_info.is_anonymous {
-        enum_type_info.push("anonymous");
-    }
-    if enum_info.is_forward_declaration {
-        enum_type_info.push("forward declaration");
-    }
-    if enum_info.has_explicit_values {
-        enum_type_info.push("explicit values");
-    }
-
-    doc_lines.push(format!(" * Type: {}", enum_type_info.join(", ")));
-    doc_lines.push(" *".to_string());
-
-    // Add conversion notes
-    doc_lines.push(" * Conversion features:".to_string());
-    doc_lines.push(
-        " *   - Added #[derive(Debug, Clone, Copy, PartialEq, Eq)] for common functionality"
-            .to_string(),
-    );
-    doc_lines.push(" *   - Added #[repr(C)] to match C enum memory layout".to_string());
-    doc_lines.push(" *   - Made enum public (pub) for accessibility".to_string());
-
-    if enum_info.has_explicit_values {
-        doc_lines.push(" *   - Preserved explicit variant values from C".to_string());
-    }
-
-    if enum_info.is_typedef {
-        doc_lines.push(" *   - Converted typedef enum to Rust enum".to_string());
-        if enum_info.typedef_name.is_some() {
-            doc_lines.push(" *   - Added type alias for compatibility".to_string());
+            doc.push_str(&format!("/// Purpose: {}\n", purpose));
         }
-    }
 
-    if enum_info.is_forward_declaration {
-        doc_lines.push(" *   - Forward declaration converted to opaque struct".to_string());
-    }
+        doc.push_str(&format!(
+            "/// Variants: {} items\n",
+            enum_info.variant_count
+        ));
 
-    doc_lines.push(" *".to_string());
-    doc_lines.push(" * Rust enums provide:".to_string());
-    doc_lines.push(" *   - Type safety with exhaustive pattern matching".to_string());
-    doc_lines.push(" *   - Memory safety with no invalid variant values".to_string());
-    doc_lines.push(" *   - Rich functionality through derive macros".to_string());
-    doc_lines.push(" *   - Zero-cost abstractions with C compatibility".to_string());
-    doc_lines.push(" */".to_string());
-
-    report!(
-        "enum_handler",
-        "generate_enum_documentation",
-        Info,
-        Report,
-        &format!(
-            "Generated documentation for enum: {} with {} variants",
-            enum_info.name, enum_info.variant_count
-        ),
-        true
-    );
-
-    doc_lines.join("\n")
-}
-
-/// Postprocesses the converted enum code for better formatting
-fn postprocess_enum_code(mut tokens: Vec<Token>) -> Vec<Token> {
-    let original_count = tokens.len();
-
-    // Clean up and format the converted enum tokens
-    for token in tokens.iter_mut() {
-        let mut content = token.to_string();
-
-        // Clean up extra whitespace
-        content = content.trim().to_string();
-
-        // Ensure proper enum formatting
-        if content.starts_with("#[derive(") {
-            // Ensure proper spacing in derive attributes
-            content = content.replace(",", ", ");
-            // Clean up double spaces
-            while content.contains("  ") {
-                content = content.replace("  ", " ");
+        if enum_info.is_typedef {
+            if let Some(ref typedef_name) = enum_info.typedef_name {
+                doc.push_str(&format!("/// Typedef name: {}\n", typedef_name));
             }
         }
 
-        // Format enum declaration
-        if content.starts_with("pub enum") {
-            // Ensure proper spacing
-            content = content.replace("pub enum", "pub enum ");
-            content = content.replace("  ", " ");
+        if enum_info.has_explicit_values {
+            doc.push_str("/// Note: Contains explicit value assignments\n");
         }
 
-        // Format enum variants with proper indentation
-        if content.contains("    ") && (content.contains(" = ") || content.ends_with(',')) {
-            // Ensure consistent indentation for variants
-            content = content.replace("\t", "    ");
-            // Ensure proper spacing around equals
-            content = content.replace('=', " = ");
-            content = content.replace("  =", " =");
-            content = content.replace("=  ", "= ");
+        if enum_info.is_forward_declaration {
+            doc.push_str("/// Note: Forward declaration only\n");
         }
 
-        // Format closing braces
-        if content == "}" || content == "};" {
-            // Ensure proper brace formatting
-            content = content.replace(" }", "}");
-        }
-
-        // Format type aliases
-        if content.starts_with("pub type") {
-            // Ensure proper spacing in type aliases
-            content = content.replace("pub type", "pub type ");
-            content = content.replace(" = ", " = ");
-            content = content.replace("  ", " ");
-        }
-
-        *token = Token::s(content);
+        Ok(Some(doc))
+    } else {
+        Ok(None)
     }
+}
 
-    // Remove any empty tokens
-    tokens.retain(|token| !token.to_string().trim().is_empty());
-
+/// Redirect callback: Handles nested structures within enum definitions
+pub fn redirect_enum(
+    token_range: Range<usize>,
+    result: HandlerResult,
+) -> Result<HandlerResult, C2RError> {
     report!(
         "enum_handler",
-        "postprocess_enum_code",
+        "redirect_enum",
         Info,
-        Report,
-        &format!(
-            "Postprocessed {} tokens -> {} tokens",
-            original_count,
-            tokens.len()
-        ),
+        HandlerPhase::Convert,
+        "Checking enum for nested structures",
         true
     );
 
-    tokens
+    // Enums typically don't contain nested structures, but they can have
+    // complex value expressions that might need redirection
+    let mut i = 0;
+    let mut processed_tokens = Vec::new();
+
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+
+    while i < tokens.len() {
+        let token = &tokens[i];
+
+        // Check for function calls in enum value expressions
+        if token.to_string() != "=" {
+            processed_tokens.push(token.clone());
+            i += 1;
+            continue;
+        }
+
+        // We found an assignment, check for complex expressions
+        processed_tokens.push(token.clone());
+        i += 1;
+
+        // Look ahead for function calls or complex expressions
+        while i < tokens.len() {
+            let next_token = &tokens[i];
+
+            if next_token.to_string() == "," || next_token.to_string() == "}" {
+                processed_tokens.push(next_token.clone());
+                i += 1;
+                break;
+            }
+
+            // Check for function call patterns (identifier followed by parentheses)
+            if i + 1 < tokens.len() && tokens[i + 1].to_string() == "(" {
+                // This might be a function call in the enum value
+                let mut paren_depth = 0;
+                let mut call_end = i;
+
+                for j in (i + 1)..tokens.len() {
+                    match tokens[j].to_string().as_str() {
+                        "(" => paren_depth += 1,
+                        ")" => {
+                            paren_depth -= 1;
+                            if paren_depth == 0 {
+                                call_end = j;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if call_end > i {
+                    report!(
+                        "enum_handler",
+                        "redirect_enum",
+                        Info,
+                        HandlerPhase::Convert,
+                        "Found function call in enum value, marking as processed",
+                        true
+                    );
+
+                    // Mark the function call tokens as processed
+                    for _ in i..=call_end {
+                        processed_tokens.push(Token::n());
+                    }
+                    i = call_end + 1;
+                    continue;
+                }
+            }
+
+            processed_tokens.push(next_token.clone());
+            i += 1;
+        }
+    }
+
+    Ok(result)
 }
 
-/// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_enum(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
-    let context = context!();
-    let handler_reports = context.get_reports_by_handler("enum_handler");
+/// Extract enum using recursive window expansion starting from minimum tokens
+fn extract_enum(token_range: Range<usize>) -> Result<Option<ExtractedElement>, C2RError> {
+    const MIN_ENUM_TOKENS: usize = 3; // enum Status;
 
-    // Count reports by level
-    let info_count = handler_reports
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
         .iter()
-        .filter(|r| matches!(r.level, Info))
-        .count();
-    let error_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, Error))
-        .count();
-    let warning_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, Warning))
-        .count();
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
 
-    // Create summary message
-    let summary_message = format!(
-        "Enum Handler Summary: {} total reports (Info: {}, Warnings: {}, Errors: {})",
-        handler_reports.len(),
-        info_count,
-        warning_count,
-        error_count
+    if tokens.len() < MIN_ENUM_TOKENS {
+        return Ok(None);
+    }
+
+    report!(
+        "enum_handler",
+        "extract_enum",
+        Info,
+        Extract,
+        format!("Starting enum extraction with {} tokens", tokens.len()),
+        true
     );
 
-    // Create consolidated report using gen_name function for unique report_id
-    let summary_report = HandlerReport {
-        report_id: Box::new(Id::get(&Id::gen_name("enum_handler_summary"))),
-        handler_id: Box::new(Id::get("enum_handler")),
-        handler_name: "enum_handler".to_string(),
-        function_name: "report_enum".to_string(),
-        level: Info,
-        phase: Report,
-        message: summary_message,
-        success: error_count == 0, // Success if no errors
-        tokens_processed: handler_reports.iter().map(|r| r.tokens_processed).sum(),
-        tokens_consumed: handler_reports.iter().map(|r| r.tokens_consumed).sum(),
-        metadata: std::collections::HashMap::new(),
+    // Find enum start within the token range
+    if let Some(enum_start) = find_enum_start_in_range(tokens, token_range.clone()) {
+        report!(
+            "enum_handler",
+            "extract_enum",
+            Info,
+            Extract,
+            format!("Found enum start at position {}", enum_start),
+            true
+        );
+
+        // Try recursive window expansion to capture complete enum
+        let window_start = enum_start;
+        let mut window_size = MIN_ENUM_TOKENS;
+
+        while window_start + window_size <= tokens.len() {
+            if let Some(complete_tokens) = expand_to_enum(tokens, window_start, window_size) {
+                report!(
+                    "enum_handler",
+                    "extract_enum",
+                    Info,
+                    Extract,
+                    format!(
+                        "Successfully expanded to complete enum with {} tokens",
+                        complete_tokens.len()
+                    ),
+                    true
+                );
+
+                return extract_enum_from_complete_tokens(&complete_tokens);
+            }
+
+            window_size += 1;
+            if window_size > 20 {
+                // Prevent runaway expansion
+                break;
+            }
+        }
+    }
+
+    report!(
+        "enum_handler",
+        "extract_enum",
+        Info,
+        Extract,
+        "Patternizer patterns did not match complete enum - using fallback extraction",
+        true
+    );
+
+    extract_enum_fallback(tokens)
+}
+
+/// Helper function to find enum start position within token range
+fn find_enum_start_in_range(tokens: &[Token], range: Range<usize>) -> Option<usize> {
+    let start = range.start.min(tokens.len());
+    let end = range.end.min(tokens.len());
+
+    for i in start..end {
+        if detect_enum_start(tokens, i) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Helper function to detect if enum starts at given position
+fn detect_enum_start(tokens: &[Token], pos: usize) -> bool {
+    if pos >= tokens.len() {
+        return false;
+    }
+
+    let token_str = tokens[pos].to_string();
+    if token_str == "enum" {
+        return true;
+    }
+
+    // Check for typedef enum pattern
+    if token_str == "typedef" && pos + 1 < tokens.len() {
+        return tokens[pos + 1].to_string() == "enum";
+    }
+
+    false
+}
+
+/// Helper function to expand window to capture complete enum
+fn expand_to_enum(tokens: &[Token], start: usize, initial_size: usize) -> Option<Vec<Token>> {
+    if start >= tokens.len() {
+        return None;
+    }
+
+    let mut current_size = initial_size;
+    let max_expansion = (tokens.len() - start).min(20);
+
+    while current_size <= max_expansion {
+        let end_pos = (start + current_size).min(tokens.len());
+        let window = &tokens[start..end_pos];
+
+        if is_complete_enum_declaration(window) {
+            return Some(window.to_vec());
+        }
+
+        current_size += 1;
+    }
+
+    None
+}
+
+/// Helper function to check if token window contains complete enum declaration
+fn is_complete_enum_declaration(tokens: &[Token]) -> bool {
+    if tokens.len() < 3 {
+        return false;
+    }
+
+    // Check for enum keyword
+    let has_enum = tokens.iter().any(|t| t.to_string() == "enum");
+    if !has_enum {
+        return false;
+    }
+
+    // Check for termination patterns
+    let last_token = tokens.last().unwrap().to_string();
+
+    // Forward declaration: enum Name;
+    if last_token == ";" {
+        return true;
+    }
+
+    // Full definition: enum Name { ... };
+    if last_token == ";" {
+        let has_braces = tokens.iter().any(|t| t.to_string() == "{")
+            && tokens.iter().any(|t| t.to_string() == "}");
+        return has_braces;
+    }
+
+    false
+}
+
+/// Helper function to extract enum from complete token sequence
+fn extract_enum_from_complete_tokens(
+    tokens: &[Token],
+) -> Result<Option<ExtractedElement>, C2RError> {
+    let (name, values, is_typedef, typedef_name) = parse_enum_tokens(tokens, "enum")?;
+
+    let extracted_enum = ExtractedEnum {
+        name: name.clone(),
+        values,
+        is_typedef,
+        typedef_name: typedef_name.clone(),
+        is_forward_declaration: !tokens.iter().any(|t| t.to_string() == "{"),
+        tokens: tokens.to_vec(),
+        code: generate_rust_enum_code(&name, &typedef_name, is_typedef, tokens)?,
     };
 
-    Ok(summary_report)
+    Ok(Some(ExtractedElement::Enum(extracted_enum)))
+}
+
+/// Helper function for fallback enum extraction
+fn extract_enum_fallback(tokens: &[Token]) -> Result<Option<ExtractedElement>, C2RError> {
+    // Simple fallback: look for enum keyword and basic structure
+    if let Some(enum_pos) = tokens.iter().position(|t| t.to_string() == "enum") {
+        let mut name = "UnknownEnum".to_string();
+
+        // Try to extract name
+        if enum_pos + 1 < tokens.len() {
+            let next_token = &tokens[enum_pos + 1];
+            if next_token.to_string() != "{" && next_token.to_string() != ";" {
+                name = next_token.to_string();
+            }
+        }
+
+        let extracted_enum = ExtractedEnum {
+            name: name.clone(),
+            values: Vec::new(),
+            is_typedef: tokens.iter().any(|t| t.to_string() == "typedef"),
+            typedef_name: None,
+            is_forward_declaration: true,
+            tokens: tokens.to_vec(),
+            code: format!("pub enum {} {{\n    // TODO: Add variants\n}}", name),
+        };
+
+        return Ok(Some(ExtractedElement::Enum(extracted_enum)));
+    }
+
+    Ok(None)
+}
+
+/// Helper function to generate Rust enum code
+fn generate_rust_enum_code(
+    name: &str,
+    typedef_name: &Option<String>,
+    is_typedef: bool,
+    tokens: &[Token],
+) -> Result<String, C2RError> {
+    let mut code = String::new();
+
+    // Add derives and attributes
+    code.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n");
+    code.push_str("#[repr(C)]\n");
+
+    // Use typedef name if available, otherwise use enum name
+    let display_name = typedef_name.as_ref().map(|s| s.as_str()).unwrap_or(name);
+    code.push_str(&format!("pub enum {} {{\n", display_name));
+
+    // Parse enum body if present
+    if let Some(start_brace) = tokens.iter().position(|t| t.to_string() == "{") {
+        if let Some(end_brace_pos) = tokens[start_brace..]
+            .iter()
+            .position(|t| t.to_string() == "}")
+        {
+            let end_brace = start_brace + end_brace_pos;
+
+            let mut i = start_brace + 1;
+            while i < end_brace {
+                if tokens[i].to_string() != "," {
+                    let variant_name = tokens[i].to_string();
+
+                    // Check for explicit value
+                    if i + 2 < end_brace && tokens[i + 1].to_string() == "=" {
+                        let value = tokens[i + 2].to_string();
+                        code.push_str(&format!("    {} = {},\n", variant_name, value));
+                        i += 3;
+                    } else {
+                        code.push_str(&format!("    {},\n", variant_name));
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+    } else {
+        // Forward declaration - add placeholder
+        code.push_str("    // Forward declaration - variants to be defined\n");
+    }
+
+    code.push_str("}\n");
+
+    // Add type alias if needed
+    if is_typedef && typedef_name.is_some() && typedef_name.as_ref().unwrap().as_str() != name {
+        code.push_str(&format!(
+            "pub type {} = {};\n",
+            name,
+            typedef_name.as_ref().unwrap()
+        ));
+    }
+
+    Ok(code)
+}
+
+/// Helper function to parse enum tokens based on pattern type
+fn parse_enum_tokens(
+    tokens: &[Token],
+    pattern: &str,
+) -> Result<(String, Vec<(String, Option<i64>)>, bool, Option<String>), C2RError> {
+    let is_typedef =
+        pattern.contains("typedef") || (tokens.len() > 0 && tokens[0].to_string() == "typedef");
+    let name;
+    let mut values = Vec::new();
+    let mut typedef_name = None;
+
+    // Find enum keyword position
+    let enum_pos = tokens
+        .iter()
+        .position(|t| t.to_string() == "enum")
+        .unwrap_or(0);
+
+    // Extract name (if not anonymous)
+    if enum_pos + 1 < tokens.len() && tokens[enum_pos + 1].to_string() != "{" {
+        name = tokens[enum_pos + 1].to_string();
+    } else {
+        name = "AnonymousEnum".to_string();
+    }
+
+    // Find enum body between braces
+    if let Some(start_brace) = tokens.iter().position(|t| t.to_string() == "{") {
+        if let Some(end_brace) = tokens[start_brace..]
+            .iter()
+            .position(|t| t.to_string() == "}")
+        {
+            let end_brace = start_brace + end_brace;
+
+            // Parse enum values
+            let mut i = start_brace + 1;
+            while i < end_brace {
+                if tokens[i].to_string() != "," {
+                    let value_name = tokens[i].to_string();
+                    let mut explicit_value = None;
+
+                    // Check for explicit value assignment
+                    if i + 2 < end_brace && tokens[i + 1].to_string() == "=" {
+                        if let Ok(val) = tokens[i + 2].to_string().parse::<i64>() {
+                            explicit_value = Some(val);
+                        }
+                        i += 3; // Skip name, =, value
+                    } else {
+                        i += 1; // Just skip name
+                    }
+
+                    values.push((value_name, explicit_value));
+                }
+                i += 1;
+            }
+
+            // Look for typedef name after closing brace
+            if is_typedef && end_brace + 1 < tokens.len() {
+                let mut j = end_brace + 1;
+                while j < tokens.len() && tokens[j].to_string() != ";" {
+                    typedef_name = Some(tokens[j].to_string());
+                    j += 1;
+                }
+            }
+        }
+    }
+
+    Ok((name, values, is_typedef, typedef_name))
+}
+
+/// Convert extracted enum to Rust code using Patternizer exclusively
+fn convert_enum(token_range: Range<usize>) -> Result<Option<ConvertedElement>, C2RError> {
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+    let mut processed_tokens = tokens.to_vec();
+
+    // Try to match enum patterns
+    let enum_patterns = ["enum", "typedef_enum"];
+
+    for pattern in &enum_patterns {
+        match context.patternizer.match_pattern(pattern, tokens) {
+            PatternResult::Match { consumed_tokens } => {
+                // Parse enum components
+                let (name, values, is_typedef, typedef_name) = parse_enum_tokens(tokens, pattern)?;
+
+                // Mark processed tokens as consumed
+                for i in 0..consumed_tokens.min(processed_tokens.len()) {
+                    processed_tokens[i] = Token::n();
+                }
+
+                let mut code = String::new();
+
+                // Add derives and attributes
+                code.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n");
+                code.push_str("#[repr(C)]\n");
+
+                // Use typedef name if available, otherwise use enum name
+                let display_name = typedef_name.as_ref().unwrap_or(&name);
+                code.push_str(&format!("pub enum {} {{\n", display_name));
+
+                // Add enum variants
+                for (value_name, explicit_value) in &values {
+                    if let Some(value) = explicit_value {
+                        code.push_str(&format!("    {} = {},\n", value_name, value));
+                    } else {
+                        code.push_str(&format!("    {},\n", value_name));
+                    }
+                }
+
+                code.push_str("}\n");
+
+                // Add type alias if needed
+                if is_typedef && typedef_name.is_some() && typedef_name.as_ref().unwrap() != &name {
+                    code.push_str(&format!(
+                        "pub type {} = {};\n",
+                        name,
+                        typedef_name.as_ref().unwrap()
+                    ));
+                }
+
+                let converted_enum = ConvertedEnum {
+                    variants: Vec::new(),
+                    code,
+                    is_public: true,
+                    repr: Some("C".to_string()),
+                };
+
+                return Ok(Some(ConvertedElement::Enum(converted_enum)));
+            }
+            _ => continue,
+        }
+    }
+
+    Ok(None)
 }

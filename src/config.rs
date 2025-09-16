@@ -6,74 +6,121 @@
     non_upper_case_globals
 )]
 
-use crate::Id;
-use crate::Pattern;
-use crate::Patternizer;
-use crate::Registry;
-use crate::ReportLevel;
-use crate::VERBOSITY_LEVEL;
-use crate::{Entry, Handler, HandlerMap, Tokenizer, info};
-use std::any::Any;
-use std::cmp::Ordering;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
-use std::sync::RwLock;
-use std::time::{SystemTime, UNIX_EPOCH};
+use crate::{
+    Entry, Handler, HandlerMap, Id, Lock, Pattern, Patternizer, Registry, ReportLevel, Token,
+    Tokenizer, VERBOSITY_LEVEL, time,
+};
+use std::{
+    any::Any,
+    cmp::Ordering,
+    collections::HashMap,
+    convert::Into,
+    fmt::Debug,
+    hash::{Hash, Hasher},
+    ops::{FnMut, Range},
+    option::Option::None,
+    path::PathBuf,
+    time::{SystemTime, UNIX_EPOCH},
+};
+// Range operators used in tokens! macro indexing
 
-static GLOBAL_CONTEXT: RwLock<Option<Context>> = RwLock::new(None);
+pub static CONTEXT: Lock<Context> = Lock::<Context>::new();
 pub struct Global;
 impl Global {
-    pub const fn new() -> Global {
-        Self
-    }
-    pub fn context() -> Context {
-        Self::context_fn(|ctx| ctx.clone())
-    }
-    pub fn context_fn<F, R>(f: F) -> R
+    pub fn write<F, R>(mut f: F) -> R
     where
-        F: FnOnce(&mut Context) -> R,
+        F: FnMut(&mut Context) -> R,
     {
-        let mut guard = GLOBAL_CONTEXT.write().unwrap();
-        f(guard.get_or_insert_default())
+        let guard: &mut Context = &mut CONTEXT.lock_mut();
+        f(guard)
     }
 
-    pub fn update<F>(f: F)
+    pub fn read<F, R>(mut f: F) -> R
     where
-        F: FnOnce(&mut Context),
+        F: FnMut(&Context) -> R,
     {
-        Self::context_fn(f);
+        let guard: &Context = &CONTEXT.lock();
+        f(guard)
+    }
+
+    pub fn update<F: FnMut(&mut Context) -> Context>(mut f: F) {
+        Self::write(|ctx: &mut Context| {
+            let mut ctx = ctx.clone();
+            f(&mut ctx)
+        });
     }
     pub fn registry() -> Registry {
-        Self::context_fn(|ctx| ctx.registry.clone())
+        Self::read(|ctx: &Context| ctx.registry.clone())
     }
-
     pub fn handler_map() -> HandlerMap {
-        Self::context_fn(|ctx| ctx.handlers.clone())
+        Self::read(|ctx: &Context| ctx.handlers.clone())
     }
-
+    pub fn tokens() -> Vec<Token> {
+        Self::read(|ctx: &Context| ctx.tokens.clone())
+    }
     pub fn tokenizer() -> Tokenizer {
-        Self::context_fn(|ctx| ctx.tokenizer.clone())
+        Self::read(|ctx: &Context| ctx.tokenizer.clone())
     }
     pub fn patternizer() -> Patternizer {
-        Self::context_fn(|ctx| ctx.patternizer.clone())
+        Self::read(|ctx: &Context| ctx.patternizer.clone())
     }
-
     pub fn pending() -> Vec<HandlerRedirect> {
-        Self::context_fn(|ctx| ctx.pending_redirects.clone())
+        Self::read(|ctx: &Context| ctx.pending_redirects.clone())
     }
 }
+
 #[macro_export]
 macro_rules! context {
     () => {
-        $crate::config::Global::context()
+        {
+            $crate::config::Global::read(|ctx: &$crate::config::Context| ctx.clone())
+        }
     };
-    ($cmd:literal) => {
-        $crate::config::Global::context_fn(|ctx| ctx.$cmd)
+    ($cmd:ident($($args:expr),+)) => {
+        {
+            $crate::config::Global::write(|ctx: &mut $crate::config::Context| ctx.$cmd($($args),+))
+        }
+    };
+    ($cmd:ident()) => {
+        {
+            $crate::config::Global::write(|ctx: &mut $crate::config::Context| ctx.$cmd())
+        }
     };
     ($context:expr) => {
-        $crate::config::Global::context_fn(|ctx| *ctx = $context)
+        {
+            $crate::config::Global::write(|ctx| *ctx = $context)
+        }
+    };
+    ($field:ident, $value:expr, $op:tt) => {
+        {
+            $crate::config::Global::write(|ctx| ctx.$field $op $value)
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! tokens {
+    () => {{ $crate::config::Global::tokens() }};
+    ($range:expr) => {
+        $crate::config::Global::read(|ctx| {
+            let tokens = &ctx.tokens();
+            let range = $range;
+            if range.end <= tokens.len() {
+                tokens[range].to_vec()
+            } else {
+                Vec::new()
+            }
+        })
+    };
+    ($range1:expr, $value:expr) => {
+        $crate::config::Global::write(|ctx: &mut $crate::config::Context| {
+            ctx.tokens[$range1] = $value.clone()
+        })
+    };
+    ($range1:expr, $range2:expr) => {
+        $crate::config::Global::write(|ctx: &mut $crate::config::Context| {
+            ctx.tokens[$range1] = ctx.tokens[$range2].clone()
+        })
     };
 }
 
@@ -98,10 +145,12 @@ impl From<&mut Context> for Option<Context> {
 #[derive(Debug)]
 pub struct Context {
     pub handlers: HandlerMap,
-    pub tokenizer: Tokenizer,
     pub patternizer: Patternizer,
-    pub registry: Registry,
     pub pending_redirects: Vec<HandlerRedirect>,
+    pub registry: Registry,
+    pub tokenizer: Tokenizer,
+    pub tokens: Vec<Token>,
+    pub original_tokens: Vec<Token>,
 }
 impl Clone for Context {
     fn clone(&self) -> Self {
@@ -111,6 +160,8 @@ impl Clone for Context {
             patternizer: self.patternizer.clone(),
             registry: self.registry.clone(),
             pending_redirects: self.pending_redirects.clone(),
+            tokens: self.tokens.clone(),
+            original_tokens: self.original_tokens.clone(),
         }
     }
 }
@@ -129,14 +180,15 @@ impl Context {
     /// Create a new configuration with the given name
     pub fn new(name: &str) -> Self {
         Context {
-            handlers: HandlerMap::default(),
-            tokenizer: Tokenizer::default(),
-            patternizer: Patternizer::default(),
-            registry: Registry::default(),
-            pending_redirects: Vec::new(),
+            handlers: HandlerMap::new(name),
+            tokenizer: Tokenizer::new(name),
+            patternizer: Patternizer::new(name),
+            registry: Registry::new(name),
+            pending_redirects: Vec::<HandlerRedirect>::new(),
+            tokens: Vec::<Token>::new(),
+            original_tokens: Vec::<Token>::new(),
         }
     }
-
     /// Get the current verbosity level
     pub fn get_verbosity(&self) -> u8 {
         let entry = self.get_entry("verbosity");
@@ -217,10 +269,12 @@ impl Context {
     }
 
     /// Apply this configuration globally
-    pub fn apply(&self) {
-        let verbosity = self.get_verbosity();
-        info!("Applying settings from registry");
-        VERBOSITY_LEVEL.store(verbosity, std::sync::atomic::Ordering::Relaxed);
+    pub fn push(&mut self) {
+        Global::write(|ctx| *ctx = self.clone());
+    }
+
+    pub fn pull(&mut self) {
+        Global::read(|ctx| *self = ctx.clone());
     }
 
     /// Set a feature flag with the given name and value
@@ -263,15 +317,16 @@ impl Context {
     pub fn get_entry(&self, name: &str) -> Option<&Entry> {
         let id = Id::get(name);
         println!("🔍 Getting entry '{}' with ID: {}", name, id);
-        println!("🔍 Registry has {} entries", self.registry.entries.len());
+        let registry_entries_count = self.registry.entries.len();
+        println!("🔍 Registry has {} entries", registry_entries_count);
 
         if name.starts_with("pattern_") {
             println!("🔍 Registry contents for pattern lookup:");
             for (entry_id, entry) in self.registry.entries.iter() {
-                let clean_id = entry_id.name.trim_end_matches("\n");
+                let clean_id = entry_id.name().trim_end_matches("\n");
                 let clean_entry = match entry {
                     Entry::Patternizer(p) => {
-                        format!("Patternizer({})", p.name.replace("\n", " | "))
+                        format!("Patternizer({})", p.name().replace("\n", " | "))
                     }
                     _ => "Other".to_string(),
                 };
@@ -290,16 +345,12 @@ impl Context {
     /// Set a value in the registry
     pub fn set_entry(&mut self, name: &str, entry: Entry) {
         let id = Id::get(name);
+        let entry_count = self.registry.entries.len();
         println!("🔧 Setting entry '{}' with ID: {}", name, id);
-        println!(
-            "🔧 Registry before insert has {} entries",
-            self.registry.entries.len()
-        );
+        println!("🔧 Registry before insert has {} entries", entry_count);
         self.registry.entries.insert(id.clone(), entry);
-        println!(
-            "🔧 Registry after insert has {} entries",
-            self.registry.entries.len()
-        );
+        let entry_count_after = self.registry.entries.len();
+        println!("🔧 Registry after insert has {} entries", entry_count_after);
 
         // Verify the entry was actually stored
         if self.registry.entries.contains_key(&id) {
@@ -309,7 +360,7 @@ impl Context {
         }
     }
     pub fn id(&self, name: &str) -> Option<Id> {
-        let mut entry = self.registry.entries.get(&Id::get(name));
+        let entry = self.registry.entries.get(&Id::get(name));
         if let Some(Entry::Id(value)) = entry {
             return Some(value.clone());
         } else {
@@ -317,16 +368,36 @@ impl Context {
         }
     }
     pub fn pattern(&self, name: &str) -> Option<Pattern> {
-        let mut entry = self.registry.entries.get(&Id::get(name));
+        let entry = self.registry.entries.get(&Id::get(name));
         if let Some(Entry::Patternizer(value)) = entry {
             return Some(value.clone());
         } else {
             None
         }
     }
-
+    pub fn original_tokens(&self) -> &[Token] {
+        &self.original_tokens
+    }
+    pub fn tokens(&self) -> &[Token] {
+        &self.tokens
+    }
+    pub fn tokens_mut(&mut self) -> &mut [Token] {
+        &mut self.tokens
+    }
+    pub fn token_at(&self, index: usize) -> Option<&Token> {
+        self.tokens.get(index)
+    }
+    pub fn token_at_mut(&mut self, index: usize) -> Option<&mut Token> {
+        self.tokens.get_mut(index)
+    }
+    pub fn token_range(&self, range: Range<usize>) -> &[Token] {
+        &self.tokens[range]
+    }
+    pub fn token_range_mut(&mut self, range: Range<usize>) -> &mut [Token] {
+        &mut self.tokens[range]
+    }
     /// Initialize common patterns in the patternizer (proper Context method)
-    pub fn initialize_common_patterns(&mut self) {
+    pub fn initialize_patterns(&mut self) {
         self.patternizer.initialize_common_patterns();
     }
 
@@ -409,14 +480,15 @@ impl Context {
 
     /// Register a handler with the context
     pub fn register_handler(&mut self, handler: Handler) {
-        self.handlers.register(handler);
+        let id = handler.id.clone();
+        self.handlers.register_shared(handler, &id);
     }
 
     /// Store a Patternizer directly in the registry (bypasses dyn Any)
     pub fn store_pattern(&mut self, pattern_id: &str, pattern: Pattern) {
         let key = format!("pattern_{}", pattern_id);
         let id = Id::get(&key);
-        let pattern_name = pattern.name.clone(); // Clone name before move
+        let pattern_name: String = pattern.name.clone(); // Clone name before move
         self.registry.insert(id, Entry::Patternizer(pattern));
         println!(
             "📋 Stored pattern '{}' in registry with key '{}'",
@@ -429,9 +501,10 @@ impl Context {
         let key = format!("pattern_{}", pattern_id);
         match self.get_entry(&key) {
             Some(Entry::Patternizer(pattern)) => {
+                let pattern_name: String = pattern.name.clone(); // Clone name before move
                 println!(
                     "✅ Found pattern '{}' in registry with key '{}'",
-                    pattern.name, key
+                    pattern_name, key
                 );
                 Some(pattern)
             }
@@ -448,10 +521,7 @@ impl Context {
     /// Add a handler report to the centralized reporting system
     pub fn add_report(&mut self, report: HandlerReport) {
         // Use nanosecond timestamp for unique report IDs to avoid conflicts
-        let timestamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let timestamp = time();
         let report_id = Id::get(&format!("report_{}", timestamp));
         self.registry
             .insert(report_id, Entry::HandlerReport(report));
@@ -467,7 +537,9 @@ impl Context {
             }
         }
         // Sort by timestamp for chronological order
-        reports.sort_by(|a, b| a.report_id.name.cmp(&b.report_id.name));
+        reports.sort_by(|a: &&HandlerReport, b: &&HandlerReport| {
+            a.report_id.name.cmp(&b.report_id.name)
+        });
         reports
     }
 
@@ -475,7 +547,7 @@ impl Context {
     pub fn get_reports_by_handler(&self, handler_name: &str) -> Vec<&HandlerReport> {
         self.get_reports()
             .into_iter()
-            .filter(|report| report.handler_name == handler_name)
+            .filter(|report: &&HandlerReport| report.handler_name == handler_name)
             .collect()
     }
 
@@ -483,7 +555,7 @@ impl Context {
     pub fn get_reports_by_level(&self, level: &ReportLevel) -> Vec<&HandlerReport> {
         self.get_reports()
             .into_iter()
-            .filter(|report| &report.level == level)
+            .filter(|report: &&HandlerReport| &report.level == level)
             .collect()
     }
 
@@ -491,7 +563,7 @@ impl Context {
     pub fn get_reports_by_phase(&self, phase: &HandlerPhase) -> Vec<&HandlerReport> {
         self.get_reports()
             .into_iter()
-            .filter(|report| &report.phase == phase)
+            .filter(|report: &&HandlerReport| &report.phase == phase)
             .collect()
     }
 
@@ -530,11 +602,11 @@ impl Context {
         println!(
             "[{}] {} | {} | {}",
             report.timestamp(),
-            report.level,
-            report.handler_name,
-            report.phase
+            report.level(),
+            report.handler_name(),
+            report.phase()
         );
-        println!("  Message: {}", report.message);
+        println!("  Message: {}", report.message());
         if report.tokens_processed > 0 || report.tokens_consumed > 0 {
             println!(
                 "  Tokens: processed={}, consumed={}",
@@ -558,9 +630,10 @@ impl Context {
     pub fn clear_reports(&mut self) {
         // Use proper Registry API to remove report entries
         let mut report_keys = Vec::new();
-        for i in 0..self.registry.len() {
+        let registry_len = self.registry.len();
+        for i in 0..registry_len {
             let report_id = Id::get(&format!("report_{}", i));
-            if let Some(Entry::HandlerReport(_)) = self.registry.get_root_entry(&report_id) {
+            if let Some(Entry::HandlerReport(_)) = self.registry.root(&report_id) {
                 report_keys.push(report_id);
             }
         }
@@ -573,7 +646,7 @@ impl Context {
     /// Display the entire registry in a database-like format for debugging
     pub fn display_registry_database(&self) {
         println!("🗃️  Context Registry Database View:");
-        self.registry.display_database_view();
+        self.registry.display_database();
     }
 
     /// Display registry statistics for debugging
@@ -584,16 +657,20 @@ impl Context {
 
     /// Display all context information including registry and reports
     pub fn display_full_context(&self) {
+        let handlers_count = self.handlers.handlers.len();
+        let pending_redirects_count = self.pending_redirects.len();
+        let registry_entries_count = self.registry.entries.len();
+        let reports_count = self.get_reports().len();
         println!("🌐 FULL CONTEXT DISPLAY");
         println!(
             "═══════════════════════════════════════════════════════════════════════════════════════"
         );
-
         // Display basic context info
         println!("📋 Context Overview:");
-        println!("  - Handlers: {} registered", self.handlers.handlers.len());
-        println!("  - Pending Redirects: {}", self.pending_redirects.len());
-        println!("  - Registry Entries: {}", self.registry.entries.len());
+        println!("  - Handlers: {} registered", handlers_count);
+        println!("  - Pending Redirects: {}", pending_redirects_count);
+        println!("  - Registry Entries: {}", registry_entries_count);
+        println!("  - Reports: {}", reports_count);
         println!();
 
         // Display registry database view
@@ -608,9 +685,9 @@ impl Context {
         let reports = self.get_reports();
         if !reports.is_empty() {
             println!("📝 Reports Summary:");
-            let mut level_counts = std::collections::HashMap::new();
+            let mut level_counts: HashMap<&ReportLevel, i32> = std::collections::HashMap::new();
             for report in &reports {
-                *level_counts.entry(&report.level).or_insert(0) += 1;
+                *level_counts.entry(&report.level()).or_insert(0) += 1;
             }
             for (level, count) in level_counts {
                 println!("  - {}: {}", level, count);
@@ -625,13 +702,7 @@ impl Context {
 }
 impl Default for Context {
     fn default() -> Self {
-        Context {
-            handlers: HandlerMap::default(),
-            tokenizer: Tokenizer::default(),
-            patternizer: Patternizer::default(),
-            registry: Registry::default(),
-            pending_redirects: Vec::new(),
-        }
+        Context::new("default")
     }
 }
 /// Comprehensive handler reporting structure for centralized debugging and statistics
@@ -653,8 +724,38 @@ impl HandlerReport {
     pub fn timestamp(&self) -> u128 {
         self.handler_id.timestamp()
     }
-    pub fn contains(&self) -> bool {
-        todo!()
+    pub fn report_id(&self) -> &Id {
+        &self.report_id
+    }
+    pub fn handler_id(&self) -> &Id {
+        &self.handler_id
+    }
+    pub fn handler_name(&self) -> &str {
+        &self.handler_name
+    }
+    pub fn function_name(&self) -> &str {
+        &self.function_name
+    }
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+    pub fn level(&self) -> &ReportLevel {
+        &self.level
+    }
+    pub fn tokens_processed(&self) -> usize {
+        self.tokens_processed
+    }
+    pub fn tokens_consumed(&self) -> usize {
+        self.tokens_consumed
+    }
+    pub fn phase(&self) -> &HandlerPhase {
+        &self.phase
+    }
+    pub fn success(&self) -> bool {
+        self.success
+    }
+    pub fn metadata(&self) -> &HashMap<String, String> {
+        &self.metadata
     }
 }
 impl PartialOrd for HandlerReport {
@@ -694,10 +795,10 @@ impl std::fmt::Display for HandlerReport {
             f,
             "[{}] {} | {} | {} | {}",
             self.timestamp(),
-            self.level,
-            self.handler_name,
-            self.phase,
-            self.message
+            self.level(),
+            self.handler_name(),
+            self.phase(),
+            self.message()
         )
     }
 }
@@ -736,7 +837,7 @@ pub struct HandlerRedirect {
     pub source_handler: String,
     pub target_handler: String,
     pub directive_type: String,
-    pub tokens: Vec<crate::Token>,
+    pub tokens: Vec<Token>,
     pub original_result: String, // Serialized HandlerResult for later processing
     timestamp: u128,
 }
@@ -746,7 +847,7 @@ impl HandlerRedirect {
         source_handler: String,
         target_handler: String,
         directive_type: String,
-        tokens: Vec<crate::Token>,
+        tokens: Vec<Token>,
         original_result: String,
     ) -> Self {
         Self {
@@ -764,6 +865,21 @@ impl HandlerRedirect {
     pub fn timestamp(&self) -> u128 {
         self.timestamp.clone()
     }
+    pub fn source_handler(&self) -> &str {
+        &self.source_handler
+    }
+    pub fn target_handler(&self) -> &str {
+        &self.target_handler
+    }
+    pub fn directive_type(&self) -> &str {
+        &self.directive_type
+    }
+    pub fn tokens(&self) -> &Vec<crate::Token> {
+        &self.tokens
+    }
+    pub fn original_result(&self) -> &str {
+        &self.original_result
+    }
 }
 
 impl std::fmt::Display for HandlerRedirect {
@@ -771,10 +887,10 @@ impl std::fmt::Display for HandlerRedirect {
         write!(
             f,
             "Redirect({} -> {} | {} | {} tokens)",
-            self.source_handler,
-            self.target_handler,
-            self.directive_type,
-            self.tokens.len()
+            self.source_handler(),
+            self.target_handler(),
+            self.directive_type(),
+            self.tokens().len()
         )
     }
 }

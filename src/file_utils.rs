@@ -1,4 +1,5 @@
-use crate::error::ConversionError;
+use crate::error::C2RError;
+use crate::{Kind, Reason};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -7,14 +8,15 @@ pub struct FileUtils;
 
 impl FileUtils {
     /// Read a file and return its contents as a string
-    pub fn read_file(path: &str) -> Result<String, ConversionError> {
+    pub fn read_file(path: &str) -> Result<String, C2RError> {
         let result = fs::read_to_string(path);
         match result {
             Ok(content) => Ok(content),
-            Err(err) => Err(ConversionError::io_error_msg(&format!(
-                "Failed to read file {}: {}",
-                path, err
-            ))),
+            Err(err) => Err(C2RError::new(
+                Kind::Io,
+                Reason::Other("io error"),
+                Some(format!("Failed to read file {}: {}", path, err)),
+            )),
         }
     }
 
@@ -57,21 +59,19 @@ impl FileUtils {
     }
 
     /// Read file content from a path
-    pub fn read_file_content(path: &Path) -> Result<String, ConversionError> {
+    pub fn read_file_content(path: &Path) -> Result<String, C2RError> {
         match fs::read_to_string(path) {
             Ok(content) => Ok(content),
-            Err(err) => Err(ConversionError::io_error_msg(&format!(
-                "Failed to read file {:?}: {}",
-                path, err
-            ))),
+            Err(err) => Err(C2RError::new(
+                Kind::Io,
+                Reason::Other("io error"),
+                Some(format!("Failed to read file {:?}: {}", path, err)),
+            )),
         }
     }
 
     /// Get all files with a specific extension in a directory (recursive)
-    pub fn get_files_with_extension(
-        dir: &str,
-        extension: &str,
-    ) -> Result<Vec<PathBuf>, ConversionError> {
+    pub fn get_files_with_extension(dir: &str, extension: &str) -> Result<Vec<PathBuf>, C2RError> {
         let mut result = Vec::new();
         Self::get_files_with_extension_recursive(Path::new(dir), extension, &mut result)?;
         Ok(result)
@@ -82,7 +82,7 @@ impl FileUtils {
         dir: &Path,
         extension: &str,
         result: &mut Vec<PathBuf>,
-    ) -> Result<(), ConversionError> {
+    ) -> Result<(), C2RError> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -90,10 +90,11 @@ impl FileUtils {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(err) => {
-                return Err(ConversionError::io_error_msg(&format!(
-                    "Failed to read directory {:?}: {}",
-                    dir, err
-                )));
+                return Err(C2RError::new(
+                    Kind::Io,
+                    Reason::Other("io error"),
+                    Some(format!("Failed to read directory {:?}: {}", dir, err)),
+                ));
             }
         };
 
@@ -101,10 +102,11 @@ impl FileUtils {
             let entry = match entry {
                 Ok(e) => e,
                 Err(err) => {
-                    return Err(ConversionError::io_error_msg(&format!(
-                        "Failed to read directory entry: {}",
-                        err
-                    )));
+                    return Err(C2RError::new(
+                        Kind::Io,
+                        Reason::Other("io error"),
+                        Some(format!("Failed to read directory entry: {}", err)),
+                    ));
                 }
             };
 

@@ -1,18 +1,159 @@
-use super::common::{not_handled, replace_with_range};
-use crate::ReportLevel;
-use crate::ReportLevel::{Info, Warning};
-use crate::Token;
-use crate::config::HandlerPhase;
-use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
-use crate::config::HandlerReport;
-use crate::error::ConversionError;
-use crate::extract::{ExtractedComment, ExtractedElement};
-use crate::handler::HandlerResult;
-use crate::lock::Id;
-use crate::{ConvertedComment, ConvertedElement};
-use crate::{context, report};
+//! Comment handler for C to Rust comment conversion
+//! Uses Patternizer exclusively for detection and conversion
 
-/// Creates a comment handler that can detect and convert C comments
+use crate::{
+    C2RError, CommentInfo, ConvertedComment, ConvertedElement, ElementInfo, ExtractedComment,
+    ExtractedElement,
+    HandlerPhase::{self, Report},
+    HandlerReport, HandlerResult, Id, Kind, PatternResult, Reason,
+    ReportLevel::{self, Info, Warning},
+    Result, Token, context, not_handled, report,
+};
+use std::ops::Range;
+
+/// Report callback: Collects comment handler reports
+pub fn report_comment() -> Result<HandlerReport> {
+    let context = context!();
+    let reports = context.get_reports_by_handler("comment_handler");
+
+    let (info_count, warning_count, error_count) =
+        reports
+            .iter()
+            .fold((0, 0, 0), |acc, report| match report.level {
+                ReportLevel::Error => (acc.0, acc.1, acc.2 + 1),
+                ReportLevel::Warning => (acc.0, acc.1 + 1, acc.2),
+                _ => (acc.0 + 1, acc.1, acc.2),
+            });
+
+    Ok(HandlerReport {
+        report_id: Box::new(Id::get(&Id::gen_name("comment_handler"))),
+        handler_id: Box::new(Id::get("comment_handler")),
+        handler_name: "comment_handler".to_string(),
+        function_name: "report_comment".to_string(),
+        message: format!(
+            "Comment handler summary: {} reports ({} info, {} warnings, {} errors)",
+            reports.len(),
+            info_count,
+            warning_count,
+            error_count
+        ),
+        level: match (error_count, warning_count) {
+            (0, 0) => ReportLevel::Info,
+            (0, _) => ReportLevel::Warning,
+            _ => ReportLevel::Error,
+        },
+        tokens_processed: reports.len(),
+        tokens_consumed: 0,
+        phase: HandlerPhase::Report,
+        success: error_count == 0,
+        metadata: std::collections::HashMap::new(),
+    })
+}
+
+/// Handle callback: Sets up patternizer and registers comment patterns
+fn handle_comment(token_range: Range<usize>) -> Result<HandlerResult> {
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+
+    // Register comment patterns in the global registry via context
+    let comment_patterns = ["comment_line", "comment_block", "comment_doc", "comment"];
+
+    for pattern in &comment_patterns {
+        match context.patternizer.match_pattern(pattern, tokens) {
+            PatternResult::Match { consumed_tokens } => {
+                report!(
+                    "comment_handler",
+                    "handle_comment",
+                    ReportLevel::Info,
+                    HandlerPhase::Handle,
+                    format!(
+                        "Processing {} comment with {} tokens",
+                        pattern, consumed_tokens
+                    ),
+                    true
+                );
+
+                // Convert using pattern data
+                match convert_comment(token_range.clone())? {
+                    Some(ConvertedElement::Comment(converted_comment)) => {
+                        let code = converted_comment.code.clone();
+                        return Ok(HandlerResult::Converted(
+                            ConvertedElement::Comment(converted_comment),
+                            0..consumed_tokens,
+                            code,
+                            Id::get("comment_handler"),
+                        ));
+                    }
+                    _ => {
+                        report!(
+                            "comment_handler",
+                            "handle_comment",
+                            ReportLevel::Error,
+                            HandlerPhase::Handle,
+                            "Failed to convert comment",
+                            false
+                        );
+                        return not_handled();
+                    }
+                }
+            }
+            _ => continue,
+        }
+    }
+
+    not_handled()
+}
+
+/// Process callback: Uses Patternizer to detect comment patterns
+fn process_comment(token_range: Range<usize>) -> Result<bool> {
+    let mut context = crate::context!();
+    context.pull();
+
+    // Add bounds checking to prevent slice index out of bounds
+    if token_range.end > context.tokens.len() || token_range.start >= context.tokens.len() {
+        eprintln!(
+            "🚨 comment_handler: token_range {:?} exceeds tokens length {}",
+            token_range,
+            context.tokens.len()
+        );
+        return Ok(false);
+    }
+
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+    if tokens.is_empty() {
+        return Ok(false);
+    }
+
+    // Check for comment patterns
+    let comment_patterns = ["comment_line", "comment_block", "comment_doc", "comment"];
+
+    for pattern in &comment_patterns {
+        if let PatternResult::Match { consumed_tokens: _ } =
+            context.patternizer.match_pattern(pattern, tokens)
+        {
+            return Ok(true);
+        }
+    }
+
+    // Fallback: check for comment markers
+    let first_token = tokens[0].to_string();
+    Ok(first_token.starts_with("//") || first_token.starts_with("/*"))
+}
+
+/// Creates a comment handler that uses Patternizer exclusively
 pub fn create_comment_handler() -> crate::handler::Handler {
     let handler_id = Id::get("comment_handler");
     let handler_role = "comment";
@@ -25,402 +166,25 @@ pub fn create_comment_handler() -> crate::handler::Handler {
         Some(process_comment),
         Some(handle_comment),
         Some(extract_comment),
-        Some(convert_comment_callback),
+        Some(convert_comment),
+        Some(document_comment),
         Some(report_comment),
-        Some(result_comment),
-        Some(redirect_comment),
+        Some(result_comment),   // Result callback for final processing
+        Some(redirect_comment), // Redirect callback for nested structures
     )
 }
 
-/// Determines if the token sequence represents a comment
-fn process_comment(tokens: &[Token]) -> Result<bool, ConversionError> {
-    let _id = Id::get("process_comment");
-    if tokens.is_empty() {
-        return Ok(false);
-    }
-
-    // Check for inline comments: //...
-    if tokens[0].to_string() == "//" {
-        return Ok(true);
-    }
-
-    // Check for block comments: /* ... */
-    if tokens.len() >= 3 && tokens[0].to_string() == "/*" {
-        // Find the matching closing token
-        for token in tokens.iter().skip(1) {
-            if token.to_string() == "*/" {
-                return Ok(true);
-            }
-        }
-    }
-
-    Ok(false)
-}
-
-/// Handles the conversion of comments
-fn handle_comment(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let _id = Id::get("handle_comment");
-    report!(
-        "comment_handler",
-        "handle_comment",
-        Info,
-        Handle,
-        "Comment handler processing tokens",
-        true
-    );
-
-    if tokens.is_empty() {
-        return not_handled();
-    }
-
-    // Handle inline comments: //...
-    if tokens[0].to_string() == "//" {
-        return handle_inline_comment(tokens);
-    }
-
-    // Handle block comments: /* ... */
-    if tokens.len() >= 3 && tokens[0].to_string() == "/*" {
-        return handle_block_comment(tokens);
-    }
-
-    not_handled()
-}
-
-/// Handles inline comments: //...
-fn handle_inline_comment(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    if tokens.len() < 2 {
-        return not_handled();
-    }
-
-    report!(
-        "comment_handler",
-        "handle_comment",
-        Info,
-        Process,
-        "Processing inline comment",
-        true
-    );
-
-    // Extract the comment content
-    let mut comment = String::new();
-
-    for token in tokens.iter().skip(1) {
-        comment.push_str(&token.to_string());
-        comment.push(' ');
-    }
-
-    // Convert to Rust comment
-    let rust_comment = convert_comment(&format!("//{}", comment));
-
-    let id = Id::get("inline_comment");
-    // Inline comments process all input tokens
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_comment, token_range, id)
-}
-
-/// Handles block comments: /* ... */
-fn handle_block_comment(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    report!(
-        "comment_handler",
-        "handle_comment",
-        Info,
-        Process,
-        "Processing block comment",
-        true
-    );
-
-    // Find the end of the comment
-    let mut end_pos = 0;
-    for (i, token) in tokens.iter().enumerate().skip(1) {
-        if token.to_string() == "*/" {
-            end_pos = i;
-            break;
-        }
-    }
-
-    if end_pos == 0 {
-        return Err(ConversionError::new("Unclosed block comment"));
-    }
-
-    // Extract the comment content
-    let mut comment = String::new();
-    for token in tokens.iter().skip(1).take(end_pos - 1) {
-        comment.push_str(&token.to_string());
-        comment.push(' ');
-    }
-
-    // Convert to Rust comment
-    let rust_comment = convert_comment(&format!("/* {} */", comment));
-
-    let id = Id::get("block_comment");
-    // Block comments process all input tokens
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_comment, token_range, id)
-}
-
-/// Converts a C comment to Rust comment
-fn convert_comment(comment: &str) -> String {
-    // Remove C-style comment delimiters
-    let comment = comment.trim();
-
-    // Handle block comments /* ... */
-    if comment.starts_with("/*") && comment.ends_with("*/") {
-        let inner = &comment[2..comment.len() - 2].trim();
-
-        // Check if it's a documentation comment
-        if inner.starts_with("*") {
-            // Convert to Rust doc comment format
-            let doc_lines: Vec<&str> = inner.lines().collect();
-            if doc_lines.len() > 1 {
-                // Multi-line doc comment
-                let formatted_lines: Vec<String> = doc_lines
-                    .iter()
-                    .map(|line| {
-                        let trimmed = line.trim_start().trim_start_matches('*').trim_start();
-                        format!("/// {}", trimmed)
-                    })
-                    .collect();
-                formatted_lines.join("\n")
-            } else {
-                // Single line doc comment
-                let content = inner.trim_start().trim_start_matches('*').trim();
-                format!("/// {}", content)
-            }
-        } else {
-            // Regular block comment
-            // Check if it's multi-line
-            if inner.contains('\n') {
-                format!("/* {} */", inner)
-            } else {
-                format!("// {}", inner)
-            }
-        }
-    }
-    // Handle line comments // ...
-    else if comment.starts_with("//") {
-        let inner = &comment[2..].trim();
-
-        // Check if it's a documentation comment
-        if inner.starts_with("/") {
-            // Triple slash doc comment in C
-            let content = inner.trim_start_matches('/').trim();
-            format!("/// {}", content)
-        } else {
-            // Regular line comment
-            format!("// {}", inner)
-        }
-    } else {
-        // Return the comment as-is if it doesn't match known patterns
-        comment.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_block_comment_conversion() {
-        assert_eq!(convert_comment("/* Simple comment */"), "// Simple comment");
-        assert_eq!(
-            convert_comment("/* Multi-\nline\ncomment */"),
-            "/* Multi-\nline\ncomment */"
-        );
-    }
-
-    #[test]
-    fn test_line_comment_conversion() {
-        assert_eq!(convert_comment("// Simple comment"), "// Simple comment");
-    }
-
-    #[test]
-    fn test_doc_comment_conversion() {
-        assert_eq!(
-            convert_comment("/* * Documentation */"),
-            "/// Documentation"
-        );
-        assert_eq!(
-            convert_comment("/* * Line 1\n * Line 2 */"),
-            "/// Line 1\n/// Line 2"
-        );
-        assert_eq!(convert_comment("/// Doc comment"), "/// Doc comment");
-    }
-}
-
-/// Extract comment information from tokens
-fn extract_comment(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    let _id = Id::get("extract_comment");
-    report!(
-        "comment_handler",
-        "extract_comment",
-        Info,
-        Extract,
-        "Extracting comment from tokens",
-        true
-    );
-
-    if tokens.is_empty() {
-        return Ok(None);
-    }
-
-    // Handle inline comments: //...
-    if tokens[0].to_string() == "//" {
-        return extract_inline_comment(tokens);
-    }
-
-    // Handle block comments: /* ... */
-    if tokens.len() >= 3 && tokens[0].to_string() == "/*" {
-        return extract_block_comment(tokens);
-    }
-
-    Ok(None)
-}
-
-/// Extract inline comment information
-fn extract_inline_comment(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    if tokens.len() < 2 {
-        return Ok(None);
-    }
-
-    report!(
-        "comment_handler",
-        "extract_comment",
-        Info,
-        Extract,
-        "Extracting inline comment",
-        true
-    );
-
-    // Extract the comment content
-    let mut content = String::new();
-    for token in tokens.iter().skip(1) {
-        content.push_str(&token.to_string());
-        content.push(' ');
-    }
-    content = content.trim().to_string();
-
-    let is_doc_comment =
-        content.starts_with('/') || content.contains("@param") || content.contains("@return");
-
-    let extracted = ExtractedComment {
-        content,
-        is_block: false,
-        is_doc_comment,
-    };
-
-    Ok(Some(ExtractedElement::Comment(extracted)))
-}
-
-/// Extract block comment information
-fn extract_block_comment(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    if tokens.len() < 3 {
-        return Ok(None);
-    }
-
-    report!(
-        "comment_handler",
-        "extract_comment",
-        Info,
-        Extract,
-        "Extracting block comment",
-        true
-    );
-
-    // Find the end of the comment
-    let mut end_pos = 0;
-    for (i, token) in tokens.iter().enumerate().skip(1) {
-        if token.to_string() == "*/" {
-            end_pos = i;
-            break;
-        }
-    }
-
-    if end_pos == 0 {
-        return Err(ConversionError::new("Unclosed block comment"));
-    }
-
-    // Extract the comment content
-    let mut content = String::new();
-    for token in tokens.iter().skip(1).take(end_pos - 1) {
-        content.push_str(&token.to_string());
-        content.push(' ');
-    }
-    content = content.trim().to_string();
-
-    let is_doc_comment =
-        content.starts_with('*') || content.contains("@param") || content.contains("@return");
-
-    let extracted = ExtractedComment {
-        content,
-        is_block: true,
-        is_doc_comment,
-    };
-
-    Ok(Some(ExtractedElement::Comment(extracted)))
-}
-
-/// Convert extracted comment to Rust code - callback version to avoid name conflict
-fn convert_comment_callback(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
-    let _id = Id::get("convert_comment_callback");
-    report!(
-        "comment_handler",
-        "convert_comment_callback",
-        Info,
-        Convert,
-        "Converting comment to Rust",
-        true
-    );
-
-    // First extract the comment information from tokens
-    if let Some(ExtractedElement::Comment(comment)) = extract_comment(tokens)? {
-        let rust_code = if comment.is_block {
-            convert_comment(&format!("/* {} */", comment.content))
-        } else {
-            convert_comment(&format!("// {}", comment.content))
-        };
-
-        let converted = ConvertedComment {
-            content: comment.content.clone(),
-            rust_code,
-            is_block: comment.is_block,
-            is_doc_comment: comment.is_doc_comment,
-        };
-
-        Ok(Some(ConvertedElement::Comment(converted)))
-    } else {
-        Ok(None)
-    }
-}
-
-/// Handle redirection for comment processing
-fn redirect_comment(
-    tokens: &[Token],
-    result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
-    let _id = Id::get("redirect_comment");
-    report!(
-        "comment_handler",
-        "redirect_comment",
-        Info,
-        Report,
-        "Redirecting comment handler result",
-        true
-    );
-
-    // Comments are typically handled independently and don't need redirection
-    // They could potentially be redirected to documentation generators
-    Ok(result)
-}
-
-/// Result callback: Postprocesses generated comment code, adds documentation, and enhances formatting
-fn result_comment(
-    tokens: &[Token],
-    result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
+/// Result callback: Postprocesses comment conversion with documentation
+fn result_comment(token_range: Range<usize>, result: HandlerResult) -> Result<HandlerResult> {
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, crate::Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
     let _id = Id::get("result_comment");
 
     report!(
@@ -433,22 +197,29 @@ fn result_comment(
     );
 
     match result {
-        HandlerResult::Completed(tokens_opt, _, rust_code, id) => {
-            // Extract comment information for documentation
-            let (comment_type, comment_content) = extract_comment_info_from_tokens(tokens);
+        HandlerResult::Converted(element, token_range, code, id) => {
+            // Extract comment information from tokens for documentation
+            let comment_info = extract_comment_info(tokens);
 
             // Generate documentation about the comment conversion
             let doc_comment =
-                generate_comment_documentation(tokens, &comment_type, &comment_content);
+                document_comment(ElementInfo::Comment(comment_info.clone()))?.unwrap_or_default();
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
 
             // Add metadata comment for traceability
             let metadata_comment = format!(
-                "// [C2R] Comment converted from C to Rust - Type: {}, Length: {} chars\n",
-                comment_type,
-                comment_content.len()
+                "// [C2R] Comment converted from C to Rust - {}: {}\n",
+                comment_info.comment_type,
+                comment_info
+                    .content
+                    .lines()
+                    .next()
+                    .unwrap_or("[empty]")
+                    .chars()
+                    .take(50)
+                    .collect::<String>()
             );
             enhanced_code.push_str(&metadata_comment);
 
@@ -459,375 +230,346 @@ fn result_comment(
             }
 
             // Add the original converted code
-            enhanced_code.push_str(&rust_code);
+            enhanced_code.push_str(&code);
 
             report!(
                 "comment_handler",
                 "result_comment",
                 Info,
                 Report,
-                &format!(
-                    "Enhanced comment conversion: {} type, {} chars",
-                    comment_type,
-                    comment_content.len()
+                format!(
+                    "Enhanced comment with {} lines of documentation",
+                    doc_comment.lines().count()
                 ),
                 true
             );
 
-            // CRITICAL: Return HandlerResult::Completed to preserve the code!
-            Ok(HandlerResult::Completed(
-                tokens_opt,
-                0..1,
+            Ok(HandlerResult::Converted(
+                element,
+                token_range,
                 enhanced_code,
                 id,
             ))
         }
-        HandlerResult::Converted(element, _, rust_code, id) => {
-            // Handle converted elements - enhance the code and preserve the variant
-            let (comment_type, comment_content) = extract_comment_info_from_tokens(tokens);
-            let doc_comment =
-                generate_comment_documentation(tokens, &comment_type, &comment_content);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Comment converted from C to Rust - Type: {}, Length: {} chars\n",
-                comment_type,
-                comment_content.len()
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "comment_handler",
-                "result_comment",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced converted comment: {} type, {} chars",
-                    comment_type,
-                    comment_content.len()
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Converted to preserve the code!
-            Ok(HandlerResult::Converted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Extracted(element, _, rust_code, id) => {
-            // Handle extracted elements - enhance the code and preserve the variant
-            let (comment_type, comment_content) = extract_comment_info_from_tokens(tokens);
-            let doc_comment =
-                generate_comment_documentation(tokens, &comment_type, &comment_content);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Comment converted from C to Rust - Type: {}, Length: {} chars\n",
-                comment_type,
-                comment_content.len()
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "comment_handler",
-                "result_comment",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced extracted comment: {} type, {} chars",
-                    comment_type,
-                    comment_content.len()
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Extracted to preserve the code!
-            Ok(HandlerResult::Extracted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Handled(Some(converted_tokens), _, handler_id) => {
-            // Legacy support for token-based results
-            // Extract comment information for documentation
-            let (comment_type, comment_content) = extract_comment_info_from_tokens(tokens);
-
-            // Generate documentation about the comment conversion
-            let doc_comment =
-                generate_comment_documentation(tokens, &comment_type, &comment_content);
-
-            // Postprocess the converted Rust code for better formatting
-            let mut enhanced_result = postprocess_comment_code(converted_tokens);
-
-            // Add the documentation comment before the converted comment
-            if !doc_comment.is_empty() {
-                enhanced_result.insert(0, Token::s(doc_comment));
-            }
-
-            // Add metadata comment for traceability
-            let metadata_comment = format!(
-                "// [C2R] Comment converted from C to Rust - Type: {}, Length: {} chars",
-                comment_type,
-                comment_content.len()
-            );
-            enhanced_result.insert(0, Token::s(metadata_comment));
-
-            report!(
-                "comment_handler",
-                "result_comment",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced comment conversion: {} type, {} chars",
-                    comment_type,
-                    comment_content.len()
-                ),
-                true
-            );
-
-            Ok(HandlerResult::Handled(
-                Some(enhanced_result),
-                0..1,
-                handler_id,
-            ))
-        }
-        HandlerResult::Handled(None, _, handler_id) => {
+        _ => {
             report!(
                 "comment_handler",
                 "result_comment",
                 Warning,
                 Report,
-                "Comment handler returned empty result",
+                "Comment result was not in Completed state, returning as-is",
                 true
             );
-            Ok(HandlerResult::Handled(None, 0..0, handler_id))
-        }
-        other_result => {
-            // Pass through non-handled results unchanged
-            Ok(other_result)
+
+            Ok(result)
         }
     }
 }
 
-/// Extracts comment information from the original tokens for documentation purposes
-fn extract_comment_info_from_tokens(tokens: &[Token]) -> (String, String) {
+/// Extract comment information from tokens for result processing
+fn extract_comment_info(tokens: &[Token]) -> CommentInfo {
+    let mut content = String::new();
+    let mut comment_type = String::new();
+    let mut is_documentation = false;
+    let mut is_multiline = false;
+    let mut line_count = 1;
+
+    // Basic parsing to extract comment information
+    for token in tokens {
+        match token {
+            Token::s(text) if text.starts_with("//") || text.starts_with("/*") => {
+                content = text.clone();
+                if text.starts_with("/*") {
+                    comment_type = "block comment".to_string();
+                    is_multiline = text.contains('\n');
+                    line_count = text.lines().count();
+                } else if text.starts_with("//") {
+                    comment_type = "line comment".to_string();
+                }
+
+                // Check if it's documentation
+                if text.starts_with("/**")
+                    || text.starts_with("/*!")
+                    || text.contains("@param")
+                    || text.contains("@return")
+                {
+                    is_documentation = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if content.is_empty() {
+        content = "[empty comment]".to_string();
+    }
+    if comment_type.is_empty() {
+        comment_type = "unknown comment".to_string();
+    }
+
+    CommentInfo {
+        comment_type,
+        content,
+        is_documentation,
+        is_multiline,
+        line_count,
+    }
+}
+
+/// Document callback: Generates documentation for comments
+fn document_comment(info: ElementInfo) -> Result<Option<String>> {
+    if let ElementInfo::Comment(comment_info) = info {
+        let mut doc = format!(
+            "/// Converted C comment: {}\n",
+            comment_info.content.lines().next().unwrap_or("[empty]")
+        );
+
+        doc.push_str(&format!("/// Type: {}\n", comment_info.comment_type));
+
+        if comment_info.is_documentation {
+            doc.push_str("/// Category: Documentation\n");
+        }
+
+        if comment_info.is_multiline {
+            doc.push_str(&format!("/// Lines: {}\n", comment_info.line_count));
+        }
+
+        if comment_info.content.len() > 100 {
+            doc.push_str("/// Note: Long comment - may contain detailed explanation\n");
+        }
+
+        // Analyze content for special markers
+        if comment_info.content.contains("TODO") {
+            doc.push_str("/// Contains: TODO items\n");
+        }
+        if comment_info.content.contains("FIXME") {
+            doc.push_str("/// Contains: FIXME items\n");
+        }
+        if comment_info.content.contains("NOTE") {
+            doc.push_str("/// Contains: Note items\n");
+        }
+
+        Ok(Some(doc))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Redirect callback: Handles nested structures within comments (typically none)
+#[allow(unused_variables)]
+pub fn redirect_comment(token_range: Range<usize>, result: HandlerResult) -> Result<HandlerResult> {
+    report!(
+        "comment_handler",
+        "redirect_comment",
+        Info,
+        HandlerPhase::Convert,
+        "Checking comment for nested structures (typically none expected)",
+        true
+    );
+
+    // Comments typically don't contain nested structures that need redirection
+    // This is mostly a no-op but included for consistency with other handlers
+    // Comments are self-contained and don't usually need to delegate processing
+
+    report!(
+        "comment_handler",
+        "redirect_comment",
+        Info,
+        HandlerPhase::Convert,
+        "No redirection needed for comment, returning unchanged",
+        true
+    );
+
+    Ok(result)
+}
+
+/// Extract comment information from tokens using Patternizer exclusively
+fn extract_comment(token_range: Range<usize>) -> Result<Option<ExtractedElement>> {
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+
+    // Try to match comment patterns
+    let comment_patterns = ["comment_line", "comment_block", "comment_doc", "comment"];
+
+    for pattern in &comment_patterns {
+        match context.patternizer.match_pattern(pattern, tokens) {
+            PatternResult::Match { consumed_tokens: _ } => {
+                // Extract comment components
+                let (content, comment_type) = parse_comment_tokens(tokens)?;
+
+                let extracted_comment = ExtractedComment {
+                    code: content,
+                    is_block: comment_type == "block",
+                    is_doc_comment: comment_type == "doc",
+                };
+
+                return Ok(Some(ExtractedElement::Comment(extracted_comment)));
+            }
+            _ => continue,
+        }
+    }
+
+    // Fallback for basic comment detection
+    if tokens.len() >= 1 {
+        let first_token = tokens[0].to_string();
+        if first_token.starts_with("//") || first_token.starts_with("/*") {
+            let (content, comment_type) = parse_comment_tokens(tokens)?;
+
+            let extracted_comment = ExtractedComment {
+                code: content,
+                is_block: comment_type == "block",
+                is_doc_comment: comment_type == "doc",
+            };
+
+            return Ok(Some(ExtractedElement::Comment(extracted_comment)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Helper function to parse comment tokens
+fn parse_comment_tokens(tokens: &[Token]) -> Result<(String, String)> {
     if tokens.is_empty() {
-        return ("unknown".to_string(), String::new());
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::Unexpected("empty comment token list"),
+            None,
+        ));
     }
 
-    let first_token = tokens[0].to_string();
+    let full_comment = tokens
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
 
-    if first_token == "//" {
-        // Inline comment
-        let mut content = String::new();
-        for token in tokens.iter().skip(1) {
-            content.push_str(&token.to_string());
-            content.push(' ');
-        }
-        ("inline".to_string(), content.trim().to_string())
-    } else if first_token == "/*" {
-        // Block comment
-        let mut content = String::new();
-        let mut found_end = false;
-
-        for token in tokens.iter().skip(1) {
-            let token_str = token.to_string();
-            if token_str == "*/" {
-                found_end = true;
-                break;
-            }
-            content.push_str(&token_str);
-            content.push(' ');
-        }
-
-        let comment_type = if found_end { "block" } else { "unclosed_block" };
-        (comment_type.to_string(), content.trim().to_string())
+    let comment_type = if full_comment.starts_with("//") {
+        "line".to_string()
+    } else if full_comment.starts_with("/*") {
+        "block".to_string()
     } else {
-        (
-            "unknown".to_string(),
-            tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" "),
-        )
-    }
+        "unknown".to_string()
+    };
+
+    // Extract comment content (remove comment markers)
+    let content = if full_comment.starts_with("//") {
+        full_comment
+            .strip_prefix("//")
+            .unwrap_or(&full_comment)
+            .trim()
+            .to_string()
+    } else if full_comment.starts_with("/*") && full_comment.ends_with("*/") {
+        let stripped = full_comment.strip_prefix("/*").unwrap_or(&full_comment);
+        let stripped = stripped.strip_suffix("*/").unwrap_or(stripped);
+        stripped.trim().to_string()
+    } else {
+        full_comment
+    };
+
+    Ok((content, comment_type))
 }
 
-/// Generates documentation comments for the comment conversion
-fn generate_comment_documentation(
-    tokens: &[Token],
-    comment_type: &str,
-    comment_content: &str,
-) -> String {
-    let mut doc_lines = Vec::new();
+/// Convert extracted comment to Rust code using Patternizer exclusively
+fn convert_comment(token_range: Range<usize>) -> Result<Option<ConvertedElement>> {
+    // Use cloned context to get the actual tokens from global context
+    let mut context = crate::context!();
+    context.pull();
+    let tokens_in_range = &context.tokens[token_range.clone()];
 
-    // Add main documentation header
-    doc_lines.push("/**".to_string());
-    doc_lines.push(" * Comment Conversion Documentation".to_string());
-    doc_lines.push(" *".to_string());
+    // Filter out Token::n() from the retrieved tokens
+    let filtered_tokens: Vec<Token> = tokens_in_range
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
 
-    // Add comment type information
-    doc_lines.push(format!(" * Type: {} comment", comment_type));
+    let mut processed_tokens = filtered_tokens.to_vec();
 
-    // Add content preview (truncated if too long)
-    let preview = if comment_content.len() > 60 {
-        format!("{}...", &comment_content[..60])
-    } else {
-        comment_content.to_string()
-    };
-    doc_lines.push(format!(" * Content: \"{}\"", preview));
+    // Try to match comment patterns
+    let comment_patterns = ["comment_line", "comment_block", "comment_doc", "comment"];
 
-    // Add conversion details
-    doc_lines.push(format!(" * Original tokens: {}", tokens.len()));
-    doc_lines.push(" *".to_string());
+    for pattern in &comment_patterns {
+        match context.patternizer.match_pattern(pattern, &filtered_tokens) {
+            PatternResult::Match { consumed_tokens } => {
+                // Parse comment components
+                let (content, comment_type) = parse_comment_tokens(&filtered_tokens)?;
 
-    // Add conversion notes based on comment type
-    match comment_type {
-        "inline" => {
-            doc_lines
-                .push(" * Conversion: C inline comment (//) -> Rust line comment (//)".to_string());
-            if comment_content.starts_with('/') {
-                doc_lines.push(
-                    " * Note: Detected potential doc comment, converted to /// format".to_string(),
-                );
+                // Mark processed tokens as consumed
+                for i in 0..consumed_tokens.min(processed_tokens.len()) {
+                    processed_tokens[i] = Token::n();
+                }
+
+                let code = convert_comment_to_rust(&content, &comment_type)?;
+
+                let converted_comment = ConvertedComment {
+                    code,
+                    is_block: comment_type == "block",
+                    is_doc_comment: comment_type == "doc",
+                };
+
+                return Ok(Some(ConvertedElement::Comment(converted_comment)));
             }
+            _ => continue,
+        }
+    }
+
+    // Fallback conversion for basic comments
+    if filtered_tokens.len() >= 1 {
+        let first_token = filtered_tokens[0].to_string();
+        if first_token.starts_with("//") || first_token.starts_with("/*") {
+            let (content, comment_type) = parse_comment_tokens(&filtered_tokens)?;
+            let code = convert_comment_to_rust(&content, &comment_type)?;
+
+            let converted_comment = ConvertedComment {
+                code,
+                is_block: comment_type == "block",
+                is_doc_comment: comment_type == "doc",
+            };
+
+            return Ok(Some(ConvertedElement::Comment(converted_comment)));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Convert comment to Rust syntax
+fn convert_comment_to_rust(content: &str, comment_type: &str) -> Result<String> {
+    match comment_type {
+        "line" => {
+            // C line comment -> Rust line comment
+            Ok(format!("// {}", content))
         }
         "block" => {
-            doc_lines.push(" * Conversion: C block comment (/* */) -> Rust format".to_string());
-            if comment_content.starts_with('*') {
-                doc_lines
-                    .push(" * Note: Detected doc comment, converted to /// format".to_string());
-            } else if comment_content.contains('\n') {
-                doc_lines
-                    .push(" * Note: Multi-line comment preserved as block comment".to_string());
+            // C block comment -> Rust block comment or line comment
+            if content.contains('\n') {
+                // Multi-line block comment
+                let lines: Vec<&str> = content.split('\n').collect();
+                let rust_lines: Vec<String> = lines
+                    .iter()
+                    .map(|line| format!("// {}", line.trim()))
+                    .collect();
+                Ok(rust_lines.join("\n"))
             } else {
-                doc_lines.push(
-                    " * Note: Single-line block comment converted to line comment".to_string(),
-                );
+                // Single-line block comment -> line comment
+                Ok(format!("// {}", content))
             }
         }
-        "unclosed_block" => {
-            doc_lines.push(" * Warning: Unclosed block comment detected".to_string());
+        "doc" => {
+            // Documentation comment
+            Ok(format!("/// {}", content))
         }
         _ => {
-            doc_lines
-                .push(" * Note: Unknown comment format, conversion may be imperfect".to_string());
+            // Unknown comment type, default to line comment
+            Ok(format!("// {}", content))
         }
     }
-
-    doc_lines.push(" */".to_string());
-
-    report!(
-        "comment_handler",
-        "generate_comment_documentation",
-        Info,
-        Report,
-        &format!("Generated documentation for {} comment", comment_type),
-        true
-    );
-
-    doc_lines.join("\n")
-}
-
-/// Postprocesses the converted comment code for better formatting
-fn postprocess_comment_code(mut tokens: Vec<Token>) -> Vec<Token> {
-    let original_count = tokens.len();
-
-    // Clean up and format the converted comment tokens
-    for token in tokens.iter_mut() {
-        let mut content = token.to_string();
-
-        // Clean up extra whitespace
-        content = content.trim().to_string();
-
-        // Ensure proper spacing after comment delimiters
-        if content.starts_with("//")
-            && content.len() > 2
-            && !content.chars().nth(2).unwrap().is_whitespace()
-        {
-            content = format!("// {}", &content[2..]);
-        }
-
-        // Ensure proper formatting for doc comments
-        if content.starts_with("///")
-            && content.len() > 3
-            && !content.chars().nth(3).unwrap().is_whitespace()
-        {
-            content = format!("/// {}", &content[3..]);
-        }
-
-        *token = Token::s(content);
-    }
-
-    // Remove any empty tokens
-    tokens.retain(|token| !token.to_string().trim().is_empty());
-
-    report!(
-        "comment_handler",
-        "postprocess_comment_code",
-        Info,
-        Report,
-        &format!(
-            "Postprocessed {} tokens -> {} tokens",
-            original_count,
-            tokens.len()
-        ),
-        true
-    );
-
-    tokens
-}
-
-/// Report callback: Collects and summarizes all reports from the context for this handler
-fn report_comment(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
-    let context = context!();
-    let handler_reports = context.get_reports_by_handler("comment_handler");
-
-    // Count reports by level
-    let info_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, ReportLevel::Info))
-        .count();
-    let error_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, ReportLevel::Error))
-        .count();
-    let warning_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, ReportLevel::Warning))
-        .count();
-
-    // Create summary message
-    let summary_message = format!(
-        "Comment Handler Summary: {} total reports (Info: {}, Warnings: {}, Errors: {})",
-        handler_reports.len(),
-        info_count,
-        warning_count,
-        error_count
-    );
-
-    // Create consolidated report using your gen_name function for unique report_id
-    let summary_report = HandlerReport {
-        report_id: Box::new(Id::get(&Id::gen_name("comment_handler_summary"))),
-        handler_id: Box::new(Id::get("comment_handler")),
-        handler_name: "comment_handler".to_string(),
-        function_name: "report_comment".to_string(),
-        level: ReportLevel::Info,
-        phase: HandlerPhase::Report,
-        message: summary_message,
-        success: error_count == 0, // Success if no errors
-        tokens_processed: handler_reports.iter().map(|r| r.tokens_processed).sum(),
-        tokens_consumed: handler_reports.iter().map(|r| r.tokens_consumed).sum(),
-        metadata: std::collections::HashMap::new(),
-    };
-
-    Ok(summary_report)
 }

@@ -36,10 +36,11 @@ pub struct ExtractedFunction {
     pub is_variadic: bool,
     pub is_static: bool,
     pub is_inline: bool,
+    pub is_extern: bool,
     pub tokens: Vec<Token>,
     pub from_recovery: bool, // New field
     pub is_definition: bool,
-    pub original_code: String,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedFunction {
@@ -87,8 +88,8 @@ pub struct ExtractedStruct {
     pub tokens: Vec<Token>,
     pub is_typedef: bool,
     pub is_forward_declaration: bool,
-    pub original_code: String,
     pub typedef_name: Option<String>,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedStruct {
@@ -111,7 +112,7 @@ pub struct ExtractedEnum {
     pub typedef_name: Option<String>,
     pub is_typedef: bool,
     pub is_forward_declaration: bool,
-    pub original_code: String,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedEnum {
@@ -133,7 +134,7 @@ impl fmt::Display for ExtractedEnum {
 pub struct ExtractedTypedef {
     pub name: String,
     pub tokens: Vec<Token>,
-    pub original_type: Vec<Token>,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedTypedef {
@@ -155,9 +156,9 @@ pub struct ExtractedGlobal {
     pub is_extern: bool,
     pub array_size: Option<String>,
     pub initializer: Option<String>,
-    pub original_code: String,
     pub type_name: String,
     pub storage_class: Option<String>,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedGlobal {
@@ -206,7 +207,7 @@ pub struct ExtractedMacro {
     pub body: Vec<Token>,
     pub tokens: Vec<Token>,
     pub is_function_like: bool,
-    pub original_code: String,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedMacro {
@@ -236,7 +237,7 @@ pub struct ExtractedInclude {
     pub path: String,
     pub tokens: Vec<Token>,
     pub is_system_include: bool,
-    pub original_code: String,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedInclude {
@@ -252,6 +253,7 @@ pub struct ExtractedArray {
     pub element_type: String,
     pub size: String,
     pub is_declaration: bool,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedArray {
@@ -271,7 +273,7 @@ impl fmt::Display for ExtractedArray {
 /// Represents an extracted C comment
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ExtractedComment {
-    pub content: String,
+    pub code: String,
     pub is_block: bool,
     pub is_doc_comment: bool,
 }
@@ -279,15 +281,15 @@ pub struct ExtractedComment {
 impl fmt::Display for ExtractedComment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_doc_comment {
-            write!(f, "/// {}", self.content)
+            write!(f, "/// {}", self.code)
         } else if self.is_block {
-            if self.content.contains('\n') {
-                write!(f, "/* {} */", self.content)
+            if self.code.contains('\n') {
+                write!(f, "/* {} */", self.code)
             } else {
-                write!(f, "// {}", self.content)
+                write!(f, "// {}", self.code)
             }
         } else {
-            write!(f, "// {}", self.content)
+            write!(f, "// {}", self.code)
         }
     }
 }
@@ -300,6 +302,8 @@ pub struct ExtractedExpression {
     pub operator: String,
     pub right_operand: String,
     pub result_type: Option<String>,
+    pub code: String,
+    pub tokens: Vec<Token>,
 }
 
 impl fmt::Display for ExtractedExpression {
@@ -336,8 +340,8 @@ pub struct ExtractedControlFlow {
     pub control_type: String,
     pub condition: Vec<Token>,
     pub body: Vec<Token>,
-    pub original_code: String,
     pub tokens: Vec<Token>,
+    pub code: String,
 }
 
 impl fmt::Display for ExtractedControlFlow {
@@ -545,6 +549,7 @@ pub fn tokens_to_rust(tokens: &[Token]) -> String {
     ty
 }
 
+#[allow(dead_code)]
 fn token_to_rust(token: &Token) -> String {
     match token {
         tok!(n, i) => n.to_string(),

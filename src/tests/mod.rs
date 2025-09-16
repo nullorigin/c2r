@@ -1,5 +1,14 @@
+#[cfg(test)]
 pub mod context_tests;
+
+#[cfg(test)]
 pub mod handler_map_tests;
+
+#[cfg(test)]
 pub mod pattern_matching_tests;
+
+#[cfg(test)]
 pub mod tokenization_tests;
-// pub mod integration_tests; // Temporarily commented out - still uses closures instead of function pointers
+
+#[cfg(test)]
+pub mod pattern_debug_standalone_test;

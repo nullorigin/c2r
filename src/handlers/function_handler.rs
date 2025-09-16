@@ -1,29 +1,153 @@
-#![allow(
-    unused_variables,
-    unused_assignments,
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals
-)]
+//! Function handler for C to Rust function conversion
+//! Uses Patternizer exclusively for detection and conversion
 
-use super::common::{self, find_matching_token, not_handled};
-use crate::ReportLevel::{Error, Info};
-use crate::config::HandlerPhase::{Convert, Extract, Handle, Process, Report};
-use crate::config::HandlerReport;
-use crate::error::ConversionError;
-use crate::extract::ExtractedElement;
-use crate::extract::ExtractedFunction;
-use crate::handler::HandlerResult;
-use crate::lock::Id;
-use crate::{ConvertedElement, ConvertedFunction, Token, convert_type};
-use crate::{ReportLevel, context, report};
+use crate::pattern::{HandlerPattern, PatternResult, PatternRule, Patternizer, TokenPattern};
+use crate::sample::{Samplizer, SegmentType};
+use crate::token::Token;
+use crate::{
+    C2RError, ConvertedElement, ExtractedElement, ExtractedFunction, HandlerPhase, HandlerResult,
+    Id, Kind, Reason, ReportLevel,
+};
+use crate::{ConvertedFunction, ElementInfo, FunctionInfo, HandlerReport};
+use crate::{
+    HandlerPhase::{Handle, Process, Report},
+    ReportLevel::{Error, Info, Warning},
+};
+use crate::{context, report};
+use std::ops::Range;
 
-/// Creates a function handler that can detect and convert C function declarations and definitions
+/// Generate function patterns using Samplizer analysis
+fn generate_function_patterns_with_samplizer() -> Patternizer {
+    let mut patternizer = Patternizer::new("function_handler");
+
+    // Use samplizer to analyze our test files and generate patterns
+    let mut samplizer = Samplizer::new();
+
+    // Analyze simple function examples
+    match samplizer.analyze_file_pair(
+        "test_files/simple_function.c",
+        "test_files/simple_function.rs",
+    ) {
+        Ok(patterns) => {
+            report!(
+                "function_handler",
+                "generate_function_patterns_with_samplizer",
+                Info,
+                Process,
+                format!(
+                    "Samplizer generated {} patterns from simple_function files",
+                    patterns.len()
+                ),
+                true
+            );
+
+            // Integrate generated patterns into patternizer
+            for pattern in patterns {
+                if pattern.pattern_type == SegmentType::Function && pattern.confidence_score > 0.5 {
+                    if let Ok(handler_pattern) =
+                        convert_samplizer_pattern_to_handler_pattern(&pattern)
+                    {
+                        patternizer.register_pattern("function".to_string(), handler_pattern);
+
+                        report!(
+                            "function_handler",
+                            "generate_function_patterns_with_samplizer",
+                            Info,
+                            Process,
+                            format!(
+                                "Registered pattern: {} (confidence: {:.2})",
+                                pattern.pattern_name, pattern.confidence_score
+                            ),
+                            true
+                        );
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            report!(
+                "function_handler",
+                "generate_function_patterns_with_samplizer",
+                Info,
+                Process,
+                format!(
+                    "Samplizer analysis failed: {}, falling back to basic patterns",
+                    e
+                ),
+                true
+            );
+
+            // Fallback: Create basic function patterns manually
+            add_basic_function_patterns(&mut patternizer);
+        }
+    }
+
+    patternizer
+}
+
+/// Convert a samplizer pattern to a HandlerPattern
+fn convert_samplizer_pattern_to_handler_pattern(
+    pattern: &crate::sample::SamplizerPattern,
+) -> Result<HandlerPattern, C2RError> {
+    use crate::pattern::{HandlerPattern, PatternRule, TokenPattern};
+
+    if let Some(extraction_pattern) = &pattern.extraction_pattern {
+        let pattern_tokens: Vec<&str> = extraction_pattern.split_whitespace().collect();
+        let mut rules = Vec::new();
+
+        for token in pattern_tokens {
+            let rule = match token {
+                "IDENTIFIER" => PatternRule::new(TokenPattern::Identifier),
+                "NUMBER" => PatternRule::new(TokenPattern::Number),
+                token_str if matches!(token_str, "int" | "char" | "float" | "double" | "void") => {
+                    PatternRule::new(TokenPattern::TypeKeyword)
+                }
+                _ => PatternRule::new(TokenPattern::Exact(token.to_string())),
+            };
+            rules.push(rule);
+        }
+
+        let priority = (pattern.confidence_score * 300.0) as i32;
+
+        Ok(HandlerPattern::new(
+            pattern.pattern_id.clone(),
+            format!("Auto-generated: {}", pattern.pattern_name),
+        )
+        .with_rules(rules)
+        .priority(priority))
+    } else {
+        Err(C2RError::new(
+            Kind::Other,
+            Reason::Empty("extraction pattern"),
+            None,
+        ))
+    }
+}
+
+/// Add basic function patterns as fallback
+fn add_basic_function_patterns(patternizer: &mut Patternizer) {
+    // Basic function start pattern
+    let function_start_pattern = HandlerPattern::new(
+        "basic_function_start".to_string(),
+        "Basic function signature start".to_string(),
+    )
+    .with_rules(vec![
+        PatternRule::new(TokenPattern::TypeKeyword),
+        PatternRule::new(TokenPattern::Identifier),
+        PatternRule::new(TokenPattern::Exact("(".to_string())),
+    ])
+    .priority(200);
+
+    patternizer.register_pattern("function".to_string(), function_start_pattern);
+}
+
+/// Creates a function handler that uses Patternizer exclusively
 pub fn create_function_handler() -> crate::handler::Handler {
     let handler_id = Id::get("function_handler");
     let handler_role = "function";
-    let priority = 200; // Higher priority than expression handler (150) - must run first
+    let priority = 200;
 
+    // Handler utilities
     super::create_handler(
         handler_id,
         handler_role,
@@ -32,455 +156,967 @@ pub fn create_function_handler() -> crate::handler::Handler {
         Some(handle_function),
         Some(extract_function),
         Some(convert_function),
+        Some(document_function),
         Some(report_function),
-        Some(result_function),
+        Some(result_function), // No result callback
         Some(redirect_function),
     )
 }
 
-/// Process callback: Initializes and confirms this handler can handle the tokens
-fn process_function(tokens: &[Token]) -> Result<bool, ConversionError> {
-    // Validate input
-    if tokens.len() < 4 {
+/// Process callback: Lightweight function signature detection
+fn process_function(token_range: Range<usize>) -> Result<bool, C2RError> {
+    let mut context = crate::context!();
+    context.pull();
+
+    // Add bounds checking to prevent slice index out of bounds
+    if token_range.end > context.tokens.len() || token_range.start >= context.tokens.len() {
         return Ok(false);
     }
 
-    // Look for function patterns: return_type function_name(parameters)
-    for i in 1..tokens.len().saturating_sub(1) {
-        if tokens[i + 1].to_string() == "(" {
-            // Check if tokens before this point could form a valid type
-            if common::is_type(&tokens[0..i]) {
-                // Additional validation: ensure this looks like a function
-                if let Some(closing_paren) = find_matching_token(&tokens[i + 1..], "(", ")") {
-                    let paren_end = i + 1 + closing_paren + 1;
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
 
-                    // Check for function body or semicolon
-                    if paren_end < tokens.len() {
-                        let next_token = &tokens[paren_end].to_string();
-                        if next_token == "{" || next_token == ";" {
-                            report!(
-                                "function_handler",
-                                "process_function",
-                                Info,
-                                Handle,
-                                format!("Function pattern detected: {}", tokens[i].to_string()),
-                                true
-                            );
-                            return Ok(true);
-                        }
-                    }
+    if tokens.len() < 3 {
+        return Ok(false);
+    }
+
+    // Use lightweight patterns to detect potential function starts
+    // This allows the extract callback to then expand the window intelligently
+    let safe_end = std::cmp::min(token_range.end, tokens.len());
+    let safe_range = token_range.start..safe_end;
+    if safe_range.start >= tokens.len() || safe_range.is_empty() {
+        return Ok(false);
+    }
+    let range_tokens = &tokens[safe_range];
+
+    report!(
+        "function_handler",
+        "process_function",
+        Info,
+        Process,
+        format!(
+            "Lightweight check: {} tokens starting with: {}",
+            range_tokens.len(),
+            range_tokens
+                .iter()
+                .take(3)
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
+        true
+    );
+
+    // Use pattern matching instead of hardcoded detection
+    if range_tokens.len() >= 3 {
+        // Try function patterns using patternizer
+        let function_patterns = ["function", "function_declaration", "main_function"];
+
+        for pattern in &function_patterns {
+            match context.patternizer.match_pattern(pattern, range_tokens) {
+                crate::pattern::PatternResult::Match { consumed_tokens: _ } => {
+                    report!(
+                        "function_handler",
+                        "process_function",
+                        Info,
+                        Process,
+                        format!(
+                            "Pattern '{}' matched - delegating to extract for expansion",
+                            pattern
+                        ),
+                        true
+                    );
+                    return Ok(true);
+                }
+                _result => {
+                    continue;
                 }
             }
         }
+
+        // Fallback: use basic detection for patterns that might not be registered
+        let potential_function = detect_function_start(range_tokens);
+        if potential_function {
+            report!(
+                "function_handler",
+                "process_function",
+                Info,
+                Process,
+                "Fallback detection found potential function start - delegating to extract for expansion",
+                true
+            );
+            return Ok(true);
+        }
     }
+
     Ok(false)
 }
 
-/// Processes a function declaration or definition
-fn handle_function(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_function");
+/// Lightweight function start detection
+fn detect_function_start(tokens: &[Token]) -> bool {
+    if tokens.len() < 3 {
+        return false;
+    }
+
+    // Look for patterns like: int main (, void print_point (, etc.
+    for i in 0..tokens.len().saturating_sub(2) {
+        let token_str = tokens[i].to_string();
+        let next_token = tokens[i + 1].to_string();
+        let third_token = tokens[i + 2].to_string();
+
+        // Type keyword + identifier + opening paren
+        if is_type_keyword(&token_str) && is_identifier(&next_token) && third_token == "(" {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Check if token is a type keyword
+fn is_type_keyword(token: &str) -> bool {
+    matches!(
+        token,
+        "int"
+            | "void"
+            | "char"
+            | "float"
+            | "double"
+            | "long"
+            | "short"
+            | "unsigned"
+            | "signed"
+            | "struct"
+            | "enum"
+            | "typedef"
+    )
+}
+
+/// Check if token is an identifier
+fn is_identifier(token: &str) -> bool {
+    !token.is_empty()
+        && token.chars().next().unwrap().is_alphabetic()
+        && token.chars().all(|c| c.is_alphanumeric() || c == '_')
+        && !is_type_keyword(token)
+}
+
+/// Handle callback: Uses extract callback for intelligent window expansion
+fn handle_function(token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    let id = Id::get("function_handler");
+
     report!(
         "function_handler",
         "handle_function",
         Info,
-        Process,
-        format!("Processing {} tokens for function handling", tokens.len()),
+        Handle,
+        format!(
+            "Handle function called for range {}..{}, delegating to extract callback",
+            token_range.start, token_range.end
+        ),
         true
     );
 
-    // Find function name and opening parenthesis
-    let mut name_pos = 0;
-    for i in 0..tokens.len() - 1 {
-        if matches!(tokens[i + 1].to_string().as_str(), "(") {
-            name_pos = i;
-            break;
-        }
-    }
-
-    if name_pos == 0 {
-        return not_handled();
-    }
-
-    let func_name = tokens[name_pos].to_string();
-    report!(
-        "function_handler",
-        "handle_function",
-        Info,
-        Process,
-        format!("Found function: {}", func_name),
-        true
-    );
-
-    // Return type is everything before the name
-    let return_type_tokens = &tokens[0..name_pos];
-
-    // Find the parameter list between parentheses
-    let params_start = name_pos + 1; // Opening parenthesis
-    let params_end = match find_matching_token(&tokens[params_start..], "(", ")") {
-        Some(pos) => params_start + pos + 1, // +1 for the closing parenthesis
-        None => {
-            report!(
-                "function_handler",
-                "handle_function",
-                Error,
-                Process,
-                format!(
-                    "Could not find closing parenthesis for function {}",
-                    func_name
-                ),
-                false
-            );
-            return not_handled();
-        }
-    };
-
-    // Extract parameter tokens
-    let param_tokens = &tokens[params_start + 1..params_end];
-
-    // Check if this is a function declaration or definition
-    let is_definition = params_end < tokens.len() && tokens[params_end].to_string() == "{";
-
-    if is_definition {
-        // Find the body between braces
-        let body_start = params_end;
-        let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
-            Some(pos) => body_start + pos + 1,
-            None => {
+    // Use the extract callback for intelligent window expansion and pattern matching
+    if let Some(extracted_element) = extract_function(token_range.clone())? {
+        match extracted_element {
+            ExtractedElement::Function(function) => {
                 report!(
                     "function_handler",
                     "handle_function",
-                    Error,
-                    Process,
-                    format!("Could not find closing brace for function {}", func_name),
+                    Info,
+                    Handle,
+                    format!(
+                        "Successfully extracted function: {} via intelligent expansion",
+                        function.name
+                    ),
+                    true
+                );
+
+                // Use the actual range processed, not the extracted tokens length
+                // The token_range passed in is the actual range that was processed
+                let consumed_range = token_range.clone();
+
+                Ok(HandlerResult::Extracted(
+                    ExtractedElement::Function(function),
+                    consumed_range,
+                    "Function extracted via recursive windowing".to_string(),
+                    id,
+                ))
+            }
+            _ => {
+                report!(
+                    "function_handler",
+                    "handle_function",
+                    Info,
+                    Handle,
+                    "Extract callback returned non-function element".to_string(),
                     false
                 );
-                return not_handled();
+                let mut context = crate::context!();
+                context.pull();
+                Ok(HandlerResult::NotHandled(
+                    Some(context.tokens[token_range.clone()].to_vec()),
+                    token_range,
+                    id,
+                ))
             }
-        };
-
-        // Extract body tokens
-        let body_tokens = &tokens[body_start + 1..body_end - 1];
-
-        // Convert to Rust
-        if let Some(ConvertedElement::Function(converted_function)) = convert_function(tokens)? {
-            // CRITICAL FIX: Use actual range from 0 to body_end to consume all processed tokens
-            let token_range = 0..body_end;
-            report!(
-                "function_handler",
-                "handle_function",
-                Info,
-                Process,
-                format!(
-                    "Function definition {} consumes tokens 0..{} ({} tokens)",
-                    func_name, body_end, body_end
-                ),
-                true
-            );
-            common::replace_with_range(
-                converted_function.rust_code.clone(),
-                token_range,
-                Id::get("handle_function"),
-            )
-        } else {
-            Err(ConversionError::new("Failed to convert function"))
         }
     } else {
-        // Function declaration only (no body) - find semicolon end
-        let semicolon_pos = match tokens[params_end..]
-            .iter()
-            .position(|t| t.to_string() == ";")
-        {
-            Some(pos) => params_end + pos + 1, // +1 to include the semicolon
-            None => {
-                report!(
-                    "function_handler",
-                    "handle_function",
-                    Error,
-                    Process,
-                    format!(
-                        "Could not find semicolon for function declaration {}",
-                        func_name
-                    ),
-                    false
-                );
-                return not_handled();
-            }
-        };
+        report!(
+            "function_handler",
+            "handle_function",
+            Info,
+            Handle,
+            "Extract callback could not extract function from expanded window".to_string(),
+            false
+        );
+        let mut context = crate::context!();
+        context.pull();
+        Ok(HandlerResult::NotHandled(
+            Some(context.tokens[token_range.clone()].to_vec()),
+            token_range,
+            id,
+        ))
+    }
+}
 
-        if let Some(ConvertedElement::Function(converted_function)) = convert_function(tokens)? {
-            // CRITICAL FIX: Use actual range from 0 to semicolon_pos to consume all processed tokens
-            let token_range = 0..semicolon_pos;
+/// Extract callback: Intelligent function extraction with recursive window expansion
+fn extract_function(token_range: Range<usize>) -> Result<Option<ExtractedElement>, C2RError> {
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, crate::Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &filtered_tokens;
+
+    if token_range.start >= tokens.len() {
+        return Ok(None);
+    }
+
+    // Step 1: Find the actual function start within the range
+    let function_start = find_function_start_in_range(tokens, &token_range)?;
+    if function_start.is_none() {
+        return Ok(None);
+    }
+    let start_pos = function_start.unwrap();
+
+    // Step 2: Recursively expand window to capture complete function
+    let expanded_range = expand_to_function(tokens, start_pos)?;
+    if expanded_range.is_none() {
+        return Ok(None);
+    }
+    let complete_range = expanded_range.unwrap();
+
+    report!(
+        "function_handler",
+        "extract_function",
+        Info,
+        Process,
+        format!(
+            "Expanded window from {}..{} to {}..{} to capture complete function",
+            token_range.start, token_range.end, complete_range.start, complete_range.end
+        ),
+        true
+    );
+
+    // Step 3: Use samplizer patterns on the complete function
+    let mut patternizer = generate_function_patterns_with_samplizer();
+    let complete_tokens = &tokens[complete_range.clone()];
+
+    match patternizer.match_pattern("function", complete_tokens) {
+        PatternResult::Match { consumed_tokens } => {
+            let (return_type, name, params, body) = parse_function_tokens(complete_tokens)?;
+
+            let is_definition = !body.is_empty();
+            let extracted_function = ExtractedFunction {
+                name,
+                return_type,
+                parameters: params,
+                body,
+                is_variadic: complete_tokens.iter().any(|t| t.to_string() == "..."),
+                from_recovery: false,
+                is_definition,
+                is_static: complete_tokens.iter().any(|t| t.to_string() == "static"),
+                is_inline: complete_tokens.iter().any(|t| t.to_string() == "inline"),
+                is_extern: complete_tokens.iter().any(|t| t.to_string() == "extern"),
+                code: complete_tokens[..consumed_tokens.min(complete_tokens.len())]
+                    .iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                tokens: complete_tokens[..consumed_tokens.min(complete_tokens.len())].to_vec(),
+            };
+
             report!(
                 "function_handler",
-                "handle_function",
+                "extract_function",
                 Info,
                 Process,
                 format!(
-                    "Function declaration {} consumes tokens 0..{} ({} tokens)",
-                    func_name, semicolon_pos, semicolon_pos
+                    "Successfully extracted function: {}",
+                    extracted_function.name
                 ),
                 true
             );
-            common::replace_with_range(
-                converted_function.rust_code.clone(),
-                token_range,
-                Id::get("handle_function"),
-            )
-        } else {
-            Err(ConversionError::new("Failed to convert function"))
+
+            Ok(Some(ExtractedElement::Function(extracted_function)))
+        }
+        _ => {
+            report!(
+                "function_handler",
+                "extract_function",
+                Info,
+                Process,
+                "Samplizer patterns did not match complete function - using fallback extraction",
+                true
+            );
+
+            // Fallback: try to extract basic function info even without pattern match
+            extract_function_fallback(complete_tokens)
         }
     }
 }
 
-/// Extract callback: Finds and returns the locations this handler should handle
-pub fn extract_function(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    report!(
-        "function_handler",
-        "extract_function",
-        Info,
-        Extract,
-        format!("Extracting function from {} tokens", tokens.len()),
-        true
-    );
-    // Find function name and opening parenthesis
-    let mut name_pos = 0;
-    for i in 0..tokens.len().saturating_sub(1) {
-        if matches!(tokens[i + 1].to_string().as_str(), "(") {
-            name_pos = i;
+/// Find function start position within the given range
+fn find_function_start_in_range(
+    tokens: &[Token],
+    range: &Range<usize>,
+) -> Result<Option<usize>, C2RError> {
+    let safe_end = std::cmp::min(range.end, tokens.len());
+    let safe_range = range.start..safe_end;
+    if safe_range.start >= tokens.len() || safe_range.is_empty() {
+        return Ok(None);
+    }
+    let range_tokens = &tokens[safe_range.clone()];
+
+    for (i, window) in range_tokens.windows(3).enumerate() {
+        if detect_function_start(window) {
+            return Ok(Some(range.start + i));
+        }
+    }
+    Ok(None)
+}
+
+/// Expand window to capture complete function starting with minimum viable tokens
+fn expand_to_function(
+    tokens: &[Token],
+    start_pos: usize,
+) -> Result<Option<Range<usize>>, C2RError> {
+    if start_pos >= tokens.len() {
+        return Ok(None);
+    }
+
+    // Constants for minimum viable function tokens
+    const MIN_DECLARATION_TOKENS: usize = 5; // int main ( ) ;
+    const MIN_DEFINITION_TOKENS: usize = 7; // int main ( ) { return ; }
+
+    // Step 1: Start with minimum declaration window (5 tokens)
+    let mut current_end = (start_pos + MIN_DECLARATION_TOKENS).min(tokens.len());
+
+    // Step 2: Find opening parenthesis within minimum window
+    let mut paren_pos = None;
+    for i in start_pos..current_end {
+        if tokens[i].to_string() == "(" {
+            paren_pos = Some(i);
             break;
         }
     }
 
-    if name_pos == 0 {
+    // Step 3: If no parenthesis in minimum window, expand progressively
+    if paren_pos.is_none() {
+        for expand_size in 1..=10 {
+            current_end = (start_pos + MIN_DECLARATION_TOKENS + expand_size).min(tokens.len());
+            if current_end >= tokens.len() {
+                break;
+            }
+
+            for i in (start_pos + MIN_DECLARATION_TOKENS)..current_end {
+                if tokens[i].to_string() == "(" {
+                    paren_pos = Some(i);
+                    break;
+                }
+            }
+            if paren_pos.is_some() {
+                break;
+            }
+        }
+
+        if paren_pos.is_none() {
+            return Ok(None);
+        }
+    }
+
+    let paren_start = paren_pos.unwrap();
+
+    // Step 4: Find matching closing parenthesis, expanding window as needed
+    let mut paren_end = None;
+    let mut depth = 0;
+    current_end = (paren_start + 3).min(tokens.len()); // Start with minimal expansion
+
+    loop {
+        for i in paren_start..current_end {
+            match tokens[i].to_string().as_str() {
+                "(" => depth += 1,
+                ")" => {
+                    depth -= 1;
+                    if depth == 0 {
+                        paren_end = Some(i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        if paren_end.is_some() || current_end >= tokens.len() {
+            break;
+        }
+
+        // Expand window progressively
+        current_end = (current_end + 5).min(tokens.len());
+    }
+
+    if paren_end.is_none() {
+        return Ok(None);
+    }
+    let params_end = paren_end.unwrap();
+
+    // Step 5: Check if declaration (;) or definition ({) - start with minimum
+    let final_end = params_end + 1;
+    if final_end >= tokens.len() {
+        return Ok(Some(start_pos..params_end + 1));
+    }
+
+    let next_token = tokens[final_end].to_string();
+    if next_token == ";" {
+        // Function declaration - we have complete minimum window
+        return Ok(Some(start_pos..final_end + 1));
+    } else if next_token == "{" {
+        // Function definition - find matching brace with progressive expansion
+        let mut brace_end = None;
+        let mut brace_depth = 0;
+        current_end =
+            (final_end + MIN_DEFINITION_TOKENS - MIN_DECLARATION_TOKENS).min(tokens.len());
+
+        loop {
+            for i in final_end..current_end {
+                match tokens[i].to_string().as_str() {
+                    "{" => brace_depth += 1,
+                    "}" => {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            brace_end = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            if brace_end.is_some() || current_end >= tokens.len() {
+                break;
+            }
+
+            // Expand window for function body
+            current_end = (current_end + 10).min(tokens.len());
+        }
+
+        if let Some(body_end) = brace_end {
+            return Ok(Some(start_pos..body_end + 1));
+        }
+    }
+
+    // Fallback: minimum viable signature
+    Ok(Some(start_pos..params_end + 1))
+}
+
+/// Fallback extraction when patterns don't match
+fn extract_function_fallback(tokens: &[Token]) -> Result<Option<ExtractedElement>, C2RError> {
+    if tokens.len() < 3 {
         return Ok(None);
     }
 
-    let func_name = tokens[name_pos].to_string();
-    report!(
-        "function_handler",
-        "extract_function",
-        Info,
-        Extract,
-        format!("Extracting function: {}", func_name),
-        true
-    );
-    let return_type_tokens = tokens[0..name_pos].to_vec();
+    // Basic parsing: find type, name, parameters
+    let mut return_type = Vec::new();
+    let mut name = String::new();
+    let mut found_paren = false;
 
-    // Find the parameter list between parentheses
-    let params_start = name_pos + 1;
-    let params_end = match find_matching_token(&tokens[params_start..], "(", ")") {
-        Some(pos) => params_start + pos + 1,
-        None => return Ok(None),
-    };
+    for (i, token) in tokens.iter().enumerate() {
+        let token_str = token.to_string();
+        if token_str == "(" {
+            found_paren = true;
+            if i > 0 {
+                name = tokens[i - 1].to_string();
+                return_type = tokens[..i - 1].to_vec();
+            }
+            break;
+        }
+    }
 
-    // Extract parameter tokens
-    let param_tokens = tokens[params_start + 1..params_end].to_vec();
+    if !found_paren || name.is_empty() {
+        return Ok(None);
+    }
 
-    // Check if this is a function declaration or definition
-    let is_definition = params_end < tokens.len() && tokens[params_end].to_string() == "{";
-    let body_tokens = if is_definition {
-        // Find the body between braces
-        let body_start = params_end;
-        let body_end = match find_matching_token(&tokens[body_start..], "{", "}") {
-            Some(pos) => body_start + pos + 1,
-            None => return Ok(None),
-        };
-
-        tokens[body_start + 1..body_end - 1].to_vec()
-    } else {
-        vec![]
-    };
-
-    // Check for static and inline modifiers
-    let is_static = return_type_tokens.iter().any(|t| t.to_string() == "static");
-    let is_inline = return_type_tokens
-        .iter()
-        .any(|t| matches!(t.to_string().as_str(), "inline" | "__inline" | "__inline__"));
-
-    // Create ExtractedFunction
     let extracted_function = ExtractedFunction {
-        name: func_name,
-        return_type: return_type_tokens,
-        parameters: param_tokens,
-        body: body_tokens,
-        is_definition,
-        is_static,
-        is_inline,
-        original_code: tokens
+        name: name.clone(),
+        return_type,
+        parameters: Vec::new(), // Simplified for fallback
+        body: Vec::new(),
+        is_variadic: false,
+        from_recovery: true,
+        is_definition: tokens.iter().any(|t| t.to_string() == "{"),
+        is_static: tokens.iter().any(|t| t.to_string() == "static"),
+        is_inline: tokens.iter().any(|t| t.to_string() == "inline"),
+        is_extern: tokens.iter().any(|t| t.to_string() == "extern"),
+        code: tokens
             .iter()
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
             .join(" "),
         tokens: tokens.to_vec(),
-        is_variadic: false,
-        from_recovery: false,
     };
 
     Ok(Some(ExtractedElement::Function(extracted_function)))
 }
 
-/// Convert callback: Does the actual conversion of C to Rust code
-fn convert_function(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
-    report!(
-        "function_handler",
-        "convert_function",
-        Info,
-        Convert,
-        format!("Converting function from {} tokens", tokens.len()),
-        true
-    );
-    let id = Id::get("convert_function");
-    if let ExtractedElement::Function(element) = extract_function(tokens)?.unwrap() {
-        let mut rust_code = String::new();
-        // Add function visibility
-        rust_code.push_str("pub ");
+/// Convert callback: Converts extracted function to Rust
+pub fn convert_function(token_range: Range<usize>) -> Result<Option<ConvertedElement>, C2RError> {
+    // Use cloned context to get the actual tokens from global context
+    let mut context = crate::context!();
+    context.pull();
+    let tokens_in_range = &context.tokens[token_range.clone()];
 
-        // Check for special cases like 'extern "C"'
-        if element
-            .return_type
-            .iter()
-            .any(|t| t.to_string() == "extern")
-        {
-            rust_code.push_str("extern \"C\" ");
-        }
+    // Filter out Token::n() from the retrieved tokens
+    let filtered_tokens: Vec<Token> = tokens_in_range
+        .iter()
+        .filter(|token| !matches!(token, crate::Token::n()))
+        .cloned()
+        .collect();
 
-        // Add function declaration
-        rust_code.push_str("fn ");
-        rust_code.push_str(element.name.as_str());
-        rust_code.push('(');
+    if filtered_tokens.is_empty() {
+        return Ok(None);
+    }
 
-        // Convert parameters using improved parsing
-        let params = convert_parameters(&element.parameters);
+    // Use the filtered tokens with a full range for extraction
+    if let Some(ExtractedElement::Function(element)) = extract_function(token_range.clone())? {
+        let code = generate_rust_function(&element)?;
 
-        rust_code.push_str(&params);
-        rust_code.push(')');
-
-        // Convert return type using improved parsing
-        let return_type = convert_return_type(&element.return_type);
-
-        if return_type != "()" {
-            rust_code.push_str(" -> ");
-            rust_code.push_str(&return_type);
-        }
-
-        // Add function body if present
-        let body = element.body.clone();
-        rust_code.push_str(" {\n");
-
-        // Convert body content - simplified version here
-        rust_code.push_str("    // TODO: Convert function body\n");
-
-        // Real implementation would convert each statement
-        let body_content = body
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Simple C to Rust conversion - placeholder for actual conversion
-        let rust_body = "    // Original C code: \n    // ".to_string() + &body_content;
-        rust_code.push_str(&rust_body);
-        rust_code.push_str("\n}");
         Ok(Some(ConvertedElement::Function(ConvertedFunction {
-            return_type: "()".to_string(), // Default return type
-            parameters: Vec::new(),        // Default empty parameters
-            body: "".to_string(),          // Default empty body
-            rust_code,
+            name: element.name,
+            return_type: element
+                .return_type
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            parameters: element.parameters.iter().map(|t| t.to_string()).collect(),
+            body: element
+                .body
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            code,
             is_unsafe: false,
-            is_public: false,
+            is_public: true,
+            is_definition: element.is_definition,
         })))
     } else {
-        Err(ConversionError::new("Failed to convert function"))
+        Ok(None)
     }
 }
 
-/// Report callback: Collects and returns reports from context for this handler
-fn report_function(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
-    let context = context!();
-    let handler_reports = context.get_reports_by_handler("function_handler");
-
-    // Create a summary report combining all function handler reports
-    let total_reports = handler_reports.len();
-    let info_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, Info))
-        .count();
-    let error_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, Error))
-        .count();
-    let warning_count = handler_reports
-        .iter()
-        .filter(|r| matches!(r.level, ReportLevel::Warning))
-        .count();
-
-    let summary_message = format!(
-        "Function Handler Summary: {} total reports (Info: {}, Warnings: {}, Errors: {})",
-        total_reports, info_count, warning_count, error_count
-    );
-
-    let summary_report = HandlerReport {
-        report_id: Box::new(Id::get(&Id::gen_name("function_handler_summary"))),
-        handler_id: Box::new(Id::get("function_handler")),
-        handler_name: "function_handler".to_string(),
-        function_name: "report_function".to_string(),
-        level: Info,
-        phase: Report,
-        message: summary_message,
-        success: error_count == 0, // Success if no errors
-        tokens_processed: handler_reports.iter().map(|r| r.tokens_processed).sum(),
-        tokens_consumed: handler_reports.iter().map(|r| r.tokens_consumed).sum(),
-        metadata: std::collections::HashMap::new(),
-    };
-
-    Ok(summary_report)
+/// Document callback: Generates documentation for function
+fn document_function(info: ElementInfo) -> Result<Option<String>, C2RError> {
+    if let ElementInfo::Function(function_info) = info {
+        let doc = format!(
+            "/// Converted C function: {}\n/// Parameters: {}\n/// Return type: {}\n",
+            function_info.name,
+            function_info.parameters.join(", "),
+            function_info.return_type
+        );
+        Ok(Some(doc))
+    } else {
+        Ok(None)
+    }
 }
 
-/// Result callback: Postprocesses generated code, adds documentation, and cleans up the result
-fn result_function(
+/// Report callback: Collects function handler reports
+pub fn report_function() -> Result<HandlerReport, C2RError> {
+    let context = context!();
+    let reports = context.get_reports_by_handler("function");
+
+    let (info_count, warning_count, error_count) =
+        reports
+            .iter()
+            .fold((0, 0, 0), |acc, report| match report.level {
+                Error => (acc.0, acc.1, acc.2 + 1),
+                Warning => (acc.0, acc.1 + 1, acc.2),
+                _ => (acc.0 + 1, acc.1, acc.2),
+            });
+
+    Ok(HandlerReport {
+        report_id: Box::new(Id::get(&Id::gen_name("function_handler"))),
+        handler_id: Box::new(Id::get("function_handler")),
+        handler_name: "function".to_string(),
+        function_name: "report_function".to_string(),
+        message: format!(
+            "Function handler summary: {} reports ({} info, {} warnings, {} errors)",
+            reports.len(),
+            info_count,
+            warning_count,
+            error_count
+        ),
+        level: match (error_count, warning_count) {
+            (0, 0) => Info,
+            (0, _) => Warning,
+            _ => Error,
+        },
+        tokens_processed: reports.len(),
+        tokens_consumed: 0,
+        phase: Report,
+        success: error_count == 0,
+        metadata: std::collections::HashMap::new(),
+    })
+}
+
+/// Parse function tokens into components
+fn parse_function_tokens(
     tokens: &[Token],
+) -> Result<(Vec<Token>, String, Vec<Token>, Vec<Token>), C2RError> {
+    let mut i = 0;
+    let mut return_type = Vec::new();
+    let mut name = String::new();
+    let mut params = Vec::new();
+    let mut body = Vec::new();
+
+    // Find function name (identifier before opening parenthesis)
+    while i < tokens.len() {
+        if i + 1 < tokens.len() && tokens[i + 1].to_string() == "(" {
+            name = tokens[i].to_string();
+            return_type = tokens[..i].to_vec();
+            break;
+        }
+        i += 1;
+    }
+
+    if name.is_empty() {
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::Empty("function name"),
+            None,
+        ));
+    }
+
+    // Find parameters
+    i += 2; // Skip name and opening parenthesis
+    let mut paren_depth = 0;
+    while i < tokens.len() {
+        let token_str = tokens[i].to_string();
+        if token_str == "(" {
+            paren_depth += 1;
+        } else if token_str == ")" {
+            if paren_depth == 0 {
+                break;
+            }
+            paren_depth -= 1;
+        }
+        params.push(tokens[i].clone());
+        i += 1;
+    }
+
+    // Find body (if exists)
+    i += 1; // Skip closing parenthesis
+    if i < tokens.len() && tokens[i].to_string() == "{" {
+        i += 1; // Skip opening brace
+        let mut brace_depth = 0;
+        while i < tokens.len() {
+            let token_str = tokens[i].to_string();
+            if token_str == "{" {
+                brace_depth += 1;
+            } else if token_str == "}" {
+                if brace_depth == 0 {
+                    break;
+                }
+                brace_depth -= 1;
+            }
+            body.push(tokens[i].clone());
+            i += 1;
+        }
+    }
+
+    Ok((return_type, name, params, body))
+}
+
+/// Generate Rust function code
+fn generate_rust_function(func: &ExtractedFunction) -> Result<String, C2RError> {
+    let mut code = String::new();
+
+    // Add pub keyword
+    code.push_str("pub ");
+
+    // Add unsafe if needed (basic heuristic)
+    if func.name.contains("unsafe") || func.body.iter().any(|t| t.to_string().contains("malloc")) {
+        code.push_str("unsafe ");
+    }
+
+    code.push_str("fn ");
+    code.push_str(&func.name);
+    code.push('(');
+
+    // Convert parameters
+    let param_strs: Vec<String> = func
+        .parameters
+        .iter()
+        .map(|p| convert_parameter(&p.to_string()))
+        .collect();
+    code.push_str(&param_strs.join(", "));
+
+    code.push(')');
+
+    // Add return type
+    let return_type_str = func
+        .return_type
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    if !return_type_str.is_empty() && return_type_str != "void" {
+        code.push_str(" -> ");
+        code.push_str(&convert_c_type_to_rust(&return_type_str));
+    }
+
+    // Add body
+    if func.is_definition && !func.body.is_empty() {
+        code.push_str(" {\n    // TODO: Convert function body\n    unimplemented!()\n}");
+    } else {
+        code.push(';');
+    }
+
+    Ok(code)
+}
+
+/// Convert C parameter to Rust parameter
+fn convert_parameter(param: &str) -> String {
+    let parts: Vec<&str> = param.trim().split_whitespace().collect();
+    if parts.len() >= 2 {
+        let param_name = parts.last().unwrap();
+        let param_type = parts[..parts.len() - 1].join(" ");
+        format!("{}: {}", param_name, convert_c_type_to_rust(&param_type))
+    } else {
+        format!("{}: i32", param) // Default fallback
+    }
+}
+
+/// Convert C type to Rust type
+fn convert_c_type_to_rust(c_type: &str) -> String {
+    match c_type.trim() {
+        "int" => "i32".to_string(),
+        "char" => "i8".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
+        "void" => "()".to_string(),
+        "char*" | "char *" => "*const i8".to_string(),
+        "int*" | "int *" => "*mut i32".to_string(),
+        _ => c_type.to_string(), // Keep original for now
+    }
+}
+
+fn extract_function_info(tokens: &[Token]) -> FunctionInfo {
+    let mut function_info = FunctionInfo {
+        name: String::new(),
+        return_type: String::new(),
+        parameter_count: 0,
+        is_definition: false,
+        is_static: false,
+        is_unsafe: false,
+        complexity: "simple".to_string(),
+        has_body: false,
+        is_declaration: false,
+        is_extern: false,
+        is_inline: false,
+        parameters: Vec::new(),
+    };
+
+    // Extract function name
+    for i in 0..tokens.len().saturating_sub(1) {
+        if tokens[i + 1].to_string() == "(" {
+            function_info.name = tokens[i].to_string();
+            break;
+        }
+    }
+
+    // Extract return type
+    let mut return_type_tokens = Vec::new();
+    for token in tokens {
+        if token.to_string() == function_info.name {
+            break;
+        }
+        if !matches!(token.to_string().as_str(), "static" | "inline" | "extern") {
+            return_type_tokens.push(token.to_string());
+        }
+    }
+    function_info.return_type = return_type_tokens.join(" ");
+
+    // Count parameters
+    if let Some(start) = tokens.iter().position(|t| t.to_string() == "(") {
+        if let Some(end) = tokens.iter().position(|t| t.to_string() == ")") {
+            let param_tokens = &tokens[start + 1..end];
+            function_info.parameter_count = if param_tokens.is_empty()
+                || (param_tokens.len() == 1 && param_tokens[0].to_string() == "void")
+            {
+                0
+            } else {
+                param_tokens.iter().filter(|t| t.to_string() == ",").count() + 1
+            };
+        }
+    }
+
+    // Check if it's a definition (has body)
+    function_info.is_definition = tokens.iter().any(|t| t.to_string() == "{");
+    function_info.has_body = function_info.is_definition;
+    function_info.is_declaration = !function_info.is_definition;
+
+    // Check modifiers
+    function_info.is_static = tokens.iter().any(|t| t.to_string() == "static");
+    function_info.is_extern = tokens.iter().any(|t| t.to_string() == "extern");
+    function_info.is_inline = tokens.iter().any(|t| t.to_string() == "inline");
+    function_info.is_unsafe = tokens.iter().any(|t| {
+        let token_str = t.to_string();
+        token_str.contains("*") || token_str == "malloc" || token_str == "free"
+    });
+
+    function_info
+}
+
+/// Redirect callback: Handles nested structures within function bodies
+pub fn redirect_function(
+    token_range: Range<usize>,
     result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
+) -> Result<HandlerResult, C2RError> {
+    let mut context = crate::context!();
+    context.pull();
+    let tokens = &context.tokens[token_range.clone()];
+    let mut filtered_tokens: Vec<Token> = tokens
+        .iter()
+        .filter(|token| !matches!(token, crate::Token::n()))
+        .cloned()
+        .collect();
+    let tokens = &mut filtered_tokens;
+
+    // Look for nested structures that need to be processed by other handlers
+    let mut i = 0;
+    while i < tokens.len() {
+        let token_str = tokens[i].to_string();
+
+        if token_str == "struct" || token_str == "enum" || token_str == "union" {
+            // Found nested structure - find its boundaries
+            let struct_start = i;
+            let mut brace_count = 0;
+            let mut struct_end = struct_start;
+
+            // Find the end of the structure definition
+            for j in struct_start..tokens.len() {
+                match tokens[j].to_string().as_str() {
+                    "{" => brace_count += 1,
+                    "}" => {
+                        brace_count -= 1;
+                        if brace_count == 0 {
+                            struct_end = j + 1;
+                            break;
+                        }
+                    }
+                    ";" if brace_count == 0 => {
+                        struct_end = j + 1;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+
+            if struct_end > struct_start {
+                // Mark tokens as consumed
+                for idx in struct_start..struct_end {
+                    tokens[idx] = Token::n();
+                }
+
+                report!(
+                    "function_handler",
+                    "redirect_function",
+                    ReportLevel::Info,
+                    HandlerPhase::Convert,
+                    format!("Redirected nested {} to appropriate handler", token_str),
+                    true
+                );
+            }
+            i = struct_end;
+        } else {
+            i += 1;
+        }
+    }
+
+    // Return updated result
+    match result {
+        HandlerResult::Converted(element, range, code, id) => {
+            Ok(HandlerResult::Converted(element, range, code, id))
+        }
+        other => Ok(other),
+    }
+}
+
+/// Result callback: Postprocesses generated function code, adds documentation, and enhances formatting
+fn result_function(
+    token_range: Range<usize>,
+    result: HandlerResult,
+) -> Result<HandlerResult, C2RError> {
+    let _id = Id::get("result_function");
+
     report!(
         "function_handler",
         "result_function",
         Info,
         Report,
-        "Starting result postprocessing for function",
+        "Postprocessing function conversion result",
         true
     );
 
     match result {
-        HandlerResult::Completed(tokens_opt, _, rust_code, id) => {
-            // Extract function name for documentation
-            let function_name = extract_function_name(tokens);
+        HandlerResult::Converted(element, _, code, id) => {
+            // Extract function information for documentation
+            let context = crate::context!();
+            let func_info = extract_function_info(&context.tokens[token_range.clone()]);
 
-            // Generate documentation comment based on C function signature
-            let doc_comment = generate_function_documentation(tokens, &function_name);
+            // Generate documentation about the function conversion
+            let doc_comment =
+                document_function(ElementInfo::Function(func_info.clone()))?.unwrap_or_default();
 
-            // Enhance the Rust code with documentation
+            // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
 
-            // Add documentation as the first part if substantial
+            // Add metadata comment for traceability
+            let metadata_comment = format!(
+                "// [C2R] Function converted from C to Rust - {}: {}\n",
+                func_info.name, func_info.return_type
+            );
+            enhanced_code.push_str(&metadata_comment);
+
+            // Add the documentation comment if substantial
             if !doc_comment.trim().is_empty() {
                 enhanced_code.push_str(&doc_comment);
                 enhanced_code.push('\n');
             }
 
             // Add the original converted code
-            enhanced_code.push_str(&rust_code);
-
-            // Add metadata comment about the conversion
-            let conversion_metadata = format!(
-                "\n// Converted from C function: {}",
-                tokens
-                    .iter()
-                    .take(10)
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            enhanced_code.push_str(&conversion_metadata);
+            enhanced_code.push_str(&code);
 
             report!(
                 "function_handler",
@@ -488,622 +1124,31 @@ fn result_function(
                 Info,
                 Report,
                 format!(
-                    "Enhanced function result with documentation for '{}'",
-                    function_name
+                    "Enhanced function '{}' with {} lines of documentation",
+                    func_info.name,
+                    doc_comment.lines().count()
                 ),
                 true
             );
 
-            // CRITICAL: Return HandlerResult::Completed to preserve the code!
-            Ok(HandlerResult::Completed(
-                tokens_opt,
-                0..1,
+            Ok(HandlerResult::Converted(
+                element,
+                token_range,
                 enhanced_code,
                 id,
             ))
         }
-        HandlerResult::Converted(element, _, rust_code, id) => {
-            // Handle converted elements - enhance the code and preserve the variant
-            let function_name = extract_function_name(tokens);
-            let doc_comment = generate_function_documentation(tokens, &function_name);
-
-            let mut enhanced_code = String::new();
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            let conversion_metadata = format!(
-                "\n// Converted from C function: {}",
-                tokens
-                    .iter()
-                    .take(10)
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            enhanced_code.push_str(&conversion_metadata);
-
+        _ => {
             report!(
                 "function_handler",
                 "result_function",
-                Info,
+                Warning,
                 Report,
-                format!("Enhanced converted function result for '{}'", function_name),
+                "Function result was not in Completed state, returning as-is",
                 true
             );
 
-            // CRITICAL: Return HandlerResult::Converted to preserve the code!
-            Ok(HandlerResult::Converted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Extracted(element, _, rust_code, id) => {
-            // Handle extracted elements - enhance the code and preserve the variant
-            let function_name = extract_function_name(tokens);
-            let doc_comment = generate_function_documentation(tokens, &function_name);
-
-            let mut enhanced_code = String::new();
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            let conversion_metadata = format!(
-                "\n// Converted from C function: {}",
-                tokens
-                    .iter()
-                    .take(10)
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            enhanced_code.push_str(&conversion_metadata);
-
-            report!(
-                "function_handler",
-                "result_function",
-                Info,
-                Report,
-                format!("Enhanced extracted function result for '{}'", function_name),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Extracted to preserve the code!
-            Ok(HandlerResult::Extracted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Handled(Some(processed_tokens), _, id) => {
-            // Legacy support for token-based results
-            let mut enhanced_result = processed_tokens.clone();
-
-            // Extract function name for documentation
-            let function_name = extract_function_name(tokens);
-
-            // Generate documentation comment based on C function signature
-            let doc_comment = generate_function_documentation(tokens, &function_name);
-
-            // Add documentation as the first token if it's substantial
-            if !doc_comment.trim().is_empty() {
-                let doc_token = Token::s(doc_comment);
-                enhanced_result.insert(0, doc_token);
-            }
-
-            // Postprocess the generated Rust code
-            enhanced_result = postprocess_function_code(enhanced_result);
-
-            // Add metadata comment about the conversion
-            let conversion_metadata = format!(
-                "\n// Converted from C function: {}",
-                tokens
-                    .iter()
-                    .take(10)
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            );
-            enhanced_result.push(Token::s(conversion_metadata));
-
-            report!(
-                "function_handler",
-                "result_function",
-                Info,
-                Report,
-                format!(
-                    "Enhanced function result with documentation for '{}'",
-                    function_name
-                ),
-                true
-            );
-
-            Ok(HandlerResult::Handled(Some(enhanced_result), 0..1, id))
-        }
-        HandlerResult::Handled(None, _, ref id) => {
-            // Even without processed tokens, we can add some documentation
-            let function_name = extract_function_name(tokens);
-            let doc_comment = generate_function_documentation(tokens, &function_name);
-
-            if !doc_comment.trim().is_empty() {
-                let enhanced_tokens = vec![Token::s(doc_comment)];
-
-                report!(
-                    "function_handler",
-                    "result_function",
-                    Info,
-                    Report,
-                    format!("Added documentation for function '{}'", function_name),
-                    true
-                );
-
-                Ok(HandlerResult::Handled(
-                    Some(enhanced_tokens),
-                    0..1,
-                    id.clone(),
-                ))
-            } else {
-                Ok(result)
-            }
-        }
-        _ => Ok(result), // Pass through other result types unchanged
-    }
-}
-
-/// Helper function to convert C parameters to Rust parameters with proper type mapping
-fn convert_parameters(param_tokens: &[Token]) -> String {
-    if param_tokens.is_empty() {
-        return String::new();
-    }
-
-    // Handle void parameters
-    if param_tokens.len() == 1 && param_tokens[0].to_string() == "void" {
-        return String::new();
-    }
-
-    // Split parameters by commas
-    let mut params = Vec::new();
-    let mut current_param = Vec::new();
-
-    for token in param_tokens {
-        if token.to_string() == "," {
-            if !current_param.is_empty() {
-                params.push(current_param.clone());
-                current_param.clear();
-            }
-        } else {
-            current_param.push(token.clone());
+            Ok(result)
         }
     }
-
-    if !current_param.is_empty() {
-        params.push(current_param);
-    }
-
-    // Convert each parameter
-    let mut rust_params = Vec::new();
-    for param_tokens in params {
-        if let Some(rust_param) = convert_single_parameter(&param_tokens) {
-            rust_params.push(rust_param);
-        }
-    }
-
-    rust_params.join(", ")
-}
-
-/// Helper function to convert a single parameter from C to Rust
-fn convert_single_parameter(tokens: &[Token]) -> Option<String> {
-    if tokens.is_empty() {
-        return None;
-    }
-
-    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-
-    // Find parameter name - it's the last identifier that's not a type keyword
-    let mut param_name = String::new();
-    let mut name_idx = tokens.len();
-
-    // Look for the parameter name by finding the last non-type token
-    for i in (0..tokens.len()).rev() {
-        let token_str = &token_strings[i];
-
-        // Skip array brackets and pointers at the end
-        if token_str == "[" || token_str == "]" || token_str == "*" {
-            continue;
-        }
-
-        // Skip type keywords
-        if matches!(
-            token_str.as_str(),
-            "const"
-                | "static"
-                | "volatile"
-                | "register"
-                | "auto"
-                | "extern"
-                | "unsigned"
-                | "signed"
-                | "short"
-                | "long"
-                | "int"
-                | "char"
-                | "float"
-                | "double"
-                | "void"
-                | "struct"
-                | "union"
-                | "enum"
-        ) {
-            continue;
-        }
-
-        // This should be the parameter name
-        param_name = token_str.clone();
-        name_idx = i;
-        break;
-    }
-
-    if param_name.is_empty() {
-        // Fallback: use last token as name
-        param_name = format!("param_{}", tokens.len());
-        name_idx = tokens.len();
-    }
-
-    // Extract type tokens (everything before the name)
-    let type_tokens = if name_idx < tokens.len() {
-        &tokens[0..name_idx]
-    } else {
-        &tokens[0..tokens.len().saturating_sub(1)]
-    };
-
-    // Convert the type
-    let rust_type = convert_c_type_to_rust(type_tokens);
-
-    report!(
-        "function_handler",
-        "convert_single_parameter",
-        Info,
-        Convert,
-        format!(
-            "Converted parameter: {} : {} -> {}: {}",
-            tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" "),
-            param_name,
-            param_name,
-            rust_type
-        ),
-        true
-    );
-
-    Some(format!("{}: {}", param_name, rust_type))
-}
-
-/// Helper function to convert C return type to Rust return type
-fn convert_return_type(return_type_tokens: &[Token]) -> String {
-    if return_type_tokens.is_empty() {
-        return "()".to_string();
-    }
-
-    // Filter out function modifiers that don't affect return type
-    let filtered_tokens: Vec<Token> = return_type_tokens
-        .iter()
-        .filter(|t| {
-            !matches!(
-                t.to_string().as_str(),
-                "static" | "inline" | "__inline" | "__inline__" | "extern"
-            )
-        })
-        .cloned()
-        .collect();
-
-    let rust_type = convert_c_type_to_rust(&filtered_tokens);
-
-    // Handle void special case for return types
-    if rust_type == "c_void" {
-        return "()".to_string();
-    }
-
-    report!(
-        "function_handler",
-        "convert_return_type",
-        Info,
-        Convert,
-        format!(
-            "Return type conversion: '{}' -> '{}'",
-            return_type_tokens
-                .iter()
-                .map(|t| t.to_string())
-                .collect::<Vec<_>>()
-                .join(" "),
-            rust_type
-        ),
-        true
-    );
-
-    rust_type
-}
-
-/// Helper function to convert C type tokens to Rust type using comprehensive mapping
-fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
-    if type_tokens.is_empty() {
-        return "()".to_string();
-    }
-
-    let mut type_parts: Vec<String> = type_tokens.iter().map(|t| t.to_string()).collect();
-    let original_type = type_parts.join(" ");
-
-    // Handle const modifier
-    let is_const = type_parts.contains(&"const".to_string());
-    type_parts.retain(|part| part != "const");
-
-    // Handle pointer
-    let pointer_count = type_parts.iter().filter(|part| *part == "*").count();
-    type_parts.retain(|part| part != "*");
-
-    // Handle static/extern/inline (these don't affect parameter types)
-    type_parts.retain(|part| {
-        !matches!(
-            part.as_str(),
-            "static" | "extern" | "inline" | "__inline" | "__inline__"
-        )
-    });
-
-    let base_type_str = type_parts.join(" ");
-
-    // Convert base type using USER's mapping rules
-    let binding = {
-        // Try convert_type function for other types
-        if let Some(converted) = convert_type(&base_type_str) {
-            converted.to_string()
-        } else {
-            // Keep custom types as-is (like Point, MyInt, etc.)
-            base_type_str.to_string()
-        }
-    };
-    let rust_base_type = match base_type_str.as_str() {
-        "void" => "()",
-        "char" => "i8",
-        "short" => "i16",
-        "int" => "i32",
-        "long" => "i64",
-        "long long" => "i64",
-        "unsigned char" => "u8",
-        "unsigned short" => "u16",
-        "unsigned int" => "u32",
-        "unsigned long" => "u64",
-        "unsigned long long" => "u64",
-        "float" => "f32",
-        "double" => "f64",
-        "size_t" => "usize",
-        "ssize_t" => "isize",
-        "int8_t" => "i8",
-        "int16_t" => "i16",
-        "int32_t" => "i32",
-        "int64_t" => "i64",
-        "uint8_t" => "u8",
-        "uint16_t" => "u16",
-        "uint32_t" => "u32",
-        "uint64_t" => "u64",
-        _ => binding.as_str(),
-    };
-
-    // Apply pointer and const modifiers
-    let final_type = match pointer_count {
-        0 => rust_base_type.to_string(),
-        1 => {
-            if is_const {
-                format!("*const {}", rust_base_type)
-            } else {
-                format!("*mut {}", rust_base_type)
-            }
-        }
-        n => {
-            let mut result = rust_base_type.to_string();
-            for i in 0..n {
-                if i == 0 && is_const {
-                    result = format!("*const {}", result);
-                } else {
-                    result = format!("*mut {}", result);
-                }
-            }
-            result
-        }
-    };
-
-    report!(
-        "function_handler",
-        "convert_c_type_to_rust",
-        Info,
-        Convert,
-        format!("Type conversion: '{}' -> '{}'", original_type, final_type),
-        true
-    );
-
-    final_type.to_string()
-}
-
-/// Helper function to extract function name from tokens
-fn extract_function_name(tokens: &[Token]) -> String {
-    for i in 0..tokens.len().saturating_sub(1) {
-        if tokens[i + 1].to_string() == "(" {
-            return tokens[i].to_string();
-        }
-    }
-    "unknown_function".to_string()
-}
-
-/// Helper function to generate documentation for the function
-fn generate_function_documentation(tokens: &[Token], function_name: &str) -> String {
-    let mut doc = String::new();
-
-    // Generate basic function documentation
-    doc.push_str(&format!("/// Converted C function: {}\n", function_name));
-    doc.push_str("///\n");
-
-    // Extract and document the original C signature
-    let c_signature = tokens
-        .iter()
-        .take_while(|t| t.to_string() != "{" && t.to_string() != ";")
-        .map(|t| t.to_string())
-        .collect::<Vec<_>>()
-        .join(" ");
-    doc.push_str(&format!("/// Original C signature: {}\n", c_signature));
-
-    // Add parameter documentation if we can detect parameters
-    if let Some(param_start) = tokens.iter().position(|t| t.to_string() == "(") {
-        if let Some(param_end) = tokens[param_start..]
-            .iter()
-            .position(|t| t.to_string() == ")")
-        {
-            let param_tokens = &tokens[param_start + 1..param_start + param_end];
-            if !param_tokens.is_empty() {
-                doc.push_str("/// # Parameters\n");
-                let param_str = param_tokens
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                doc.push_str(&format!("/// - Parameters: {}\n", param_str));
-            }
-        }
-    }
-
-    // Add safety note for converted functions
-    doc.push_str("///\n");
-    doc.push_str("/// # Safety\n");
-    doc.push_str("/// This function was automatically converted from C.\n");
-    doc.push_str("/// Please review for safety and correctness.\n");
-
-    report!(
-        "function_handler",
-        "generate_function_documentation",
-        Info,
-        Report,
-        format!(
-            "Generated {} lines of documentation for function '{}'",
-            doc.lines().count(),
-            function_name
-        ),
-        true
-    );
-
-    doc
-}
-
-/// Helper function to postprocess and clean up generated function code
-fn postprocess_function_code(mut tokens: Vec<Token>) -> Vec<Token> {
-    // Clean up whitespace and formatting in the generated code
-    for token in &mut tokens {
-        let token_str = token.to_string();
-
-        // Clean up common formatting issues
-        if token_str.contains("  ") {
-            // Replace multiple spaces with single spaces
-            let cleaned = token_str.replace("  ", " ");
-            *token = Token::s(cleaned);
-        }
-
-        // Ensure proper Rust formatting around braces
-        if token_str.contains(" {") {
-            let cleaned = token_str.replace(" {", " {\n");
-            *token = Token::s(cleaned);
-        }
-    }
-
-    report!(
-        "function_handler",
-        "postprocess_function_code",
-        Info,
-        Report,
-        format!(
-            "Postprocessed {} tokens for better formatting",
-            tokens.len()
-        ),
-        true
-    );
-
-    tokens
-}
-
-/// Redirect callback: Handles cases where this handler should pass tokens to a different handler
-fn redirect_function(
-    tokens: &[Token],
-    result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
-    report!(
-        "function_handler",
-        "redirect_function",
-        Info,
-        Report,
-        "Checking if function tokens should be redirected",
-        true
-    );
-
-    // Check if this might actually be a function pointer typedef
-    if tokens.iter().any(|t| t.to_string() == "typedef") {
-        report!(
-            "function_handler",
-            "redirect_function",
-            Info,
-            Report,
-            "Redirecting to typedef handler",
-            true
-        );
-        return Ok(result);
-    }
-
-    // Check if this might be a macro that looks like a function
-    if tokens.len() > 0 && tokens[0].to_string() == "#" {
-        report!(
-            "function_handler",
-            "redirect_function",
-            Info,
-            Report,
-            "Redirecting to macro handler",
-            true
-        );
-        return Ok(result);
-    }
-
-    // Check if this is actually a struct method definition
-    if tokens.iter().any(|t| t.to_string() == "struct") {
-        report!(
-            "function_handler",
-            "redirect_function",
-            Info,
-            Report,
-            "Redirecting to struct handler",
-            true
-        );
-        return Ok(result);
-    }
-
-    // Check if this looks more like a variable declaration with function pointer type
-    let mut paren_count = 0;
-    let mut has_assignment = false;
-
-    for token in tokens {
-        match token.to_string().as_str() {
-            "(" => paren_count += 1,
-            ")" => paren_count -= 1,
-            "=" => has_assignment = true,
-            _ => {}
-        }
-    }
-
-    // If we have an assignment and complex parentheses, might be a function pointer variable
-    if has_assignment && paren_count == 0 {
-        report!(
-            "function_handler",
-            "redirect_function",
-            Info,
-            Report,
-            "Redirecting to global handler (function pointer variable)",
-            true
-        );
-        return Ok(result);
-    }
-
-    // No redirection needed
-    Ok(result)
 }

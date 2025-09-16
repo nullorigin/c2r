@@ -1,12 +1,12 @@
 use std::sync::atomic::Ordering;
 
 // Verbosity levels
-pub const LEVEL_ERROR: u8 = 0;
-pub const LEVEL_WARN: u8 = 1;
-pub const LEVEL_INFO: u8 = 2;
-pub const LEVEL_DEBUG: u8 = 3;
-pub const LEVEL_TRACE: u8 = 4;
-
+pub const ERROR: u8 = 0;
+pub const WARN: u8 = 1;
+pub const INFO: u8 = 2;
+pub const DEBUG: u8 = 3;
+pub const TRACE: u8 = 4;
+pub const LEVELS: [u8; 5] = [ERROR, WARN, INFO, DEBUG, TRACE];
 /// Sets the global verbosity level
 pub fn set_verbosity_level(level: u8) {
     VERBOSITY_LEVEL.store(level, Ordering::SeqCst);
@@ -45,7 +45,7 @@ macro_rules! report {
                 success: $success,
                 metadata: std::collections::HashMap::new(),
             };
-            $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
+            $crate::config::Global::write(|ctx| ctx.add_report(report.clone()));
         }
     };
 
@@ -66,7 +66,7 @@ macro_rules! report {
                 success: $success,
                 metadata: std::collections::HashMap::new(),
             };
-             $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
+             $crate::config::Global::write(|ctx| ctx.add_report(report));
         }
     };
 
@@ -91,7 +91,7 @@ macro_rules! report {
                 success: $success,
                 metadata,
             };
-            $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
+            $crate::config::Global::write(|ctx| ctx.add_report(report));
         }
     };
 
@@ -116,7 +116,7 @@ macro_rules! report {
                 success: $success,
                 metadata,
             };
-             $crate::config::Global::context_fn(|ctx| ctx.add_report(report));
+             $crate::context!(add_report(report));
         }
     };
 }
@@ -158,7 +158,7 @@ impl std::fmt::Display for ReportLevel {
 #[macro_export]
 macro_rules! error {
     ($($arg:tt)*) => {
-        if $crate::logging::get_verbosity_level() >= $crate::logging::LEVEL_ERROR {
+        if $crate::logging::get_verbosity_level() >= $crate::logging::ERROR {
             eprintln!("[ERROR] {}", format!($($arg)*));
         }
     };
@@ -168,7 +168,7 @@ macro_rules! error {
 #[macro_export]
 macro_rules! warn {
     ($($arg:tt)*) => {
-        if $crate::logging::get_verbosity_level() >= $crate::logging::LEVEL_WARN {
+        if $crate::logging::get_verbosity_level() >= $crate::logging::WARN {
             eprintln!("[WARNING] {}", format!($($arg)*));
         }
     };
@@ -178,7 +178,7 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! info {
     ($($arg:tt)*) => {
-        if $crate::logging::get_verbosity_level() >= $crate::logging::LEVEL_INFO {
+        if $crate::logging::get_verbosity_level() >= $crate::logging::INFO {
             println!("[INFO] {}", format!($($arg)*));
         }
     };
@@ -188,7 +188,7 @@ macro_rules! info {
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
-        if $crate::logging::get_verbosity_level() >= $crate::logging::LEVEL_DEBUG {
+        if $crate::logging::get_verbosity_level() >= $crate::logging::DEBUG {
             println!("[DEBUG] {}", format!($($arg)*));
         }
     };
@@ -198,7 +198,7 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! trace {
     ($($arg:tt)*) => {
-        if $crate::logging::get_verbosity_level() >= $crate::logging::LEVEL_TRACE {
+        if $crate::logging::get_verbosity_level() >= $crate::logging::TRACE {
             println!("[TRACE] {}", format!($($arg)*));
         }
     };
@@ -206,15 +206,7 @@ macro_rules! trace {
 
 // Function to initialize logging based on command line args
 pub fn initialize(verbose_count: u64) {
-    let level = match verbose_count {
-        0 => LEVEL_ERROR,
-        1 => LEVEL_WARN,
-        2 => LEVEL_INFO,
-        3 => LEVEL_DEBUG,
-        _ => LEVEL_TRACE,
-    };
-
+    let level = LEVELS[verbose_count as usize];
     set_verbosity_level(level);
-
     debug!("Logging initialized at level {}", level);
 }

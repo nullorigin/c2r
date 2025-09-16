@@ -9,6 +9,10 @@ edition = "2024"
 
 [dependencies]
 
+[features]
+default = []
+
+
 [[bin]]
 name = "c2r"
 path = "src/main.rs"

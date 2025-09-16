@@ -1,10 +1,11 @@
 #![cfg(test)]
 
-use crate::config::Context;
+use crate::Id;
 use crate::context;
-use crate::error::ConversionError;
+use crate::error::C2RError;
 use crate::pattern::{
     CachedPatternMatch,
+    // NEW: Enhanced pattern matching imports
     Pattern,
     PatternMetrics,
     PatternResult,
@@ -16,35 +17,19 @@ use crate::pattern::{
     generate_sequence_fingerprint,
     generate_token_fingerprint,
     get_cache_statistics,
-    // NEW: Enhanced pattern matching imports
     get_cached_pattern_match,
     get_token_type_variant,
     match_pattern_with_registry_cache,
     register_common_multi_token_patterns,
-    store_pattern_in_registry,
+    store_pattern,
 };
 use crate::token::{Token, Tokenizer};
-use crate::{Global, Id};
 use std::time::Instant;
 
 /// Helper function to create real tokens from C code using the existing tokenizer
-fn tokenize_c_code(c_code: &str) -> Result<Vec<Token>, ConversionError> {
-    let mut context = context!();
-    let tokenizer = Tokenizer::new("pattern_test");
+fn tokenize_c_code(c_code: &str) -> Result<Vec<Token>, C2RError> {
+    let mut tokenizer = Tokenizer::new("pattern_test");
     tokenizer.tokenize(c_code.as_bytes().to_vec())
-}
-
-/// Helper function to create a test context
-fn create_test_context() -> Context {
-    Context::new("pattern_test")
-}
-
-/// Helper function for quick single token creation (for simple cases)
-fn create_single_tokens(token_strings: &[&str]) -> Vec<Token> {
-    token_strings
-        .iter()
-        .map(|s| Token::s(s.to_string()))
-        .collect()
 }
 
 #[test]
@@ -331,8 +316,6 @@ fn test_fragmented_token_detection() {
 fn test_context_registry_pattern_storage() {
     println!("🧪 Testing pattern storage in context registry...");
 
-    use crate::config::Global;
-
     let test_pattern = Pattern {
         id: Id::get("test_function_pattern"),
         name: "Test Function Pattern".to_string(),
@@ -348,15 +331,13 @@ fn test_context_registry_pattern_storage() {
         usage_metrics: PatternMetrics::default(),
     };
 
-    store_pattern_in_registry(test_pattern.clone());
+    store_pattern(test_pattern.clone());
 
     // Verify the pattern was stored - use the correct key format (just the id name)
     let pattern_key = "test_function_pattern"; // store_pattern_in_registry uses the id name directly
 
     // Use shared global Context for consistent access
-    let stored_pattern = Global::context()
-        .get_pattern(pattern_key)
-        .map(|p| p.clone());
+    let stored_pattern = context!().get_pattern(pattern_key).map(|p| p.clone());
 
     if let Some(stored_pattern) = stored_pattern {
         // Verify pattern properties
@@ -444,7 +425,6 @@ fn test_pattern_match_caching() {
 fn test_registry_cache_integration() {
     println!("🧪 Testing enhanced pattern matching with registry cache...");
 
-    let mut context = context!();
     register_common_multi_token_patterns();
 
     // Use real C code tokenization for registry cache integration testing
@@ -484,7 +464,7 @@ fn test_common_multi_token_patterns() {
 
     // Verify function pattern was registered
     let function_pattern =
-        Global::context_fn(|ctx| ctx.get_pattern("c_function_declaration").map(|p| p.clone()));
+        Global::write(|ctx| ctx.get_pattern("c_function_declaration").map(|p| p.clone()));
     assert!(
         function_pattern.is_some(),
         "C function declaration pattern should be registered"
@@ -492,7 +472,7 @@ fn test_common_multi_token_patterns() {
 
     // Verify include pattern was registered
     let include_pattern =
-        Global::context_fn(|ctx| ctx.get_pattern("c_include_statement").map(|p| p.clone()));
+        Global::write(|ctx| ctx.get_pattern("c_include_statement").map(|p| p.clone()));
     assert!(
         include_pattern.is_some(),
         "C include statement pattern should be registered"
@@ -500,7 +480,7 @@ fn test_common_multi_token_patterns() {
 
     // Verify complex identifier pattern was registered
     let complex_id_pattern =
-        Global::context_fn(|ctx| ctx.get_pattern("complex_identifier").map(|p| p.clone()));
+        Global::write(|ctx| ctx.get_pattern("complex_identifier").map(|p| p.clone()));
     assert!(
         complex_id_pattern.is_some(),
         "Complex identifier pattern should be registered"
@@ -508,7 +488,7 @@ fn test_common_multi_token_patterns() {
 
     // Verify array pattern was registered
     let array_pattern =
-        Global::context_fn(|ctx| ctx.get_pattern("c_array_declaration").map(|p| p.clone()));
+        Global::write(|ctx| ctx.get_pattern("c_array_declaration").map(|p| p.clone()));
     assert!(
         array_pattern.is_some(),
         "C array declaration pattern should be registered"
@@ -542,8 +522,6 @@ fn test_pattern_performance_metrics() {
 #[test]
 fn test_comprehensive_pattern_integration() {
     println!("🧪 Running comprehensive pattern matching integration test with real C code...");
-
-    let mut context = create_test_context();
 
     println!("📊 Testing simplified get_value/set_value pattern registry approach...");
 
@@ -606,7 +584,6 @@ fn test_comprehensive_pattern_integration() {
 fn test_pattern_matching_performance() {
     println!("🧪 Testing pattern matching performance...");
 
-    let mut context = create_test_context();
     register_common_multi_token_patterns();
 
     // Use real C code tokenization for performance testing
@@ -1291,6 +1268,7 @@ fn test_enhanced_pattern_results() {
     println!("🧪 Testing enhanced PatternResult variants...");
 
     // Test TypeMismatch result
+    #[allow(unused_variables)]
     let type_mismatch = PatternResult::TypeMismatch {
         expected_type: TokenTypeVariant::SignedInt,
         actual_type: TokenTypeVariant::String,
@@ -1299,6 +1277,7 @@ fn test_enhanced_pattern_results() {
     };
 
     // Test ValueMismatch result
+    #[allow(unused_variables)]
     let value_mismatch = PatternResult::ValueMismatch {
         expected_value: "int".to_string(),
         actual_value: "float".to_string(),
@@ -1307,6 +1286,7 @@ fn test_enhanced_pattern_results() {
     };
 
     // Test StructureMismatch result
+    #[allow(unused_variables)]
     let structure_mismatch = PatternResult::StructureMismatch {
         expected_pattern: "type identifier ( params )".to_string(),
         actual_structure: "type identifier ;".to_string(),
@@ -1314,6 +1294,7 @@ fn test_enhanced_pattern_results() {
     };
 
     // Test CachedNegative result
+    #[allow(unused_variables)]
     let cached_negative = PatternResult::CachedNegative {
         pattern_id: "test_pattern".to_string(),
         cache_hit_count: 3,

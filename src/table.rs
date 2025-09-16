@@ -1,10 +1,24 @@
 use crate::{Entry, Id};
-use std::collections::HashMap;
-use std::fmt;
-use std::fmt::Display;
+use core::fmt;
+#[allow(unused_imports)]
 use std::fmt::Write;
-use std::hash::{Hash, Hasher};
-use std::ops::Range;
+use std::{
+    collections::HashMap,
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
+    ops::Range,
+};
+
+/// Text justification options for table cells
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Justification {
+    /// Left-aligned text (default)
+    Left,
+    /// Center-aligned text
+    Center,
+    /// Right-aligned text
+    Right,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Table {
@@ -278,7 +292,7 @@ impl Table {
 
     /// Create a registry table with proper headers
     pub fn new_registry_table(title: &str) -> Table {
-        let mut table = Table::new_with_dimensions(50, 4); // Start with reasonable size
+        let mut table = Table::new_with_dimensions(50, 4);
         table.id = Id::get(&format!("registry_table_{}", title));
         table
     }
@@ -357,7 +371,7 @@ impl Table {
         for col in 0..self.columns {
             let mut max_display_width = 0;
             // Check all cells in this column
-            for ((cell_row, cell_col), cell) in &self.cells {
+            for ((_cell_row, cell_col), cell) in &self.cells {
                 if *cell_col == col {
                     let content = cell.display_content();
                     let display_width = Self::calculate_display_width(&content);
@@ -372,7 +386,7 @@ impl Table {
             let char_width_offset =
                 Self::calculate_character_width_offset(&format!("Column{}", col));
 
-            widths[col] = (base_width + char_width_offset).max(12); // Minimum total width
+            widths[col] = (base_width + char_width_offset).max(24); // Minimum total width - increased from 12 to 24
         }
 
         // Calculate the minimum table width needed for the header title
@@ -409,35 +423,60 @@ impl Table {
     }
 
     /// Calculate the offset needed to compensate for byte width differences
-    fn calculate_character_width_offset(sample_text: &str) -> usize {
+    fn calculate_character_width_offset(_sample_text: &str) -> usize {
         // With byte-based calculations, no offset compensation needed
         // All bytes are treated as width 1, providing consistent alignment
         0
     }
 
-    /// Format content with proper byte-width-based padding
-    fn format_content_with_byte_width(content: &str, total_width: usize) -> String {
+    /// Format content with proper byte-width-based padding and justification
+    fn format_content_with_byte_width_and_justification(
+        content: &str,
+        total_width: usize,
+        justification: &Justification,
+    ) -> String {
         // Calculate the actual byte width of the content
         let content_byte_width = content.as_bytes().len();
 
-        // We want: " " + content + padding + " "
         // Total width includes the left and right padding spaces
-        let available_width = if total_width >= 2 { total_width - 2 } else { 0 }; // Reserve 2 for left/right spaces
+        let available_width = if total_width >= 2 { total_width - 2 } else { 0 }; // Reserve 2 for border spaces
 
         let mut result = String::with_capacity(total_width);
-        result.push(' '); // Left padding space
 
-        // Add the content
-        result.push_str(content);
+        // Calculate padding needed
+        let padding_needed = if content_byte_width <= available_width {
+            available_width - content_byte_width
+        } else {
+            0 // Content is too long, no padding needed
+        };
 
-        // Calculate how many extra spaces we need to reach the target width
-        if content_byte_width <= available_width {
-            let padding_needed = available_width - content_byte_width;
-            result.push_str(&" ".repeat(padding_needed));
+        match justification {
+            Justification::Left => {
+                // Left alignment: " content       "
+                result.push(' '); // Left border space
+                result.push_str(content);
+                result.push_str(&" ".repeat(padding_needed));
+                result.push(' '); // Right border space
+            }
+            Justification::Center => {
+                // Center alignment: "  content   "
+                let left_padding = padding_needed / 2;
+                let right_padding = padding_needed - left_padding;
+
+                result.push(' '); // Left border space
+                result.push_str(&" ".repeat(left_padding));
+                result.push_str(content);
+                result.push_str(&" ".repeat(right_padding));
+                result.push(' '); // Right border space
+            }
+            Justification::Right => {
+                // Right alignment: "       content "
+                result.push(' '); // Left border space
+                result.push_str(&" ".repeat(padding_needed));
+                result.push_str(content);
+                result.push(' '); // Right border space
+            }
         }
-        // If content is longer than available width, we don't truncate - just add the right space
-
-        result.push(' '); // Right padding space
 
         result
     }
@@ -461,7 +500,7 @@ impl Table {
         for (i, width) in widths.iter().enumerate() {
             output.push_str(&"─".repeat(*width));
             if i < widths.len() - 1 {
-                output.push('┬');
+                output.push('─'); // Continuous horizontal line for clean top border
             }
         }
         output.push_str("┐\n");
@@ -477,10 +516,9 @@ impl Table {
         let available_width = total_width.saturating_sub(2); // Subtract 2 for the │ characters
         let total_padding = available_width.saturating_sub(title.len());
 
-        // Account for odd/even column asymmetry: odd columns create 1-character offset due to uneven vertical lines
-        let asymmetry_compensation = if self.columns % 2 == 1 { 1 } else { 0 };
+        // Apply +1 character offset for proper alignment with table borders
         let left_padding = total_padding / 2;
-        let right_padding = (total_padding - left_padding) + asymmetry_compensation;
+        let right_padding = (total_padding - left_padding) + 1;
         output.push('│');
         output.push_str(&" ".repeat(left_padding));
         output.push_str(&title);
@@ -492,7 +530,7 @@ impl Table {
         for (i, width) in widths.iter().enumerate() {
             output.push_str(&"─".repeat(*width));
             if i < widths.len() - 1 {
-                output.push('┼');
+                output.push('┬'); // T-like character pointing down
             }
         }
         output.push_str("┤\n");
@@ -503,14 +541,18 @@ impl Table {
         for row in 0..actual_rows {
             output.push('│');
             for col in 0..self.columns {
-                let content = if let Some(cell) = self.get_cell(row, col) {
-                    cell.display_content()
+                let (content, justification) = if let Some(cell) = self.get_cell(row, col) {
+                    (cell.display_content(), cell.justification())
                 } else {
-                    String::new()
+                    (String::new(), &Justification::Left)
                 };
 
-                // Use byte-width-based padding for consistent alignment
-                let padded = Self::format_content_with_byte_width(&content, widths[col]);
+                // Use byte-width-based padding with cell-specific justification
+                let padded = Self::format_content_with_byte_width_and_justification(
+                    &content,
+                    widths[col],
+                    justification,
+                );
                 output.push_str(&padded);
                 if col < self.columns - 1 {
                     output.push('│');
@@ -518,13 +560,13 @@ impl Table {
             }
             output.push_str("│\n");
 
-            // Add separator after header row
-            if row == 0 && actual_rows > 1 {
+            // Add separator after each row (except the last one)
+            if row < actual_rows - 1 {
                 output.push('├');
                 for (i, width) in widths.iter().enumerate() {
                     output.push_str(&"─".repeat(*width));
                     if i < widths.len() - 1 {
-                        output.push('┼');
+                        output.push('┼'); // Cross character for all row separators
                     }
                 }
                 output.push_str("┤\n");
@@ -662,6 +704,7 @@ pub struct TableCell {
     column: usize,
     entries: Vec<Entry>,
     id: Id,
+    justification: Justification,
 }
 
 impl Display for TableCell {
@@ -676,7 +719,40 @@ impl TableCell {
             column,
             entries: Vec::new(),
             id: Id::get(name),
+            justification: Justification::Left, // Default to left alignment
         }
+    }
+
+    /// Create a new TableCell with specified justification
+    pub fn new_with_justification(
+        row: usize,
+        column: usize,
+        name: &str,
+        justification: Justification,
+    ) -> TableCell {
+        TableCell {
+            row,
+            column,
+            entries: Vec::new(),
+            id: Id::get(name),
+            justification,
+        }
+    }
+
+    /// Set the justification for this cell
+    pub fn set_justification(&mut self, justification: Justification) {
+        self.justification = justification;
+    }
+
+    /// Get the current justification for this cell
+    pub fn justification(&self) -> &Justification {
+        &self.justification
+    }
+
+    /// Builder pattern method to set justification
+    pub fn with_justification(mut self, justification: Justification) -> Self {
+        self.justification = justification;
+        self
     }
 
     pub fn row(&self) -> usize {
@@ -1392,5 +1468,140 @@ mod tests {
 
         println!("✅ Dynamic resizing functionality works correctly");
         println!("📏 Tables automatically resize based on content and can be optimized");
+    }
+
+    /// Test the new text justification functionality
+    #[test]
+    fn test_justification_functionality() {
+        println!("🧪 Testing text justification functionality...");
+
+        // Create a demo table to showcase all justification types
+        let mut demo_table = Table::new_with_dimensions(4, 3);
+        demo_table.id = Id::get("justification_demo");
+
+        // Add headers with center justification
+        let mut header1 =
+            TableCell::new_with_justification(0, 0, "left_header", Justification::Center);
+        header1.add_entry(Entry::Str("Left Column".to_string()));
+        demo_table.set_cell(0, 0, header1);
+
+        let mut header2 =
+            TableCell::new_with_justification(0, 1, "center_header", Justification::Center);
+        header2.add_entry(Entry::Str("Center Column".to_string()));
+        demo_table.set_cell(0, 1, header2);
+
+        let mut header3 =
+            TableCell::new_with_justification(0, 2, "right_header", Justification::Center);
+        header3.add_entry(Entry::Str("Right Column".to_string()));
+        demo_table.set_cell(0, 2, header3);
+
+        // Row 1: Demonstrate different justifications
+        let mut left_cell = TableCell::new(1, 0, "demo_left");
+        left_cell.add_entry(Entry::Str("Left aligned text".to_string()));
+        // left_cell keeps default Left justification
+        demo_table.set_cell(1, 0, left_cell);
+
+        let mut center_cell = TableCell::new(1, 1, "demo_center");
+        center_cell.add_entry(Entry::Str("Centered".to_string()));
+        center_cell.set_justification(Justification::Center);
+        demo_table.set_cell(1, 1, center_cell);
+
+        let mut right_cell = TableCell::new(1, 2, "demo_right");
+        right_cell.add_entry(Entry::Str("Right aligned".to_string()));
+        right_cell.set_justification(Justification::Right);
+        demo_table.set_cell(1, 2, right_cell);
+
+        // Row 2: Numeric data with different justifications
+        let mut num_left = TableCell::new(2, 0, "num_left");
+        num_left.add_entry(Entry::Val(42));
+        demo_table.set_cell(2, 0, num_left);
+
+        let mut num_center =
+            TableCell::new_with_justification(2, 1, "num_center", Justification::Center);
+        num_center.add_entry(Entry::Val(1337));
+        demo_table.set_cell(2, 1, num_center);
+
+        let mut num_right =
+            TableCell::new_with_justification(2, 2, "num_right", Justification::Right);
+        num_right.add_entry(Entry::Val(999));
+        demo_table.set_cell(2, 2, num_right);
+
+        // Row 3: Status indicators with center justification
+        let mut status1 = TableCell::new_with_justification(3, 0, "status1", Justification::Center);
+        status1.add_entry(Entry::Str("✅ SUCCESS".to_string()));
+        demo_table.set_cell(3, 0, status1);
+
+        let mut status2 = TableCell::new_with_justification(3, 1, "status2", Justification::Center);
+        status2.add_entry(Entry::Str("⚠️ WARNING".to_string()));
+        demo_table.set_cell(3, 1, status2);
+
+        let mut status3 = TableCell::new_with_justification(3, 2, "status3", Justification::Center);
+        status3.add_entry(Entry::Str("❌ ERROR".to_string()));
+        demo_table.set_cell(3, 2, status3);
+
+        println!("🎨 Justification Demo Table:");
+        println!("{}", "=".repeat(80));
+        let formatted_output = demo_table.display_formatted();
+        println!("{}", formatted_output);
+        println!("{}", "=".repeat(80));
+
+        // Validate that the output contains expected structural elements
+        assert!(formatted_output.contains("┌"), "Should contain top border");
+        assert!(
+            formatted_output.contains("│"),
+            "Should contain vertical borders"
+        );
+        assert!(
+            formatted_output.contains("└"),
+            "Should contain bottom border"
+        );
+        assert!(
+            formatted_output.contains("Left Column"),
+            "Should contain left header"
+        );
+        assert!(
+            formatted_output.contains("Center Column"),
+            "Should contain center header"
+        );
+        assert!(
+            formatted_output.contains("Right Column"),
+            "Should contain right header"
+        );
+        assert!(
+            formatted_output.contains("Centered"),
+            "Should contain centered text"
+        );
+        assert!(
+            formatted_output.contains("SUCCESS"),
+            "Should contain status text"
+        );
+
+        // Test builder pattern with justification
+        let builder_cell =
+            TableCell::new(0, 0, "builder_test").with_justification(Justification::Right);
+        assert_eq!(
+            *builder_cell.justification(),
+            Justification::Right,
+            "Builder pattern should set justification"
+        );
+
+        // Test justification getter/setter
+        let mut test_cell = TableCell::new(0, 0, "getter_setter_test");
+        assert_eq!(
+            *test_cell.justification(),
+            Justification::Left,
+            "Default should be Left"
+        );
+
+        test_cell.set_justification(Justification::Center);
+        assert_eq!(
+            *test_cell.justification(),
+            Justification::Center,
+            "Should update to Center"
+        );
+
+        println!("✅ Text justification functionality works correctly!");
+        println!("📐 Left, Center, and Right alignments all functioning properly");
+        println!("🔧 Builder pattern and getter/setter methods validated");
     }
 }

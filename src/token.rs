@@ -6,15 +6,14 @@
     non_upper_case_globals
 )]
 
-use crate::error::ConversionError;
 use crate::handler::{HandlerResult, ProcessedResult};
-use crate::{context, debug, error, info, warn};
+use crate::{C2RError, context, debug, error, info, warn};
+use core::mem::transmute;
 use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::mem::transmute;
 use std::ops::Add;
 use std::ops::BitAnd;
 use std::ops::BitOr;
@@ -43,6 +42,7 @@ pub enum Token {
     v(Vec<u8>),
     w(String),    // Whitespace token variant - stores whitespace sequences
     d(Vec<char>), // Delimiter token variant - stores delimiter character sequences
+    n(),          // None/consumed token variant - placeholder for consumed tokens
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Tokenizer {
@@ -76,6 +76,7 @@ impl Clone for Token {
             Token::v(v) => Token::v(v.clone()),
             Token::w(w) => Token::w(w.clone()),
             Token::d(d) => Token::d(d.clone()),
+            Token::n() => Token::n(),
         }
     }
 }
@@ -93,6 +94,7 @@ impl Hash for Token {
             Token::v(v) => v.hash(state),
             Token::w(w) => w.hash(state),
             Token::d(d) => d.hash(state),
+            Token::n() => 0u8.hash(state), // Hash as 0 for consistency
         }
     }
 }
@@ -114,11 +116,11 @@ impl Display for Token {
             Token::v(v) => write!(f, "{}", Tokenizer::from_utf8(v.as_slice())),
             Token::w(w) => write!(f, "{}", w),
             Token::d(d) => write!(f, "{}", d.iter().collect::<String>()),
+            Token::n() => write!(f, ""), // Display as empty string
         }
     }
 }
 impl Eq for Token {}
-
 impl PartialOrd for Token {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
@@ -358,6 +360,10 @@ impl Ord for Token {
                 .unwrap_or("Invalid UTF-8".to_string())
                 .cmp(&b.iter().collect::<String>()),
             (Token::w(a), Token::d(b)) => a.cmp(&b.iter().collect::<String>()),
+            // Token::n patterns - consumed tokens are always equal to each other and less than all others
+            (Token::n(), Token::n()) => std::cmp::Ordering::Equal,
+            (Token::n(), _) => std::cmp::Ordering::Less,
+            (_, Token::n()) => std::cmp::Ordering::Greater,
         }
     }
 }
@@ -411,7 +417,7 @@ impl BitXor for Token {
     }
 }
 impl FromStr for Token {
-    type Err = ConversionError;
+    type Err = C2RError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Ok(Token::s(s.trim().to_string()))
     }
@@ -506,6 +512,7 @@ impl Token {
             Token::v(v) => v.len(),
             Token::w(w) => w.len(),
             Token::d(d) => d.len(),
+            Token::n() => 0, // Length is 0 for consumed tokens
         }
     }
     pub fn stok(&self) -> Token {
@@ -521,6 +528,7 @@ impl Token {
             Token::v(v) => Token::s(String::from_utf8(v).unwrap()),
             Token::w(w) => Token::s(w), // Convert whitespace token to string token
             Token::d(d) => Token::s(d.iter().collect::<String>()), // Convert delimiter token to string token
+            Token::n() => Token::s(String::new()),                 // Convert to empty string
         }
     }
     pub fn matches(&self, others: Vec<Token>) -> Vec<Option<Token>> {
@@ -869,6 +877,10 @@ impl PartialEq for Token {
             (Token::l(a), Token::d(b)) => *a == b.iter().collect::<String>(),
             (Token::v(a), Token::d(b)) => a == b.iter().collect::<String>().as_bytes(),
             (Token::w(a), Token::d(b)) => *a == b.iter().collect::<String>(),
+            // Token::n patterns - consumed tokens are always equal to each other and not equal to others
+            (Token::n(), Token::n()) => true,
+            (Token::n(), _) => false,
+            (_, Token::n()) => false,
         }
     }
 }
@@ -882,7 +894,7 @@ impl Tokenizer {
         }
     }
 
-    pub fn tokenize(mut self, content: Vec<u8>) -> Result<Vec<Token>, ConversionError> {
+    pub fn tokenize(&mut self, content: Vec<u8>) -> Result<Vec<Token>, C2RError> {
         let mut tokens = Vec::new();
         self.content = content.clone();
         // Debug: Print total content length
@@ -1801,7 +1813,7 @@ impl Tokenizer {
 
     /// Process tokens incrementally with registered handlers
     /// Returns a vector of ProcessedResults that can be used to generate Rust code
-    pub fn process_tokens(&mut self, tokens: &[Token]) -> Result<ProcessedResult, ConversionError> {
+    pub fn process_tokens(&mut self, tokens: &[Token]) -> Result<ProcessedResult, C2RError> {
         let start_time = Instant::now();
         // Track statistics if debug mode is enabled
         let total_tokens = tokens.len();
@@ -1809,12 +1821,12 @@ impl Tokenizer {
         let mut handler_stats: HashMap<String, usize> = HashMap::new();
         let mut error_count = 0;
         let mut unhandled_count = 0;
-        let handlers = context!().handlers.clone();
+        let mut handlers = context!().handlers.clone();
         // Initialize handler statistics
         for handler in context!().handlers.clone() {
             handler_stats.insert(handler.name().to_string(), 0);
         }
-        let processed = &mut handlers.process(tokens)?;
+        let processed = handlers.process(tokens)?;
         // Process tokens incrementally
         // Build the resulting Rust code from the processed results
         let mut result = String::with_capacity(tokens.len() * 2); // Pre-allocate memory

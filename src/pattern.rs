@@ -2,8 +2,12 @@
 // PATTERN MATCHING UTILITY - Lightweight cascading token validation system
 // =============================================================================
 
-use crate::Global;
-use crate::{Entry, Id, Token, is_c_keyword, is_type_token};
+use crate::config::Global;
+use crate::convert::{is_c_keyword, is_type_token};
+use crate::entry::Entry;
+use crate::lock::Id;
+use crate::token::Token;
+use core::option::Option::None;
 use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::fmt::Display;
@@ -12,7 +16,7 @@ use std::ops::Range;
 use std::time::{Duration, Instant};
 
 /// Represents different types of token patterns for validation
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq, Hash)]
 pub enum TokenPattern {
     /// Exact token match
     Exact(String),
@@ -76,7 +80,24 @@ pub enum TokenPattern {
     /// Match tokens that satisfy a custom predicate function
     TokenPredicate(fn(&Token) -> bool),
 }
-
+impl PartialEq for TokenPattern {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (TokenPattern::Exact(s1), TokenPattern::Exact(s2)) => s1 == s2,
+            (TokenPattern::OneOf(v1), TokenPattern::OneOf(v2)) => v1 == v2,
+            (TokenPattern::CountOf(v1, n1), TokenPattern::CountOf(v2, n2)) => v1 == v2 && n1 == n2,
+            (TokenPattern::NotOneOf(v1), TokenPattern::NotOneOf(v2)) => v1 == v2,
+            (TokenPattern::Identifier, TokenPattern::Identifier) => true,
+            (TokenPattern::TypeKeyword, TokenPattern::TypeKeyword) => true,
+            (TokenPattern::CKeyword, TokenPattern::CKeyword) => true,
+            (TokenPattern::Punctuation, TokenPattern::Punctuation) => true,
+            (TokenPattern::Number, TokenPattern::Number) => true,
+            (TokenPattern::Any, TokenPattern::Any) => true,
+            (TokenPattern::End, TokenPattern::End) => true,
+            _ => false,
+        }
+    }
+}
 /// Represents Token type variants for type-aware matching
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TokenTypeVariant {
@@ -272,7 +293,7 @@ pub struct SequenceFingerprint {
 }
 
 /// A single pattern matching rule
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Eq)]
 pub struct PatternRule {
     /// The pattern to match at this position
     pub pattern: TokenPattern,
@@ -284,6 +305,15 @@ pub struct PatternRule {
     pub optional: bool,
     /// Custom validation function for complex logic
     pub custom_validator: Option<fn(&[Token], usize) -> bool>,
+}
+
+impl PartialEq for PatternRule {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern
+            && self.allowed_next == other.allowed_next
+            && self.forbidden_next == other.forbidden_next
+            && self.optional == other.optional
+    }
 }
 
 /// A complete pattern matching configuration for a handler
@@ -306,6 +336,7 @@ pub struct HandlerPattern {
 /// Central pattern matching engine
 #[derive(Debug, Clone, Eq)]
 pub struct Patternizer {
+    pub name: String,
     /// Registered patterns by handler type
     patterns: HashMap<String, Vec<HandlerPattern>>,
     /// Cache for performance optimization
@@ -351,6 +382,7 @@ impl PartialEq for Patternizer {
 impl Default for Patternizer {
     fn default() -> Self {
         Patternizer {
+            name: "patternizer".to_string(),
             patterns: HashMap::new(),
             match_cache: HashMap::new(),
         }
@@ -370,6 +402,7 @@ pub fn get_token_type_variant(token: &Token) -> TokenTypeVariant {
         Token::v(_) => TokenTypeVariant::Vector,
         Token::w(_) => TokenTypeVariant::Whitespace,
         Token::d(_) => TokenTypeVariant::Delimiter,
+        Token::n() => TokenTypeVariant::String, // Treat consumed tokens as empty strings
     }
 }
 
@@ -770,8 +803,9 @@ impl HandlerPattern {
 
 impl Patternizer {
     /// Create a new pattern matcher
-    pub fn new() -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
+            name: name.to_string(),
             patterns: HashMap::new(),
             match_cache: HashMap::new(),
         }
@@ -779,7 +813,7 @@ impl Patternizer {
 
     /// Create a new pattern matcher with common patterns pre-loaded
     pub fn with_common_patterns() -> Self {
-        let mut patternizer = Self::new();
+        let mut patternizer = Self::new("patternizer");
         patternizer.initialize_common_patterns();
         patternizer
     }
@@ -827,32 +861,522 @@ impl Patternizer {
 
         self.register_pattern("function".to_string(), function_pattern);
 
-        // Array patterns
+        // Array patterns - improved with multiple variations
         let array_declaration_pattern = HandlerPattern::new(
             "array_declaration".to_string(),
-            "C array declaration".to_string(),
+            "C array declaration with brackets".to_string(),
         )
         .with_rules(vec![
+            // Optional storage class
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "static".to_string(),
+                "const".to_string(),
+                "extern".to_string(),
+            ]))
+            .optional(),
             // Type
             PatternRule::new(TokenPattern::TypeKeyword)
                 .forbid_next(vec![TokenPattern::Exact("(".to_string())]), // Reject function calls
             // Identifier
-            PatternRule::new(TokenPattern::Identifier)
-                .allow_next(vec![TokenPattern::Exact("[".to_string())]), // Must be followed by [
+            PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
+                // Ensure identifier is followed by [ (not function call)
+                if pos + 1 < tokens.len() {
+                    tokens[pos + 1].to_string() == "["
+                } else {
+                    false
+                }
+            }),
             // Opening bracket
             PatternRule::new(TokenPattern::Exact("[".to_string())),
-            // Size (number or identifier)
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "number".to_string(),
-                "identifier".to_string(),
-            ])),
+            // Size (optional - empty brackets or number/identifier)
+            PatternRule::new(TokenPattern::Any).optional(),
             // Closing bracket
             PatternRule::new(TokenPattern::Exact("]".to_string())),
         ])
-        .min_tokens(5)
+        .min_tokens(4)
         .priority(150);
 
-        self.register_pattern("array".to_string(), array_declaration_pattern);
+        self.register_pattern("array_declaration".to_string(), array_declaration_pattern);
+
+        // Multi-dimensional array pattern
+        let array_multi_pattern = HandlerPattern::new(
+            "array_multi".to_string(),
+            "C multi-dimensional array declaration".to_string(),
+        )
+        .with_rules(vec![
+            // Type
+            PatternRule::new(TokenPattern::TypeKeyword),
+            // Identifier
+            PatternRule::new(TokenPattern::Identifier),
+            // Multiple bracket pairs
+            PatternRule::new(TokenPattern::Exact("[".to_string())),
+            PatternRule::new(TokenPattern::Any).optional(), // Size
+            PatternRule::new(TokenPattern::Exact("]".to_string())),
+            PatternRule::new(TokenPattern::Exact("[".to_string())),
+            PatternRule::new(TokenPattern::Any).optional(), // Second dimension
+            PatternRule::new(TokenPattern::Exact("]".to_string())),
+        ])
+        .min_tokens(6)
+        .priority(160); // Higher priority than single arrays
+
+        self.register_pattern("array_multi".to_string(), array_multi_pattern);
+
+        // Struct patterns
+        let struct_declaration_pattern = HandlerPattern::new(
+            "struct_declaration".to_string(),
+            "C struct declaration or definition".to_string(),
+        )
+        .with_rules(vec![
+            // struct keyword
+            PatternRule::new(TokenPattern::Exact("struct".to_string())),
+            // Optional struct name/tag
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            // Either { for definition or ; for forward declaration
+            PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
+        ])
+        .min_tokens(2)
+        .priority(140);
+
+        self.register_pattern("struct_declaration".to_string(), struct_declaration_pattern);
+
+        // Struct definition pattern (with body)
+        let struct_definition_pattern = HandlerPattern::new(
+            "struct_definition".to_string(),
+            "C struct definition with body".to_string(),
+        )
+        .with_rules(vec![
+            // struct keyword
+            PatternRule::new(TokenPattern::Exact("struct".to_string())),
+            // Optional struct name/tag
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            // Opening brace
+            PatternRule::new(TokenPattern::Exact("{".to_string())),
+            // Body content (flexible)
+            PatternRule::new(TokenPattern::Any).optional(),
+        ])
+        .min_tokens(3)
+        .priority(150); // Higher priority than declaration
+
+        self.register_pattern("struct_definition".to_string(), struct_definition_pattern);
+
+        // Enum patterns
+        let enum_declaration_pattern = HandlerPattern::new(
+            "enum_declaration".to_string(),
+            "C enum declaration".to_string(),
+        )
+        .with_rules(vec![
+            // enum keyword
+            PatternRule::new(TokenPattern::Exact("enum".to_string())),
+            // Optional enum name/tag
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            // Either { for definition or ; for forward declaration
+            PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
+        ])
+        .min_tokens(2)
+        .priority(140);
+
+        self.register_pattern("enum_declaration".to_string(), enum_declaration_pattern);
+
+        // Typedef enum pattern
+        let typedef_enum_pattern = HandlerPattern::new(
+            "typedef_enum".to_string(),
+            "C typedef enum declaration".to_string(),
+        )
+        .with_rules(vec![
+            // typedef keyword
+            PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+            // enum keyword
+            PatternRule::new(TokenPattern::Exact("enum".to_string())),
+            // Optional enum name/tag
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            // Opening brace for definition
+            PatternRule::new(TokenPattern::Exact("{".to_string())),
+        ])
+        .min_tokens(4)
+        .priority(160); // Higher priority than simple enum
+
+        self.register_pattern("typedef_enum".to_string(), typedef_enum_pattern);
+
+        // Typedef patterns
+        let typedef_simple_pattern = HandlerPattern::new(
+            "typedef_simple".to_string(),
+            "C simple typedef declaration".to_string(),
+        )
+        .with_rules(vec![
+            // typedef keyword
+            PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+            // Type (could be basic type or struct/enum)
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "int".to_string(),
+                "char".to_string(),
+                "float".to_string(),
+                "double".to_string(),
+                "void".to_string(),
+                "struct".to_string(),
+                "enum".to_string(),
+                "union".to_string(),
+            ])),
+            // Optional struct/enum name
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            // New type name
+            PatternRule::new(TokenPattern::Identifier),
+            // Semicolon
+            PatternRule::new(TokenPattern::Exact(";".to_string())),
+        ])
+        .min_tokens(4)
+        .priority(130);
+
+        self.register_pattern("typedef_simple".to_string(), typedef_simple_pattern);
+
+        // Typedef struct pattern (not captured by typedef_enum)
+        let typedef_struct_pattern = HandlerPattern::new(
+            "typedef_struct".to_string(),
+            "C typedef struct declaration".to_string(),
+        )
+        .with_rules(vec![
+            // typedef keyword
+            PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+            // struct keyword
+            PatternRule::new(TokenPattern::Exact("struct".to_string())),
+            // Optional struct name/tag
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            // Either opening brace or new type name
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "{".to_string(),
+                "identifier".to_string(),
+            ])),
+        ])
+        .min_tokens(3)
+        .priority(150); // Higher priority than simple typedef
+
+        self.register_pattern("typedef_struct".to_string(), typedef_struct_pattern);
+
+        // Control flow patterns
+        let control_flow_if_pattern =
+            HandlerPattern::new("control_flow_if".to_string(), "C if statement".to_string())
+                .with_rules(vec![
+                    // if keyword
+                    PatternRule::new(TokenPattern::Exact("if".to_string())),
+                    // Opening parenthesis
+                    PatternRule::new(TokenPattern::Exact("(".to_string())),
+                    // Condition (flexible)
+                    PatternRule::new(TokenPattern::Any).optional(),
+                ])
+                .min_tokens(3)
+                .priority(120);
+
+        self.register_pattern("control_flow_if".to_string(), control_flow_if_pattern);
+
+        let control_flow_for_pattern =
+            HandlerPattern::new("control_flow_for".to_string(), "C for loop".to_string())
+                .with_rules(vec![
+                    // for keyword
+                    PatternRule::new(TokenPattern::Exact("for".to_string())),
+                    // Opening parenthesis
+                    PatternRule::new(TokenPattern::Exact("(".to_string())),
+                    // Loop content (flexible)
+                    PatternRule::new(TokenPattern::Any).optional(),
+                ])
+                .min_tokens(3)
+                .priority(120);
+
+        self.register_pattern("control_flow_for".to_string(), control_flow_for_pattern);
+
+        let control_flow_while_pattern =
+            HandlerPattern::new("control_flow_while".to_string(), "C while loop".to_string())
+                .with_rules(vec![
+                    // while keyword
+                    PatternRule::new(TokenPattern::Exact("while".to_string())),
+                    // Opening parenthesis
+                    PatternRule::new(TokenPattern::Exact("(".to_string())),
+                    // Condition (flexible)
+                    PatternRule::new(TokenPattern::Any).optional(),
+                ])
+                .min_tokens(3)
+                .priority(120);
+
+        self.register_pattern("control_flow_while".to_string(), control_flow_while_pattern);
+
+        // Include directive patterns
+        let include_directive_pattern = HandlerPattern::new(
+            "include_directive".to_string(),
+            "C #include preprocessor directive".to_string(),
+        )
+        .with_rules(vec![
+            // #include (as single token or separate # and include)
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "#include".to_string(),
+                "#".to_string(),
+            ])),
+            PatternRule::new(TokenPattern::Exact("include".to_string())).optional(),
+            // Header file path in <> or ""
+            PatternRule::new(TokenPattern::OneOf(vec!["<".to_string(), "\"".to_string()]))
+                .optional(),
+            PatternRule::new(TokenPattern::Identifier).optional(),
+            PatternRule::new(TokenPattern::OneOf(vec![">".to_string(), "\"".to_string()]))
+                .optional(),
+        ])
+        .min_tokens(2)
+        .priority(950);
+
+        self.register_pattern("include_directive".to_string(), include_directive_pattern);
+
+        // Define macro patterns
+        let define_macro_pattern = HandlerPattern::new(
+            "define_macro".to_string(),
+            "C #define preprocessor directive".to_string(),
+        )
+        .with_rules(vec![
+            // #define (as single token or separate # and define)
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "#define".to_string(),
+                "#".to_string(),
+            ])),
+            PatternRule::new(TokenPattern::Exact("define".to_string())).optional(),
+            // Macro name
+            PatternRule::new(TokenPattern::Identifier),
+            // Optional parameters or body
+            PatternRule::new(TokenPattern::Any).optional(),
+        ])
+        .min_tokens(2)
+        .priority(920);
+
+        self.register_pattern("define_macro".to_string(), define_macro_pattern);
+
+        // Conditional macro patterns
+        let conditional_macro_pattern = HandlerPattern::new(
+            "conditional_macro".to_string(),
+            "C conditional preprocessor directives".to_string(),
+        )
+        .with_rules(vec![
+            // Conditional directives
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "#ifdef".to_string(),
+                "#ifndef".to_string(),
+                "#endif".to_string(),
+                "#else".to_string(),
+                "#elif".to_string(),
+                "#undef".to_string(),
+                "#".to_string(),
+            ])),
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "ifdef".to_string(),
+                "ifndef".to_string(),
+                "endif".to_string(),
+                "else".to_string(),
+                "elif".to_string(),
+                "undef".to_string(),
+            ]))
+            .optional(),
+            // Optional condition
+            PatternRule::new(TokenPattern::Identifier).optional(),
+        ])
+        .min_tokens(1)
+        .priority(910);
+
+        self.register_pattern("conditional_macro".to_string(), conditional_macro_pattern);
+
+        // Main function pattern (very specific)
+        let main_function_pattern = HandlerPattern::new(
+            "main_function".to_string(),
+            "C main function declaration or definition".to_string(),
+        )
+        .with_rules(vec![
+            // Optional storage class
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "static".to_string(),
+                "extern".to_string(),
+            ]))
+            .optional(),
+            // Return type
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "int".to_string(),
+                "void".to_string(),
+            ])),
+            // Main identifier
+            PatternRule::new(TokenPattern::Exact("main".to_string())),
+            // Opening parenthesis
+            PatternRule::new(TokenPattern::Exact("(".to_string())),
+            // Parameters (optional)
+            PatternRule::new(TokenPattern::Any).optional(),
+        ])
+        .min_tokens(4)
+        .priority(1000);
+
+        self.register_pattern("main_function".to_string(), main_function_pattern);
+
+        // Function declaration pattern
+        let function_declaration_pattern = HandlerPattern::new(
+            "function_declaration".to_string(),
+            "C function declaration (no body)".to_string(),
+        )
+        .with_rules(vec![
+            // Optional storage class
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "static".to_string(),
+                "inline".to_string(),
+                "extern".to_string(),
+            ]))
+            .optional(),
+            // Return type
+            PatternRule::new(TokenPattern::TypeKeyword),
+            // Function name (not main)
+            PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
+                if pos < tokens.len() {
+                    tokens[pos].to_string() != "main"
+                } else {
+                    false
+                }
+            }),
+            // Opening parenthesis
+            PatternRule::new(TokenPattern::Exact("(".to_string())),
+            // Parameters
+            PatternRule::new(TokenPattern::Any).optional(),
+            // Closing parenthesis
+            PatternRule::new(TokenPattern::Exact(")".to_string())),
+            // Semicolon (declaration, not definition)
+            PatternRule::new(TokenPattern::Exact(";".to_string())),
+        ])
+        .min_tokens(5)
+        .priority(900);
+
+        self.register_pattern(
+            "function_declaration".to_string(),
+            function_declaration_pattern,
+        );
+
+        // Function definition pattern
+        let function_definition_pattern = HandlerPattern::new(
+            "function_definition".to_string(),
+            "C function definition (with body)".to_string(),
+        )
+        .with_rules(vec![
+            // Optional storage class
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "static".to_string(),
+                "inline".to_string(),
+            ]))
+            .optional(),
+            // Return type
+            PatternRule::new(TokenPattern::TypeKeyword),
+            // Function name (not main)
+            PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
+                if pos < tokens.len() {
+                    tokens[pos].to_string() != "main"
+                } else {
+                    false
+                }
+            }),
+            // Opening parenthesis
+            PatternRule::new(TokenPattern::Exact("(".to_string())),
+            // Parameters
+            PatternRule::new(TokenPattern::Any).optional(),
+            // Closing parenthesis
+            PatternRule::new(TokenPattern::Exact(")".to_string())),
+            // Opening brace (definition has body)
+            PatternRule::new(TokenPattern::Exact("{".to_string())),
+        ])
+        .min_tokens(6)
+        .priority(850);
+
+        self.register_pattern(
+            "function_definition".to_string(),
+            function_definition_pattern,
+        );
+
+        // Extern declaration pattern
+        let extern_declaration_pattern = HandlerPattern::new(
+            "extern_declaration".to_string(),
+            "C extern declaration".to_string(),
+        )
+        .with_rules(vec![
+            // Extern keyword
+            PatternRule::new(TokenPattern::Exact("extern".to_string())),
+            // Type or function signature
+            PatternRule::new(TokenPattern::OneOf(vec![
+                "int".to_string(),
+                "char".to_string(),
+                "float".to_string(),
+                "double".to_string(),
+                "void".to_string(),
+                "struct".to_string(),
+            ])),
+            // Identifier
+            PatternRule::new(TokenPattern::Identifier),
+            // Optional parentheses for function or semicolon for variable
+            PatternRule::new(TokenPattern::OneOf(vec!["(".to_string(), ";".to_string()])),
+        ])
+        .min_tokens(4)
+        .priority(880);
+
+        self.register_pattern("extern_declaration".to_string(), extern_declaration_pattern);
+
+        // Static variable pattern
+        let static_variable_pattern = HandlerPattern::new(
+            "static_variable".to_string(),
+            "C static variable declaration".to_string(),
+        )
+        .with_rules(vec![
+            // Static keyword
+            PatternRule::new(TokenPattern::Exact("static".to_string())),
+            // Type
+            PatternRule::new(TokenPattern::TypeKeyword),
+            // Variable name
+            PatternRule::new(TokenPattern::Identifier),
+            // Semicolon or assignment (not function call)
+            PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
+                .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
+        ])
+        .min_tokens(4)
+        .priority(870);
+
+        self.register_pattern("static_variable".to_string(), static_variable_pattern);
+
+        // Global constant pattern
+        let global_constant_pattern = HandlerPattern::new(
+            "global_constant".to_string(),
+            "C global constant declaration".to_string(),
+        )
+        .with_rules(vec![
+            // Const keyword
+            PatternRule::new(TokenPattern::Exact("const".to_string())),
+            // Type
+            PatternRule::new(TokenPattern::TypeKeyword),
+            // Variable name
+            PatternRule::new(TokenPattern::Identifier),
+            // Assignment or semicolon
+            PatternRule::new(TokenPattern::OneOf(vec!["=".to_string(), ";".to_string()])),
+        ])
+        .min_tokens(4)
+        .priority(850);
+
+        self.register_pattern("global_constant".to_string(), global_constant_pattern);
+
+        // Global variable pattern
+        let global_variable_pattern = HandlerPattern::new(
+            "global_variable".to_string(),
+            "C global variable declaration".to_string(),
+        )
+        .with_rules(vec![
+            // Type (not preceded by static, const, extern)
+            PatternRule::new(TokenPattern::TypeKeyword).with_validator(|tokens, pos| {
+                if pos > 0 {
+                    let prev_token = tokens[pos - 1].to_string();
+                    !matches!(prev_token.as_str(), "static" | "const" | "extern")
+                } else {
+                    true
+                }
+            }),
+            // Variable name
+            PatternRule::new(TokenPattern::Identifier),
+            // Semicolon or assignment (not function)
+            PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
+                .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
+        ])
+        .min_tokens(3)
+        .priority(800);
+
+        self.register_pattern("global_variable".to_string(), global_variable_pattern);
 
         // Expression patterns (more restrictive)
         let binary_expression_pattern = HandlerPattern::new(
@@ -1006,7 +1530,9 @@ impl Patternizer {
 
         // Try each pattern in priority order
         for pattern in patterns {
-            match self.match_single_pattern(pattern, tokens) {
+            let pattern_result = self.match_single_pattern(pattern, tokens);
+
+            match pattern_result {
                 PatternResult::Match { consumed_tokens } => {
                     let result = PatternResult::Match { consumed_tokens };
                     self.match_cache.insert(cache_key, result.clone());
@@ -1439,7 +1965,32 @@ pub struct Pattern {
     pub created_at: Instant,
     pub usage_metrics: PatternMetrics,
 }
-
+impl Pattern {
+    pub fn id(&self) -> &Id {
+        &self.id
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+    pub fn token_patterns(&self) -> &Vec<TokenPattern> {
+        &self.token_patterns
+    }
+    pub fn priority(&self) -> u32 {
+        self.priority
+    }
+    pub fn handler_types(&self) -> &Vec<String> {
+        &self.handler_types
+    }
+    pub fn created_at(&self) -> Instant {
+        self.created_at
+    }
+    pub fn usage_metrics(&self) -> &PatternMetrics {
+        &self.usage_metrics
+    }
+}
 /* <<<<<<<<<<<<<<  ✨ Windsurf Command 🌟 >>>>>>>>>>>>>>>> */
 impl Default for Pattern {
     fn default() -> Self {
@@ -1464,12 +2015,12 @@ impl Display for Pattern {
 // === CONTEXT REGISTRY INTEGRATION FUNCTIONS ===
 
 /// Store a pattern in the context registry (simplified with set_value)
-pub fn store_pattern_in_registry(pattern: Pattern) {
+pub fn store_pattern(pattern: Pattern) {
     // Use the same key format that get_pattern() expects: "pattern_" + pattern_id
     let pattern_key = format!("pattern_{}", pattern.id.name());
 
     // Use GlobalContext::with_context for proper shared access to the same global instance
-    Global::context_fn(|ctx| {
+    Global::write(|ctx| {
         let entry = Entry::pattern(pattern.clone());
         ctx.set_entry(&pattern_key, entry);
         println!(
@@ -1532,8 +2083,8 @@ pub fn cache_pattern_match(cached_match: CachedPatternMatch) {
 
     // Use shared context for consistent cache storage
     use crate::config::Global;
-    Global::context_fn(|ctx| {
-        ctx.set_entry(&cache_key, cache_data);
+    Global::write(|ctx| {
+        ctx.set_entry(&cache_key, cache_data.clone());
     });
 }
 
@@ -1544,7 +2095,7 @@ pub fn get_cached_pattern_match(
 ) -> Option<PatternResult> {
     let cache_key = format!("pattern_cache_{}", pattern_id);
 
-    let cache_entry = Global::context_fn(|ctx| ctx.get_entry(&cache_key).cloned());
+    let cache_entry = Global::write(|ctx| ctx.get_entry(&cache_key).cloned());
 
     if let Some(cache_entry) = cache_entry {
         println!("🔍 Cache entry found for key '{}'", cache_key);
@@ -1624,7 +2175,7 @@ pub fn cache_negative_result(pattern_id: &str, tokens: &[Token], mismatch_result
         pattern_id, sequence_fingerprint.signature
     );
 
-    Global::context_fn(|ctx| {
+    Global::write(|ctx| {
         // Store as a list of negative entries for this pattern
         let current_negatives = ctx
             .get_entry(&cache_key)
@@ -1651,7 +2202,7 @@ pub fn check_negative_cache(pattern_id: &str, tokens: &[Token]) -> Option<Patter
     let sequence_fingerprint = generate_sequence_fingerprint(tokens);
     let cache_key = format!("negative_cache_{}", pattern_id);
 
-    Global::context_fn(|ctx| {
+    Global::write(|ctx| {
         if let Some(Entry::List(negative_entries)) = ctx.get_entry(&cache_key) {
             let signature_str = sequence_fingerprint.signature.to_string();
 
@@ -1686,7 +2237,7 @@ pub fn get_cache_statistics() -> CacheStatistics {
     let mut negative_hits = 0;
     let mut total_entries = 0;
 
-    Global::context_fn(|ctx| {
+    Global::write(|ctx| {
         // Count positive cache entries
         for i in 0..1000 {
             // Check first 1000 potential cache keys
@@ -1732,6 +2283,8 @@ pub fn get_cache_statistics() -> CacheStatistics {
 
 /// Register common multi-token patterns with intelligent caching
 pub fn register_common_multi_token_patterns() {
+    let mut context = crate::context!();
+
     // C function declaration pattern: "type identifier ( params )"
     let function_pattern = Pattern {
         id: Id::get("c_function_declaration"),
@@ -1749,42 +2302,50 @@ pub fn register_common_multi_token_patterns() {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    store_pattern_in_registry(function_pattern);
+    context.store_pattern("function", function_pattern);
 
-    // Path-like include pattern: "#include" "path"
-    let include_pattern = Pattern {
-        id: Id::get("c_include_statement"),
-        name: "C Include Statement".to_string(),
-        description: "Matches #include statements with paths".to_string(),
+    // Struct declaration pattern: "struct identifier { ... }"
+    let struct_pattern = Pattern {
+        id: Id::get("c_struct_declaration"),
+        name: "C Struct Declaration".to_string(),
+        description: "Matches C struct declarations and definitions".to_string(),
         token_patterns: vec![
-            TokenPattern::Exact("#".to_string()),
-            TokenPattern::Exact("include".to_string()),
-            TokenPattern::PathLike,
+            TokenPattern::Exact("struct".to_string()),
+            TokenPattern::Identifier,
+            TokenPattern::Exact("{".to_string()),
+            TokenPattern::Any, // Fields
+            TokenPattern::Exact("}".to_string()),
+        ],
+        priority: 95,
+        handler_types: vec!["struct".to_string()],
+        created_at: Instant::now(),
+        usage_metrics: PatternMetrics::default(),
+    };
+    context.store_pattern("struct", struct_pattern);
+
+    // Enum declaration pattern: "enum identifier { ... }"
+    let enum_pattern = Pattern {
+        id: Id::get("c_enum_declaration"),
+        name: "C Enum Declaration".to_string(),
+        description: "Matches C enum declarations and definitions".to_string(),
+        token_patterns: vec![
+            TokenPattern::Exact("enum".to_string()),
+            TokenPattern::Identifier,
+            TokenPattern::Exact("{".to_string()),
+            TokenPattern::Any, // Values
+            TokenPattern::Exact("}".to_string()),
         ],
         priority: 90,
-        handler_types: vec!["preprocessor".to_string()],
+        handler_types: vec!["enum".to_string()],
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    store_pattern_in_registry(include_pattern);
-
-    // Complex identifier with embedded operators
-    let complex_identifier_pattern = Pattern {
-        id: Id::get("complex_identifier"),
-        name: "Complex Identifier".to_string(),
-        description: "Matches identifiers with embedded special characters".to_string(),
-        token_patterns: vec![TokenPattern::IdentifierWithChars(vec!['-', '_'])],
-        priority: 80,
-        handler_types: vec!["variable".to_string(), "function".to_string()],
-        created_at: Instant::now(),
-        usage_metrics: PatternMetrics::default(),
-    };
-    store_pattern_in_registry(complex_identifier_pattern);
+    context.store_pattern("enum", enum_pattern);
 
     // Array declaration pattern: "type identifier [ size ]"
     let array_pattern = Pattern {
-        id: Id::get("c_array_declaration"),
-        name: "C Array Declaration".to_string(),
+        id: Id::get("array_declaration"),
+        name: "Array Declaration".to_string(),
         description: "Matches C array declarations".to_string(),
         token_patterns: vec![
             TokenPattern::TypeKeyword,
@@ -1798,68 +2359,93 @@ pub fn register_common_multi_token_patterns() {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    store_pattern_in_registry(array_pattern);
+    context.store_pattern("array", array_pattern);
+
+    // If statement pattern: "if ( condition )"
+    let if_pattern = Pattern {
+        id: Id::get("c_if_statement"),
+        name: "C If Statement".to_string(),
+        description: "Matches C if statements".to_string(),
+        token_patterns: vec![
+            TokenPattern::Exact("if".to_string()),
+            TokenPattern::Exact("(".to_string()),
+            TokenPattern::Any, // Condition
+            TokenPattern::Exact(")".to_string()),
+        ],
+        priority: 80,
+        handler_types: vec!["if".to_string()],
+        created_at: Instant::now(),
+        usage_metrics: PatternMetrics::default(),
+    };
+    context.store_pattern("if", if_pattern);
 }
 
 /// Enhanced pattern matching with context registry caching (simplified with get_value)
 pub fn match_pattern_with_registry_cache(pattern_id: &str, tokens: &[Token]) -> PatternResult {
     let start_time = Instant::now();
 
-    // Check cache first
+    // Check negative cache first - fastest path
+    if let Some(negative_result) = check_negative_cache(pattern_id, tokens) {
+        return negative_result;
+    }
+
+    // Check positive cache
     if let Some(cached_result) = get_cached_pattern_match(pattern_id, tokens) {
-        // Update hit metrics (simplified)
         return cached_result;
     }
 
     // Look up the pattern using the new dedicated get_pattern function
-
-    // Use the new dedicated get_pattern function that bypasses dyn Any entirely
-    match Global::context().get_pattern(pattern_id) {
+    match crate::context!().get_pattern(pattern_id) {
         Some(pattern) => {
             // Match this pattern against the tokens
             let result = match_multi_token_pattern(pattern, tokens);
             let match_time = start_time.elapsed();
 
-            // Cache successful matches
-            if let PatternResult::Match { .. } = result {
-                let sequence_fingerprint = generate_sequence_fingerprint(tokens);
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                pattern_id.hash(&mut hasher);
-                let pattern_hash = hasher.finish();
+            match &result {
+                PatternResult::Match { .. } => {
+                    // Cache successful matches
+                    let sequence_fingerprint = generate_sequence_fingerprint(tokens);
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    pattern_id.hash(&mut hasher);
+                    let pattern_hash = hasher.finish();
 
-                let cached_match = CachedPatternMatch {
-                    pattern_id: pattern_id.to_string(),
-                    token_sequence: tokens.iter().map(|t| t.to_string()).collect(),
-                    match_result: result.clone(),
-                    hit_count: 1,
-                    last_used: Instant::now(),
-                    performance_metrics: PatternMetrics {
-                        total_matches: 1,
-                        total_misses: 0,
-                        average_match_time: match_time,
-                        cache_hit_ratio: 1.0,
-                    },
-                    // New enhanced caching fields
-                    sequence_fingerprint,
-                    is_positive: true,
-                    negative_reason: None,
-                    access_count: 1,
-                    pattern_hash,
-                };
-                cache_pattern_match(cached_match);
+                    let cached_match = CachedPatternMatch {
+                        pattern_id: pattern_id.to_string(),
+                        token_sequence: tokens.iter().map(|t| t.to_string()).collect(),
+                        match_result: result.clone(),
+                        hit_count: 1,
+                        last_used: Instant::now(),
+                        performance_metrics: PatternMetrics {
+                            total_matches: 1,
+                            total_misses: 0,
+                            average_match_time: match_time,
+                            cache_hit_ratio: 1.0,
+                        },
+                        sequence_fingerprint,
+                        is_positive: true,
+                        negative_reason: None,
+                        access_count: 1,
+                        pattern_hash,
+                    };
+                    cache_pattern_match(cached_match);
+                }
+                _ => {
+                    // Cache negative results for failed matches
+                    cache_negative_result(pattern_id, tokens, result.clone());
+                }
             }
-
             result
         }
-        _ => {
-            println!("❌ Pattern '{}' not found in registry", pattern_id);
-            PatternResult::NoMatch {
-                reason: format!("No patterns registered for handler: {}", pattern_id),
-            }
+        None => {
+            let no_match_result = PatternResult::NoMatch {
+                reason: format!("Pattern '{}' not registered", pattern_id),
+            };
+            // Cache this negative result too
+            cache_negative_result(pattern_id, tokens, no_match_result.clone());
+            no_match_result
         }
     }
 }
-
 /// Match a Patternizer against a token sequence
 fn match_multi_token_pattern(pattern: &Pattern, tokens: &[Token]) -> PatternResult {
     println!(
@@ -1945,6 +2531,7 @@ fn match_multi_token_pattern(pattern: &Pattern, tokens: &[Token]) -> PatternResu
 }
 
 /// Match a registry-stored pattern against tokens
+#[allow(dead_code)]
 fn match_registry_pattern_against_tokens(
     pattern_data: &HashMap<String, crate::entry::Entry>,
     tokens: &[Token],
@@ -2045,20 +2632,20 @@ pub fn create_patternizer_with_common_patterns() -> Patternizer {
 
 /// Initialize common patterns in the global context patternizer
 pub fn initialize_common_patterns() {
-    Global::context_fn(|ctx| ctx.patternizer.initialize_common_patterns());
+    Global::write(|ctx| ctx.patternizer.initialize_common_patterns());
 }
 
 /// Match patterns for a handler using the global context patternizer  
 pub fn match_handler_pattern(handler_type: &str, tokens: &[Token]) -> PatternResult {
-    Global::context_fn(|ctx| ctx.patternizer.match_pattern(handler_type, tokens))
+    Global::write(|ctx| ctx.patternizer.match_pattern(handler_type, tokens))
 }
 
 /// Check if tokens should be rejected by any handler using the global context patternizer
 pub fn should_reject_tokens(handler_type: &str, tokens: &[Token]) -> bool {
-    Global::context_fn(|ctx| ctx.patternizer.should_reject_tokens(handler_type, tokens))
+    Global::write(|ctx| ctx.patternizer.should_reject_tokens(handler_type, tokens))
 }
 
 /// Get pattern statistics from the global context patternizer (read-only)
 pub fn get_pattern_stats() -> std::collections::HashMap<String, usize> {
-    Global::context_fn(|ctx| ctx.patternizer.get_stats())
+    Global::write(|ctx| ctx.patternizer.get_stats())
 }

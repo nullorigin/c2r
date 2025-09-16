@@ -1,18 +1,178 @@
-use super::common::{find_matching_token, not_handled, replace_with_range};
-use crate::error::ConversionError;
-use crate::extract::ExtractedElement;
-use crate::extract::ExtractedMacro;
-use crate::handler::HandlerResult;
-use crate::{ConvertedElement, ConvertedMacro, context, report};
-use crate::{
-    HandlerPhase::{Convert, Handle, Process, Report},
-    HandlerReport,
-    ReportLevel::{Error, Info, Warning},
-};
-use crate::{Id, Token};
-use std::collections::HashMap;
+//! Macro handler for C to Rust preprocessor conversion
+//! Uses Patternizer exclusively for detection and conversion
 
-/// Creates a macro handler that can detect and convert C preprocessor macros
+use crate::{
+    C2RError, ConvertedElement, ConvertedMacro, ElementInfo, ExtractedElement, ExtractedMacro,
+    HandlerPhase::{self, Extract, Handle, Process, Report},
+    HandlerReport, HandlerResult, Id, Kind, MacroInfo, PatternResult, Patternizer, Reason,
+    ReportLevel::{self, Info, Warning},
+    Token, context, not_handled, report,
+};
+use std::ops::Range;
+
+/// Report callback: Collects macro handler reports
+pub fn report_macro() -> Result<HandlerReport, C2RError> {
+    let context = context!();
+    let reports = context.get_reports_by_handler("macro_handler");
+
+    let (info_count, warning_count, error_count) =
+        reports
+            .iter()
+            .fold((0, 0, 0), |acc, report| match report.level {
+                ReportLevel::Error => (acc.0, acc.1, acc.2 + 1),
+                ReportLevel::Warning => (acc.0, acc.1 + 1, acc.2),
+                _ => (acc.0 + 1, acc.1, acc.2),
+            });
+
+    Ok(HandlerReport {
+        report_id: Box::new(Id::get(&Id::gen_name("macro_handler"))),
+        handler_id: Box::new(Id::get("macro_handler")),
+        handler_name: "macro_handler".to_string(),
+        function_name: "report_macro".to_string(),
+        message: format!(
+            "Macro handler summary: {} reports ({} info, {} warnings, {} errors)",
+            reports.len(),
+            info_count,
+            warning_count,
+            error_count
+        ),
+        level: match (error_count, warning_count) {
+            (0, 0) => ReportLevel::Info,
+            (0, _) => ReportLevel::Warning,
+            _ => ReportLevel::Error,
+        },
+        tokens_processed: reports.len(),
+        tokens_consumed: 0,
+        phase: HandlerPhase::Report,
+        success: error_count == 0,
+        metadata: std::collections::HashMap::new(),
+    })
+}
+
+/// Handle callback: Delegates to extract for recursive window expansion
+fn handle_macro(token_range: Range<usize>) -> Result<HandlerResult, C2RError> {
+    report!(
+        "macro_handler",
+        "handle_macro",
+        Info,
+        Handle,
+        "Delegating to extract for recursive window expansion",
+        true
+    );
+
+    // Delegate to extract callback for recursive processing
+    match extract_macro(token_range.clone())? {
+        Some(ExtractedElement::Macro(extracted_macro)) => {
+            let code = extracted_macro.code.clone();
+            let mut context = crate::context!();
+            context.pull();
+            let consumed_tokens = if code.is_empty() {
+                2
+            } else {
+                context.tokens[token_range.clone()].len().min(8)
+            };
+
+            // Convert the extracted macro to a ConvertedElement
+            let definition = extracted_macro
+                .body
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let converted_macro = ConvertedMacro {
+                parameters: if extracted_macro.is_function_like {
+                    extracted_macro.params.clone()
+                } else {
+                    Vec::new()
+                },
+                body: definition,
+                code,
+                is_function_like: extracted_macro.is_function_like,
+            };
+
+            Ok(HandlerResult::Converted(
+                ConvertedElement::Macro(converted_macro),
+                0..consumed_tokens,
+                extracted_macro.code,
+                Id::get("macro_handler"),
+            ))
+        }
+        _ => {
+            report!(
+                "macro_handler",
+                "handle_macro",
+                Warning,
+                Handle,
+                "Extract did not find valid macro",
+                false
+            );
+            not_handled()
+        }
+    }
+}
+
+/// Process callback: Lightweight detection using minimum tokens (2 tokens: #define, #include)
+fn process_macro(token_range: Range<usize>) -> Result<bool, C2RError> {
+    const MIN_MACRO_TOKENS: usize = 2; // #define, #include
+
+    let mut context = crate::context!();
+    context.pull();
+
+    // Add bounds checking to prevent slice index out of bounds
+    if token_range.end > context.tokens.len() || token_range.start >= context.tokens.len() {
+        return Ok(false);
+    }
+
+    if context.tokens[token_range.clone()].len() < MIN_MACRO_TOKENS {
+        return Ok(false);
+    }
+
+    report!(
+        "macro_handler",
+        "process_macro",
+        Info,
+        Process,
+        format!(
+            "Lightweight macro detection on {} tokens",
+            context.tokens[token_range.clone()].len()
+        ),
+        true
+    );
+
+    // Check for specific preprocessor directives, not just any '#'
+    let first_token = context.tokens[token_range.clone()][0].to_string();
+    if !first_token.starts_with('#') {
+        return Ok(false);
+    }
+
+    // Ensure we have a valid macro directive after the '#'
+    // BUT exclude 'include' directives - let include_handler handle those
+    if context.tokens[token_range.clone()].len() >= 2 {
+        let second_token = context.tokens[token_range.clone()][1].to_string();
+        let is_valid_directive = match second_token.as_str() {
+            "define" | "ifdef" | "ifndef" | "endif" | "else" | "elif" | "undef" | "pragma"
+            | "error" | "warning" | "line" => true,
+            "include" => false, // Let include_handler handle this
+            _ => false,
+        };
+
+        if is_valid_directive {
+            report!(
+                "macro_handler",
+                "process_macro",
+                Info,
+                Process,
+                format!("Found valid macro directive: #{}", second_token),
+                true
+            );
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+/// Creates a macro handler that uses Patternizer exclusively
 pub fn create_macro_handler() -> crate::handler::Handler {
     let handler_id = Id::get("macro_handler");
     let handler_role = "macro";
@@ -26,944 +186,185 @@ pub fn create_macro_handler() -> crate::handler::Handler {
         Some(handle_macro),
         Some(extract_macro),
         Some(convert_macro),
+        Some(document_macro),
         Some(report_macro),
-        Some(result_macro),
-        Some(redirect_macro),
+        Some(result_macro),   // Result callback for final processing
+        Some(redirect_macro), // Redirect callback for nested structures
     )
 }
 
-/// Report callback: Collects and summarizes all macro-related reports from the context
-fn report_macro(_tokens: &[Token]) -> Result<HandlerReport, ConversionError> {
-    let context = context!();
-    // Get all reports for this handler
-    let reports = context.get_reports_by_handler("macro");
-
-    // Count reports by level
-    let mut info_count = 0;
-    let mut warning_count = 0;
-    let mut error_count = 0;
-
-    for report in &reports {
-        match report.level {
-            Info => info_count += 1,
-            Warning => warning_count += 1,
-            Error => error_count += 1,
-            _ => info_count += 1, // Handle Debug and other variants as info
-        }
-    }
-
-    // Create summary report
-    Ok(HandlerReport {
-        report_id: Box::new(Id::get(&Id::gen_name("macro_handler"))),
-        handler_id: Box::new(Id::get("macro_handler")),
-        handler_name: "macro".to_string(),
-        function_name: "report_macro".to_string(),
-        message: format!(
-            "Macro handler summary: {} reports ({} info, {} warnings, {} errors)",
-            reports.len(),
-            info_count,
-            warning_count,
-            error_count
-        ),
-        level: if error_count > 0 {
-            Error
-        } else if warning_count > 0 {
-            Warning
-        } else {
-            Info
-        },
-        tokens_processed: reports.len(),
-        tokens_consumed: 0,
-        phase: Report,
-        success: error_count == 0,
-        metadata: HashMap::new(),
-    })
-}
-
-/// Process callback: Initializes and confirms this handler can handle the tokens
-pub(crate) fn process_macro(tokens: &[Token]) -> Result<bool, ConversionError> {
-    // Validate input
-    if tokens.is_empty() {
-        return Ok(false);
-    }
-
-    // Check for preprocessor directives starting with #
-    if tokens[0].to_string() == "#" && tokens.len() >= 2 {
-        let directive = tokens[1].to_string();
-        return match directive.as_str() {
-            "define" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    "Macro definition detected",
-                    true
-                );
-                Ok(true)
-            }
-            "ifdef" | "ifndef" | "if" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    format!("Conditional compilation start detected: {}", directive),
-                    true
-                );
-                Ok(true)
-            }
-            "else" | "elif" | "endif" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    format!(
-                        "Conditional compilation continuation/end detected: {}",
-                        directive
-                    ),
-                    true
-                );
-                Ok(true)
-            }
-            "undef" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    "Macro undefinition detected",
-                    true
-                );
-                Ok(true)
-            }
-            "pragma" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    "Pragma directive detected",
-                    true
-                );
-                Ok(true)
-            }
-            "error" | "warning" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    format!("Compiler directive detected: {}", directive),
-                    true
-                );
-                Ok(true)
-            }
-            "line" => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    "Line directive detected",
-                    true
-                );
-                Ok(true)
-            }
-            _ => {
-                report!(
-                    "macro_handler",
-                    "process_macro",
-                    Info,
-                    Process,
-                    format!("Unknown preprocessor directive: {}", directive),
-                    true
-                );
-                Ok(true) // Try to handle unknown directives
-            }
-        };
-    }
-
-    Ok(false)
-}
-
-/// Processes a preprocessor macro
-pub(crate) fn handle_macro(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
+/// Redirect callback: Handles nested structures within macros
+pub fn redirect_macro(
+    token_range: Range<usize>,
+    result: HandlerResult,
+) -> Result<HandlerResult, C2RError> {
     report!(
         "macro_handler",
-        "handle_macro",
+        "redirect_macro",
         Info,
-        Handle,
-        "Macro handler processing tokens",
-        true
-    );
-    let id = Id::get("handle_macro");
-    if tokens.is_empty() || tokens[0].to_string() != "#" || tokens.len() < 2 {
-        return not_handled();
-    }
-
-    let directive = tokens[1].to_string();
-    match directive.as_str() {
-        "define" => handle_define(tokens),
-        "ifdef" | "ifndef" => handle_ifdef(tokens),
-        "if" => handle_if(tokens),
-        "else" => handle_else(tokens),
-        "elif" => handle_elif(tokens),
-        "endif" => handle_endif(tokens),
-        "undef" => handle_undef(tokens),
-        "pragma" => handle_pragma(tokens),
-        "error" | "warning" => handle_message(tokens),
-        _ => not_handled(),
-    }
-}
-
-/// Handles #define directive
-pub(crate) fn handle_define(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_define");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    let macro_name = tokens[2].to_string();
-    report!(
-        "macro_handler",
-        "handle_macro",
-        Info,
-        Handle,
-        format!("Found #define: {}", macro_name),
+        HandlerPhase::Convert,
+        "Checking macro for nested structures",
         true
     );
 
-    // Check if this is a function-like macro
-    let is_function_like = tokens.len() > 3 && tokens[3].to_string() == "(";
+    // Check if this macro defines or contains structs, enums, or functions
+    let mut i = 0;
+    let mut processed_tokens = Vec::new();
+    let mut context = crate::context!();
+    context.pull();
 
-    if is_function_like {
-        return handle_function_macro(tokens);
+    // Add bounds checking to prevent slice index out of bounds
+    if token_range.end > context.tokens.len() || token_range.start >= context.tokens.len() {
+        return Ok(HandlerResult::NotHandled(
+            Some(processed_tokens),
+            token_range,
+            Id::get("macro_bounds_check"),
+        ));
     }
 
-    // Object-like macro
-    let mut macro_value = String::new();
-
-    // Extract macro value (everything after the name)
-    if tokens.len() > 3 {
-        for i in 3..tokens.len() {
-            macro_value.push_str(&tokens[i].to_string());
-            if i < tokens.len() - 1 {
-                macro_value.push(' ');
-            }
-        }
-    }
-
-    // Convert to Rust
-    let rust_code = convert_object_macro_to_rust(&macro_name, &macro_value)?;
-
-    // Calculate token consumption range for object-like macro
-    // Consume entire macro definition (from #define to end of line)
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles function-like macros (#define FOO(x, y) ...)
-fn handle_function_macro(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let macro_name = tokens[2].to_string();
-    report!(
-        "macro_handler",
-        "handle_function_macro",
-        Info,
-        Handle,
-        format!("Found function-like #define: {}", macro_name),
-        true
-    );
-    let id = Id::get("handle_function_macro");
-    // Find the closing parenthesis for parameters
-    let open_paren_idx = 3; // Position of the opening parenthesis
-    let close_paren_idx = match find_matching_token(&tokens[open_paren_idx..], "(", ")") {
-        Some(pos) => open_paren_idx + pos + 1,
-        None => {
-            report!(
-                "macro_handler",
-                "handle_function_macro",
-                Error,
-                Handle,
-                "Could not find closing parenthesis for macro parameters",
-                true
-            );
-            return not_handled();
-        }
-    };
-
-    // Extract parameter list
-    let param_tokens = &tokens[open_paren_idx + 1..close_paren_idx];
-    let params = extract_macro_params(param_tokens, 0);
-
-    // Extract macro body (everything after the closing parenthesis)
-    let mut macro_body = String::new();
-    if close_paren_idx + 1 < tokens.len() {
-        for i in close_paren_idx + 1..tokens.len() {
-            macro_body.push_str(&tokens[i].to_string());
-            if i < tokens.len() - 1 {
-                macro_body.push(' ');
-            }
-        }
-    }
-
-    // Convert to Rust
-    let rust_code = convert_function_macro_to_rust(&macro_name, &params, &macro_body)?;
-
-    // Calculate token consumption range for function-like macro
-    // Consume entire macro definition (from #define to end of line)
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles #ifdef and #ifndef directives
-pub(crate) fn handle_ifdef(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_ifdef");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    let directive = tokens[1].to_string();
-    let is_ifndef = directive == "ifndef";
-    let feature_name = tokens[2].to_string();
-
-    report!(
-        "macro_handler",
-        "handle_ifdef",
-        Info,
-        Handle,
-        format!("Found #{}: {}", directive, feature_name),
-        true
-    );
-
-    // Convert to Rust
-    let rust_code = if is_ifndef {
-        format!("#[cfg(not(feature = \"{}\"))]\n", feature_name)
-    } else {
-        format!("#[cfg(feature = \"{}\")]\n", feature_name)
-    };
-    let id = Id::get("ifdef");
-    // Calculate token consumption range for #ifdef/#ifndef
-    // Consume from # to feature name
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles #if directive
-fn handle_if(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_if");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    // Extract the condition
-    let mut condition = String::new();
-    for i in 2..tokens.len() {
-        condition.push_str(&tokens[i].to_string());
-        if i < tokens.len() - 1 {
-            condition.push(' ');
-        }
-    }
-
-    report!(
-        "macro_handler",
-        "handle_if",
-        Info,
-        Handle,
-        format!("Found #if: {}", condition),
-        true
-    );
-
-    // Try to convert the condition to a Rust cfg expression
-    let rust_condition = convert_condition_to_cfg_expr(&condition);
-
-    // Convert to Rust
-    let rust_code = format!("#[cfg({})]\n", rust_condition);
-    let id = Id::get("if");
-    // Calculate token consumption range for #if
-    // Consume entire #if directive
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles #else directive
-fn handle_else(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    report!(
-        "macro_handler",
-        "handle_else",
-        Info,
-        Handle,
-        "Found #else",
-        true
-    );
-    let id = Id::get("handle_else");
-    // Convert to Rust
-    // Calculate token consumption range for #else
-    // Consume entire #else directive
-    let token_range = 0..tokens.len();
-    replace_with_range("#[cfg(not(any()))]\n".to_string(), token_range, id)
-}
-
-/// Handles #elif directive
-fn handle_elif(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_elif");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    // Extract the condition
-    let mut condition = String::new();
-    for i in 2..tokens.len() {
-        condition.push_str(&tokens[i].to_string());
-        if i < tokens.len() - 1 {
-            condition.push(' ');
-        }
-    }
-
-    report!(
-        "macro_handler",
-        "handle_elif",
-        Info,
-        Handle,
-        format!("Found #elif: {}", condition),
-        true
-    );
-
-    // Try to convert the condition to a Rust cfg expression
-    let rust_condition = convert_condition_to_cfg_expr(&condition);
-
-    // Convert to Rust
-    let rust_code = format!("#[cfg({})]\n", rust_condition);
-    let id = Id::get("elif");
-    // Calculate token consumption range for #elif
-    // Consume entire #elif directive
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles #endif directive
-fn handle_endif(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_endif");
-    report!(
-        "macro_handler",
-        "handle_endif",
-        Info,
-        Handle,
-        "Found #endif",
-        true
-    );
-    // In Rust, conditional compilation is done with attributes, so #endif doesn't need a direct equivalent
-    // Calculate token consumption range for #endif
-    // Consume entire #endif directive
-    let token_range = 0..tokens.len();
-    replace_with_range("".to_string(), token_range, id)
-}
-
-/// Handles #undef directive
-pub(crate) fn handle_undef(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_ifdef");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    let macro_name = tokens[2].to_string();
-    report!(
-        "macro_handler",
-        "handle_undef",
-        Info,
-        Handle,
-        format!("Found #undef: {}", macro_name),
-        true
-    );
-
-    // No direct equivalent in Rust, add a comment
-    let rust_code = format!("// #undef {} (no direct Rust equivalent)\n", macro_name);
-
-    // Calculate token consumption range for #undef
-    // Consume entire #undef directive
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles #pragma directive
-fn handle_pragma(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_pragma");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    // Extract the pragma text
-    let mut pragma_text = String::new();
-    for i in 2..tokens.len() {
-        pragma_text.push_str(&tokens[i].to_string());
-        if i < tokens.len() - 1 {
-            pragma_text.push(' ');
-        }
-    }
-
-    report!(
-        "macro_handler",
-        "handle_pragma",
-        Info,
-        Handle,
-        format!("Found #pragma: {}", pragma_text),
-        true
-    );
-
-    // Convert to Rust
-    let rust_code = match pragma_text.split_whitespace().next() {
-        Some("once") => "#[allow(dead_code)]\n".to_string(),
-        Some("pack") => "#[repr(packed)]\n".to_string(),
-        _ => format!("// #pragma {} (no direct Rust equivalent)\n", pragma_text),
-    };
-
-    // Calculate token consumption range for #pragma
-    // Consume entire #pragma directive
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Handles #error and #warning directives
-fn handle_message(tokens: &[Token]) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("handle_message");
-    if tokens.len() < 3 {
-        return not_handled();
-    }
-
-    let directive = tokens[1].to_string();
-
-    // Extract the message text
-    let mut message = String::new();
-    for i in 2..tokens.len() {
-        message.push_str(&tokens[i].to_string());
-        if i < tokens.len() - 1 {
-            message.push(' ');
-        }
-    }
-
-    report!(
-        "macro_handler",
-        "handle_error_warning",
-        Info,
-        Handle,
-        format!("Found #{}: {}", directive, message),
-        true
-    );
-
-    // Convert to Rust
-    let rust_code = if directive == "error" {
-        format!("compile_error!(\"{}\");\n", message.replace("\"", "\\\""))
-    } else {
-        format!("// #warning {} (converted to comment)\n", message)
-    };
-
-    // Calculate token consumption range for #error/#warning
-    // Consume entire directive
-    let token_range = 0..tokens.len();
-    replace_with_range(rust_code, token_range, id)
-}
-
-/// Extracts a macro as an ExtractedElement
-pub fn extract_macro(tokens: &[Token]) -> Result<Option<ExtractedElement>, ConversionError> {
-    if tokens.is_empty() || tokens[0].to_string() != "#" || tokens.len() < 2 {
-        return Ok(None);
-    }
-
-    let directive = tokens[1].to_string();
-    if directive != "define" {
-        // Only extract #define macros for now
-        return Ok(None);
-    }
-
-    if tokens.len() < 3 {
-        return Ok(None);
-    }
-
-    let macro_name = tokens[2].to_string();
-
-    // Check if this is a function-like macro
-    let is_function_like = tokens.len() > 3 && tokens[3].to_string() == "(";
-
-    let mut params = Vec::new();
-    let mut macro_body = Vec::<Token>::new();
-
-    if is_function_like {
-        // Find the closing parenthesis for parameters
-        let open_paren_idx = 3; // Position of the opening parenthesis
-        let close_paren_idx = match find_matching_token(&tokens[open_paren_idx..], "(", ")") {
-            Some(pos) => open_paren_idx + pos + 1,
-            None => return Ok(None),
-        };
-
-        // Extract parameter list
-        let param_tokens = &tokens[open_paren_idx + 1..close_paren_idx];
-        params = extract_macro_params(param_tokens, 0);
-
-        // Extract macro body
-        if close_paren_idx + 1 < tokens.len() {
-            for i in close_paren_idx + 1..tokens.len() {
-                macro_body.push(tokens[i].clone());
-                if i < tokens.len() - 1 {
-                    macro_body.push(Token::l(" "));
-                }
-            }
-        }
-    } else {
-        // Object-like macro
-        // Extract macro value
-        if tokens.len() > 3 {
-            for i in 3..tokens.len() {
-                macro_body.push(tokens[i].clone());
-                if i < tokens.len() - 1 {
-                    macro_body.push(Token::l(" "));
-                }
-            }
-        }
-    }
-
-    let extracted_macro = ExtractedMacro {
-        name: macro_name,
-        params,
-        body: macro_body,
-        tokens: tokens.to_vec(),
-        is_function_like,
-        original_code: tokens
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" "),
-    };
-
-    Ok(Some(ExtractedElement::Macro(extracted_macro)))
-}
-
-/// Converts a C object-like macro to Rust
-fn convert_object_macro_to_rust(name: &str, value: &str) -> Result<String, ConversionError> {
-    let mut rust_code = String::new();
-
-    // Special cases for common macros
-    match name {
-        "NULL" => {
-            rust_code.push_str("// NULL is not needed in Rust, using None or null pointer\n");
-            rust_code.push_str("pub const NULL: *const std::ffi::c_void = std::ptr::null();\n");
-        }
-        "TRUE" | "true" => {
-            rust_code.push_str("// TRUE is built-in as true in Rust\n");
-            rust_code.push_str("pub const TRUE: bool = true;\n");
-        }
-        "FALSE" | "false" => {
-            rust_code.push_str("// FALSE is built-in as false in Rust\n");
-            rust_code.push_str("pub const FALSE: bool = false;\n");
-        }
-        _ => {
-            // Try to determine the type of the value
-            if value.is_empty() {
-                // Empty macro
-                rust_code.push_str(&format!("// Empty macro {}\n", name));
-                rust_code.push_str(&format!("pub const {}: () = ();\n", name));
-            } else if value.starts_with("\"") && value.ends_with("\"") {
-                // String literal
-                rust_code.push_str(&format!("pub const {}: &str = {};\n", name, value));
-            } else if value.parse::<i64>().is_ok() {
-                // Integer literal
-                rust_code.push_str(&format!("pub const {}: i32 = {};\n", name, value));
-            } else if value.parse::<f64>().is_ok() {
-                // Float literal
-                rust_code.push_str(&format!("pub const {}: f64 = {};\n", name, value));
-            } else {
-                // Other/unknown type
-                rust_code.push_str(&format!(
-                    "// Original C macro: #define {} {}\n",
-                    name, value
-                ));
-                rust_code.push_str(&format!(
-                    "pub const {}: &str = \"{}\";\n",
-                    name,
-                    value.replace("\"", "\\\"")
-                ));
-                rust_code.push_str(&format!(
-                    "// TODO: Verify the type of {} is correct\n",
-                    name
-                ));
-            }
-        }
-    }
-
-    Ok(rust_code)
-}
-
-/// Converts a C function-like macro to Rust
-fn convert_function_macro_to_rust(
-    name: &str,
-    params: &[String],
-    body: &str,
-) -> Result<String, ConversionError> {
-    let mut rust_code = String::new();
-
-    // Special cases for common function-like macros
-    match name {
-        "MIN" | "min" => {
-            rust_code.push_str("#[inline]\n");
-            rust_code.push_str("#[allow(dead_code)]\n");
-            rust_code.push_str(&format!(
-                "pub fn {}(a: impl PartialOrd, b: impl PartialOrd) -> impl PartialOrd {{\n",
-                name.to_lowercase()
-            ));
-            rust_code.push_str("    if a < b { a } else { b }\n");
-            rust_code.push_str("}\n");
-        }
-        "MAX" | "max" => {
-            rust_code.push_str("#[inline]\n");
-            rust_code.push_str("#[allow(dead_code)]\n");
-            rust_code.push_str(&format!(
-                "pub fn {}(a: impl PartialOrd, b: impl PartialOrd) -> impl PartialOrd {{\n",
-                name.to_lowercase()
-            ));
-            rust_code.push_str("    if a > b { a } else { b }\n");
-            rust_code.push_str("}\n");
-        }
-        "ABS" | "abs" => {
-            rust_code.push_str("#[inline]\n");
-            rust_code.push_str("#[allow(dead_code)]\n");
-            rust_code.push_str(&format!("pub fn {}(a: impl PartialOrd + std::ops::Neg<Output = impl PartialOrd>) -> impl PartialOrd {{\n", name.to_lowercase()));
-            rust_code.push_str("    if a < 0 { -a } else { a }\n");
-            rust_code.push_str("}\n");
-        }
-        _ => {
-            // Generic function-like macro conversion as a Rust macro
-            rust_code.push_str("// Original C macro: #define ");
-            rust_code.push_str(name);
-            rust_code.push('(');
-            rust_code.push_str(&params.join(", "));
-            rust_code.push_str(") ");
-            rust_code.push_str(body);
-            rust_code.push_str("\n");
-
-            rust_code.push_str("#[macro_export]\n");
-            rust_code.push_str("#[allow(unused_macros)]\n");
-            rust_code.push_str(&format!("macro_rules! {} {{\n", name.to_lowercase()));
-            rust_code.push_str("    (");
-
-            // Generate pattern for each parameter
-            for (i, param) in params.iter().enumerate() {
-                if i > 0 {
-                    rust_code.push_str(", ");
-                }
-                rust_code.push_str(&format!("${}: expr", param));
-            }
-
-            rust_code.push_str(") => {{\n");
-
-            // Generate the body with parameter replacements
-            let mut macro_body = body.to_string();
-            for param in params {
-                let pattern = param.to_string();
-                let replacement = format!("${}", param);
-                macro_body = macro_body.replace(&pattern, &replacement);
-            }
-
-            rust_code.push_str(&format!("        {}\n", macro_body));
-            rust_code.push_str("    };\n");
-            rust_code.push_str("}\n");
-
-            // Also provide a function version if possible
-            rust_code.push_str("\n// Function version of the macro\n");
-            rust_code.push_str("#[inline]\n");
-            rust_code.push_str("#[allow(dead_code)]\n");
-            rust_code.push_str(&format!("pub fn {}(", name.to_lowercase()));
-
-            // Function parameters
-            for (i, param) in params.iter().enumerate() {
-                if i > 0 {
-                    rust_code.push_str(", ");
-                }
-                rust_code.push_str(&format!("{}: impl std::fmt::Debug", param.to_lowercase()));
-            }
-
-            rust_code.push_str(") -> impl std::fmt::Debug {\n");
-            rust_code.push_str("    // TODO: Implement this function based on the macro logic\n");
-            rust_code.push_str("    todo!(\"Implement function version of macro\")\n");
-            rust_code.push_str("}\n");
-        }
-    }
-
-    Ok(rust_code)
-}
-
-/// Converts a C preprocessor condition to a Rust cfg expression
-fn convert_condition_to_cfg_expr(condition: &str) -> String {
-    // This is a simplified converter - a real implementation would need to handle complex expressions
-
-    // Common patterns
-    match condition.trim() {
-        "defined(DEBUG)" => return "debug_assertions".to_string(),
-        "defined(NDEBUG)" => return "not(debug_assertions)".to_string(),
-        "DEBUG" => return "debug_assertions".to_string(),
-        _ => {}
-    }
-
-    // Fallback - use the condition as a feature flag
-    format!("feature = \"{}\"", condition.trim())
-}
-
-/// Convert callback: Does the actual conversion of C to Rust code
-fn convert_macro(tokens: &[Token]) -> Result<Option<ConvertedElement>, ConversionError> {
-    report!(
-        "macro_handler",
-        "convert_macro",
-        Info,
-        Convert,
-        format!("Converting macro from {} tokens", tokens.len()),
-        true
-    );
-
-    if tokens.is_empty() || tokens[0].to_string() != "#" || tokens.len() < 2 {
-        return Ok(None);
-    }
-
-    let directive = tokens[1].to_string();
-    let rust_code = match directive.as_str() {
-        "define" => {
-            if tokens.len() < 3 {
-                return Ok(None);
-            }
-
-            let macro_name = tokens[2].to_string();
-            let is_function_like = tokens.len() > 3 && tokens[3].to_string() == "(";
-
-            if is_function_like {
-                // Extract parameters and body for function-like macro
-                let open_paren_idx = 3;
-                let close_paren_idx = match find_matching_token(&tokens[open_paren_idx..], "(", ")")
-                {
-                    Some(pos) => open_paren_idx + pos + 1,
-                    None => return Ok(None),
-                };
-
-                // Extract parameters
-                let param_tokens = &tokens[open_paren_idx + 1..close_paren_idx];
-
-                let params = extract_macro_params(param_tokens, 0);
-
-                // Extract body
-                let mut macro_body = String::new();
-                if close_paren_idx + 1 < tokens.len() {
-                    for i in close_paren_idx + 1..tokens.len() {
-                        macro_body.push_str(&tokens[i].to_string());
-                        if i < tokens.len() - 1 {
-                            macro_body.push(' ');
+    let tokens = &context.tokens[token_range.clone()];
+
+    while i < tokens.len() {
+        let token = &tokens[i];
+
+        // Check for nested struct definitions within macro
+        if token.to_string() == "struct" && i + 1 < tokens.len() {
+            // Find the end of the struct definition
+            let mut brace_depth = 0;
+            let mut struct_end = i;
+
+            for j in (i + 1)..tokens.len() {
+                match tokens[j].to_string().as_str() {
+                    "{" => brace_depth += 1,
+                    "}" => {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            struct_end = j;
+                            break;
                         }
                     }
+                    _ => {}
                 }
+            }
 
-                convert_function_macro_to_rust(&macro_name, &params, &macro_body)?
-            } else {
-                // Object-like macro
-                let mut macro_value = String::new();
-                if tokens.len() > 3 {
-                    for i in 3..tokens.len() {
-                        macro_value.push_str(&tokens[i].to_string());
-                        if i < tokens.len() - 1 {
-                            macro_value.push(' ');
+            if struct_end > i {
+                report!(
+                    "macro_handler",
+                    "redirect_macro",
+                    Info,
+                    HandlerPhase::Convert,
+                    "Found nested struct in macro, marking tokens as processed",
+                    true
+                );
+
+                // Mark the struct tokens as processed
+                for k in i..=struct_end {
+                    processed_tokens.push(Token::n());
+                    i = k + 1;
+                }
+                continue;
+            }
+        }
+
+        // Check for nested enum definitions
+        if token.to_string() == "enum" && i + 1 < tokens.len() {
+            let mut brace_depth = 0;
+            let mut enum_end = i;
+
+            for j in (i + 1)..tokens.len() {
+                match tokens[j].to_string().as_str() {
+                    "{" => brace_depth += 1,
+                    "}" => {
+                        brace_depth -= 1;
+                        if brace_depth == 0 {
+                            enum_end = j;
+                            break;
                         }
                     }
-                }
-                convert_object_macro_to_rust(&macro_name, &macro_value)?
-            }
-        }
-        "ifdef" | "ifndef" => {
-            if tokens.len() < 3 {
-                return Ok(None);
-            }
-            let is_ifndef = directive == "ifndef";
-            let feature_name = tokens[2].to_string();
-
-            if is_ifndef {
-                format!("#[cfg(not(feature = \"{}\"))]\n", feature_name)
-            } else {
-                format!("#[cfg(feature = \"{}\")]\n", feature_name)
-            }
-        }
-        "if" | "elif" => {
-            if tokens.len() < 3 {
-                return Ok(None);
-            }
-
-            let mut condition = String::new();
-            for i in 2..tokens.len() {
-                condition.push_str(&tokens[i].to_string());
-                if i < tokens.len() - 1 {
-                    condition.push(' ');
+                    _ => {}
                 }
             }
 
-            let rust_condition = convert_condition_to_cfg_expr(&condition);
-            format!("#[cfg({})]\n", rust_condition)
-        }
-        "else" => "#[cfg(not(any()))]\n".to_string(),
-        "endif" => "".to_string(),
-        "undef" => {
-            if tokens.len() < 3 {
-                return Ok(None);
-            }
-            let macro_name = tokens[2].to_string();
-            format!("// #undef {} (no direct Rust equivalent)\n", macro_name)
-        }
-        "pragma" => {
-            if tokens.len() < 3 {
-                return Ok(None);
-            }
+            if enum_end > i {
+                report!(
+                    "macro_handler",
+                    "redirect_macro",
+                    Info,
+                    HandlerPhase::Convert,
+                    "Found nested enum in macro, marking tokens as processed",
+                    true
+                );
 
-            let mut pragma_text = String::new();
-            for i in 2..tokens.len() {
-                pragma_text.push_str(&tokens[i].to_string());
-                if i < tokens.len() - 1 {
-                    pragma_text.push(' ');
+                // Mark enum tokens as processed
+                for _k in i..=enum_end {
+                    processed_tokens.push(Token::n());
                 }
-            }
-
-            match pragma_text.split_whitespace().next() {
-                Some("once") => "#[allow(dead_code)]\n".to_string(),
-                Some("pack") => "#[repr(packed)]\n".to_string(),
-                _ => format!("// #pragma {} (no direct Rust equivalent)\n", pragma_text),
+                i = enum_end + 1;
+                continue;
             }
         }
-        "error" | "warning" => {
-            if tokens.len() < 3 {
-                return Ok(None);
-            }
 
-            let mut message = String::new();
-            for i in 2..tokens.len() {
-                message.push_str(&tokens[i].to_string());
-                if i < tokens.len() - 1 {
-                    message.push(' ');
-                }
-            }
+        processed_tokens.push(token.clone());
+        i += 1;
+    }
 
-            if directive == "error" {
-                format!("compile_error!(\"{}\");\n", message.replace("\"", "\\\""))
-            } else {
-                format!("// #warning {} (converted to comment)\n", message)
-            }
-        }
-        _ => {
-            format!("// Unknown preprocessor directive: #{}\n", directive)
-        }
-    };
-
-    let id = Id::get("convert_macro_callback");
-    Ok(Some(ConvertedElement::Macro(ConvertedMacro {
-        parameters: Vec::new(), // Default empty parameters
-        body: "".to_string(),   // Default empty body
-        rust_code,
-        is_function_like: false,
-    })))
+    Ok(result)
 }
 
-/// Result callback: Postprocesses generated macro code, adds documentation, and enhances formatting
-fn result_macro(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult, ConversionError> {
+/// Document callback: Generates documentation for macros
+fn document_macro(info: ElementInfo) -> Result<Option<String>, C2RError> {
+    if let ElementInfo::Macro(macro_info) = info {
+        let mut doc = format!(
+            "/// Converted C {}: {}\n",
+            macro_info.kind_description, macro_info.name
+        );
+
+        // For complex macros, use Patternizer to determine purpose
+        if macro_info.complexity == "complex" {
+            let _patternizer = Patternizer::with_common_patterns();
+
+            // Determine macro purpose based on patterns
+            let purpose = if macro_info.directive == "define" && macro_info.is_function_like {
+                "function-like macro for code generation"
+            } else if macro_info.directive == "define" && !macro_info.params.is_empty() {
+                "parameterized constant definition"
+            } else if macro_info.directive == "ifdef" || macro_info.directive == "ifndef" {
+                "conditional compilation directive"
+            } else if macro_info.directive == "pragma" {
+                "compiler-specific directive"
+            } else {
+                "preprocessor directive"
+            };
+
+            doc.push_str(&format!("/// Purpose: {}\n", purpose));
+        }
+
+        doc.push_str(&format!("/// Kind: {}\n", macro_info.kind_description));
+        doc.push_str(&format!("/// Directive: {}\n", macro_info.directive));
+
+        if macro_info.is_function_like {
+            doc.push_str(&format!(
+                "/// Parameters: {}\n",
+                macro_info.params.join(", ")
+            ));
+        }
+
+        if macro_info.is_conditional {
+            doc.push_str("/// Note: Conditional compilation - may affect build\n");
+        }
+
+        Ok(Some(doc))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Result callback: Postprocesses macro conversion with documentation
+#[allow(unused_variables)]
+fn result_macro(
+    token_range: Range<usize>,
+    result: HandlerResult,
+) -> Result<HandlerResult, C2RError> {
     let _id = Id::get("result_macro");
 
     report!(
@@ -976,20 +377,23 @@ fn result_macro(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult
     );
 
     match result {
-        HandlerResult::Completed(tokens_opt, _, rust_code, id) => {
-            // Extract macro information for documentation
-            let macro_info = extract_macro_info_from_tokens(tokens);
+        HandlerResult::Converted(element, token_range, code, id) => {
+            // Extract macro information from tokens for documentation
+            let mut context = crate::context!();
+            context.pull();
+            let macro_info = extract_macro_info(&context.tokens[token_range.clone()]);
 
             // Generate documentation about the macro conversion
-            let doc_comment = generate_macro_documentation(tokens, &macro_info);
+            let doc_comment =
+                document_macro(ElementInfo::Macro(macro_info.clone()))?.unwrap_or_default();
 
             // Enhance the Rust code with documentation and metadata
             let mut enhanced_code = String::new();
 
             // Add metadata comment for traceability
             let metadata_comment = format!(
-                "// [C2R] Macro converted from C to Rust - {}: {}\n",
-                macro_info.name, macro_info.kind_description
+                "// [C2R] {} converted from C to Rust - {}: {}\n",
+                macro_info.kind_description, macro_info.name, macro_info.directive
             );
             enhanced_code.push_str(&metadata_comment);
 
@@ -1000,708 +404,735 @@ fn result_macro(tokens: &[Token], result: HandlerResult) -> Result<HandlerResult
             }
 
             // Add the original converted code
-            enhanced_code.push_str(&rust_code);
+            enhanced_code.push_str(&code);
 
             report!(
                 "macro_handler",
                 "result_macro",
                 Info,
                 Report,
-                &format!(
-                    "Enhanced macro conversion: {} ({})",
-                    macro_info.name, macro_info.kind_description
+                format!(
+                    "Enhanced macro '{}' with {} lines of documentation",
+                    macro_info.name,
+                    doc_comment.lines().count()
                 ),
                 true
             );
 
-            // CRITICAL: Return HandlerResult::Completed to preserve the code!
-            Ok(HandlerResult::Completed(
-                tokens_opt,
-                0..1,
+            Ok(HandlerResult::Converted(
+                element,
+                token_range,
                 enhanced_code,
                 id,
             ))
         }
-        HandlerResult::Converted(element, _, rust_code, id) => {
-            // Handle converted elements - enhance the code and preserve the variant
-            let macro_info = extract_macro_info_from_tokens(tokens);
-            let doc_comment = generate_macro_documentation(tokens, &macro_info);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Macro converted from C to Rust - {}: {}\n",
-                macro_info.name, macro_info.kind_description
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "macro_handler",
-                "result_macro",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced converted macro: {} ({})",
-                    macro_info.name, macro_info.kind_description
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Converted to preserve the code!
-            Ok(HandlerResult::Converted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Extracted(element, _, rust_code, id) => {
-            // Handle extracted elements - enhance the code and preserve the variant
-            let macro_info = extract_macro_info_from_tokens(tokens);
-            let doc_comment = generate_macro_documentation(tokens, &macro_info);
-
-            let mut enhanced_code = String::new();
-            let metadata_comment = format!(
-                "// [C2R] Macro converted from C to Rust - {}: {}\n",
-                macro_info.name, macro_info.kind_description
-            );
-            enhanced_code.push_str(&metadata_comment);
-
-            if !doc_comment.trim().is_empty() {
-                enhanced_code.push_str(&doc_comment);
-                enhanced_code.push('\n');
-            }
-            enhanced_code.push_str(&rust_code);
-
-            report!(
-                "macro_handler",
-                "result_macro",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced extracted macro: {} ({})",
-                    macro_info.name, macro_info.kind_description
-                ),
-                true
-            );
-
-            // CRITICAL: Return HandlerResult::Extracted to preserve the code!
-            Ok(HandlerResult::Extracted(element, 0..1, enhanced_code, id))
-        }
-        HandlerResult::Handled(Some(converted_tokens), _, handler_id) => {
-            // Legacy support for token-based results
-            // Extract macro information for documentation
-            let macro_info = extract_macro_info_from_tokens(tokens);
-
-            // Generate documentation about the macro conversion
-            let doc_comment = generate_macro_documentation(tokens, &macro_info);
-
-            // Postprocess the converted Rust code for better formatting
-            let mut enhanced_result = postprocess_macro_code(converted_tokens);
-
-            // Add the documentation comment before the converted macro
-            if !doc_comment.is_empty() {
-                enhanced_result.insert(0, Token::s(doc_comment));
-            }
-
-            // Add metadata comment for traceability
-            let metadata_comment = format!(
-                "// [C2R] Macro converted from C to Rust - {}: {}",
-                macro_info.name, macro_info.kind_description
-            );
-            enhanced_result.insert(0, Token::s(metadata_comment));
-
-            report!(
-                "macro_handler",
-                "result_macro",
-                Info,
-                Report,
-                &format!(
-                    "Enhanced macro conversion: {} ({})",
-                    macro_info.name, macro_info.kind_description
-                ),
-                true
-            );
-
-            Ok(HandlerResult::Handled(
-                Some(enhanced_result),
-                0..1,
-                handler_id,
-            ))
-        }
-        HandlerResult::Handled(None, _, handler_id) => {
+        _ => {
             report!(
                 "macro_handler",
                 "result_macro",
                 Warning,
                 Report,
-                "Macro handler returned empty result",
+                "Macro result was not in Completed state, returning as-is",
                 true
             );
-            Ok(HandlerResult::Handled(None, 0..0, handler_id))
-        }
-        other_result => {
-            // Pass through non-handled results unchanged
-            Ok(other_result)
+
+            Ok(result)
         }
     }
 }
 
-/// Macro information extracted for documentation purposes
-#[derive(Debug, Clone)]
-struct MacroInfo {
-    name: String,
-    kind: MacroKind,
-    kind_description: String,
-    directive: String,
-    params: Vec<String>,
-    is_function_like: bool,
-    is_conditional: bool,
-    complexity: String,
-}
+/// Extract macro information from tokens for result processing
+fn extract_macro_info(tokens: &[Token]) -> MacroInfo {
+    use crate::document::MacroKind;
 
-/// Enum representing different kinds of macros for specialized handling
-#[derive(Debug, Clone, PartialEq)]
-pub enum MacroKind {
-    ObjectLike,
-    FunctionLike,
-    Conditional,
-    Pragma,
-    Message,
-    Other,
-}
+    let mut name = String::new();
+    let mut directive = String::new();
+    let params = Vec::new();
+    let mut is_function_like = false;
+    let mut is_conditional = false;
 
-/// Extracts macro information from the original tokens for documentation purposes
-fn extract_macro_info_from_tokens(tokens: &[Token]) -> MacroInfo {
-    if tokens.is_empty() || tokens[0].to_string() != "#" {
-        return MacroInfo {
-            name: "unknown".to_string(),
-            kind: MacroKind::Other,
-            kind_description: "unknown preprocessor directive".to_string(),
-            directive: "unknown".to_string(),
-            params: Vec::new(),
-            is_function_like: false,
-            is_conditional: false,
-            complexity: "unknown".to_string(),
-        };
-    }
-
-    let directive = if tokens.len() > 1 {
-        tokens[1].to_string()
-    } else {
-        "unknown".to_string()
-    };
-
-    let (kind, kind_description, is_conditional) = match directive.as_str() {
-        "define" => {
-            let is_function_like = tokens.len() > 3 && tokens[3].to_string() == "(";
-            if is_function_like {
-                (
-                    MacroKind::FunctionLike,
-                    "function-like macro".to_string(),
-                    false,
-                )
-            } else {
-                (
-                    MacroKind::ObjectLike,
-                    "object-like macro".to_string(),
-                    false,
-                )
+    // Basic parsing to extract macro information
+    let mut i = 0;
+    while i < tokens.len() {
+        match &tokens[i] {
+            Token::s(text) if text.starts_with("#") => {
+                if text.starts_with("#define") {
+                    directive = "define".to_string();
+                    if i + 1 < tokens.len() {
+                        if let Token::s(id) = &tokens[i + 1] {
+                            name = id.clone();
+                        }
+                    }
+                } else if text.starts_with("#ifdef") {
+                    directive = "ifdef".to_string();
+                    is_conditional = true;
+                } else if text.starts_with("#ifndef") {
+                    directive = "ifndef".to_string();
+                    is_conditional = true;
+                } else if text.starts_with("#pragma") {
+                    directive = "pragma".to_string();
+                }
             }
+            Token::l("(") => {
+                if !name.is_empty() && i > 0 {
+                    is_function_like = true;
+                }
+            }
+            _ => {}
         }
-        "ifdef" | "ifndef" | "if" | "else" | "elif" | "endif" => (
-            MacroKind::Conditional,
-            "conditional compilation directive".to_string(),
-            true,
-        ),
-        "pragma" => (MacroKind::Pragma, "pragma directive".to_string(), false),
-        "error" | "warning" => (
-            MacroKind::Message,
-            "compiler message directive".to_string(),
-            false,
-        ),
-        _ => (
-            MacroKind::Other,
-            "other preprocessor directive".to_string(),
-            false,
-        ),
-    };
-
-    // Extract macro name
-    let macro_name = if directive == "define" && tokens.len() > 2 {
-        tokens[2].to_string()
-    } else if (directive == "ifdef" || directive == "ifndef" || directive == "undef")
-        && tokens.len() > 2
-    {
-        tokens[2].to_string()
-    } else {
-        directive.clone()
-    };
-
-    // Extract parameters for function-like macros
-    let mut params = Vec::new();
-    let is_function_like = matches!(kind, MacroKind::FunctionLike);
-
-    if is_function_like && tokens.len() > 3 && tokens[3].to_string() == "(" {
-        // Find closing parenthesis and extract parameters
-        let open_paren_idx = 3;
-        if let Some(close_paren_offset) = find_matching_token(&tokens[open_paren_idx..], "(", ")") {
-            let close_paren_idx = open_paren_idx + close_paren_offset + 1;
-            let param_tokens = &tokens[open_paren_idx + 1..close_paren_idx];
-            params = extract_macro_params(param_tokens, 0);
-        }
+        i += 1;
     }
 
-    // Determine complexity
-    let complexity = match kind {
-        MacroKind::ObjectLike => "simple".to_string(),
-        MacroKind::FunctionLike => {
-            if params.len() <= 2 {
-                "simple".to_string()
-            } else {
-                format!("moderate ({} parameters)", params.len())
-            }
-        }
-        MacroKind::Conditional => "simple".to_string(),
-        MacroKind::Pragma => "simple".to_string(),
-        MacroKind::Message => "simple".to_string(),
-        MacroKind::Other => "unknown".to_string(),
+    let kind = if is_conditional {
+        MacroKind::Conditional
+    } else if directive == "pragma" {
+        MacroKind::Pragma
+    } else if is_function_like {
+        MacroKind::FunctionLike
+    } else {
+        MacroKind::ObjectLike
+    };
+
+    let kind_description = match kind {
+        MacroKind::ObjectLike => "object-like macro".to_string(),
+        MacroKind::FunctionLike => "function-like macro".to_string(),
+        MacroKind::Conditional => "conditional macro".to_string(),
+        MacroKind::Pragma => "pragma directive".to_string(),
+        _ => "macro".to_string(),
     };
 
     MacroInfo {
-        name: macro_name,
+        name,
         kind,
         kind_description,
         directive,
         params,
         is_function_like,
         is_conditional,
-        complexity,
+        complexity: if is_function_like || is_conditional {
+            "complex".to_string()
+        } else {
+            "simple".to_string()
+        },
     }
 }
 
-/// Generates documentation comments for the macro conversion
-fn generate_macro_documentation(tokens: &[Token], macro_info: &MacroInfo) -> String {
-    let mut doc_lines = Vec::new();
+/// Extract macro with recursive window expansion starting from minimum tokens
+fn extract_macro(token_range: Range<usize>) -> Result<Option<ExtractedElement>, C2RError> {
+    const MIN_MACRO_TOKENS: usize = 2; // #define
+    const MAX_MACRO_WINDOW: usize = 15; // Maximum expansion for macro definitions
 
-    // Add main documentation header
-    doc_lines.push("/**".to_string());
-    doc_lines.push(" * Macro Conversion Documentation".to_string());
-    doc_lines.push(" *".to_string());
-
-    // Add macro information
-    doc_lines.push(format!(" * Name: {}", macro_info.name));
-    doc_lines.push(format!(" * Directive: #{}", macro_info.directive));
-    doc_lines.push(format!(" * Kind: {}", macro_info.kind_description));
-    doc_lines.push(format!(" * Complexity: {}", macro_info.complexity));
-    doc_lines.push(format!(" * Original tokens: {}", tokens.len()));
-
-    // Add parameters for function-like macros
-    if macro_info.is_function_like && !macro_info.params.is_empty() {
-        doc_lines.push(format!(" * Parameters: {}", macro_info.params.join(", ")));
+    let mut context = crate::context!();
+    context.pull();
+    if context.tokens[token_range.clone()].len() < MIN_MACRO_TOKENS {
+        return Ok(None);
     }
-
-    // Add features information
-    let mut features = Vec::new();
-    if macro_info.is_function_like {
-        features.push("function-like");
-    }
-    if macro_info.is_conditional {
-        features.push("conditional compilation");
-    }
-
-    if !features.is_empty() {
-        doc_lines.push(format!(" * Features: {}", features.join(", ")));
-    }
-
-    doc_lines.push(" *".to_string());
-
-    // Add conversion notes based on macro kind
-    match macro_info.kind {
-        MacroKind::ObjectLike => {
-            doc_lines
-                .push(" * Conversion: C object-like macro -> Rust const declaration".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Compile-time constant evaluation".to_string());
-            doc_lines.push(" *   - Type safety with explicit type annotations".to_string());
-            doc_lines.push(" *   - No preprocessing, direct value substitution".to_string());
-            doc_lines.push(" *   - Memory-safe string and numeric constants".to_string());
-            doc_lines.push(" *   - Special handling for NULL, TRUE, FALSE constants".to_string());
-        }
-        MacroKind::FunctionLike => {
-            doc_lines.push(
-                " * Conversion: C function-like macro -> Rust macro_rules! + inline function"
-                    .to_string(),
-            );
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Hygienic macro system prevents identifier capture".to_string());
-            doc_lines.push(" *   - Type-safe parameter handling with expr patterns".to_string());
-            doc_lines
-                .push(" *   - Inline function alternative for better type checking".to_string());
-            doc_lines.push(" *   - Compile-time expansion with zero runtime overhead".to_string());
-            doc_lines
-                .push(" *   - Special optimized versions for MIN, MAX, ABS functions".to_string());
-        }
-        MacroKind::Conditional => {
-            doc_lines.push(
-                " * Conversion: C conditional compilation -> Rust cfg attributes".to_string(),
-            );
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Feature flag system for modular compilation".to_string());
-            doc_lines.push(" *   - Debug assertions mapping for DEBUG/NDEBUG".to_string());
-            doc_lines.push(" *   - Compile-time code inclusion/exclusion".to_string());
-            doc_lines.push(" *   - Platform-specific and configuration-aware building".to_string());
-            doc_lines.push(" *   - Zero runtime cost conditional compilation".to_string());
-        }
-        MacroKind::Pragma => {
-            doc_lines.push(" * Conversion: C pragma directive -> Rust attributes".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Compiler hint translation (repr, allow, etc.)".to_string());
-            doc_lines.push(" *   - Memory layout control with repr attributes".to_string());
-            doc_lines.push(" *   - Warning suppression with allow attributes".to_string());
-            doc_lines.push(" *   - Rust-idiomatic compiler configuration".to_string());
-            doc_lines.push(" *   - Special handling for pragma once, pack directives".to_string());
-        }
-        MacroKind::Message => {
-            doc_lines.push(
-                " * Conversion: C compiler message -> Rust compile_error!/comment".to_string(),
-            );
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Compile-time error generation with compile_error!".to_string());
-            doc_lines
-                .push(" *   - Warning messages converted to documentation comments".to_string());
-            doc_lines.push(" *   - Build-time failure for critical error conditions".to_string());
-            doc_lines.push(" *   - Clear error messages for development debugging".to_string());
-            doc_lines.push(" *   - Proper string escaping for message content".to_string());
-        }
-        MacroKind::Other => {
-            doc_lines
-                .push(" * Conversion: Unknown preprocessor directive -> Rust comment".to_string());
-            doc_lines.push(" * Features:".to_string());
-            doc_lines.push(" *   - Preserves original directive as documentation".to_string());
-            doc_lines.push(" *   - Safe fallback for unsupported directives".to_string());
-            doc_lines.push(" *   - Maintains conversion traceability".to_string());
-            doc_lines.push(" *   - Manual review flagged for unknown constructs".to_string());
-        }
-    }
-
-    doc_lines.push(" *".to_string());
-    doc_lines.push(" * Rust macro benefits:".to_string());
-    doc_lines.push(" *   - Hygienic macro system prevents naming conflicts".to_string());
-    doc_lines.push(" *   - Compile-time code generation with full type checking".to_string());
-    doc_lines.push(" *   - Pattern matching for flexible macro definitions".to_string());
-    doc_lines.push(" *   - Zero-cost abstractions with optimized compilation".to_string());
-    doc_lines.push(" *   - Better error messages and debugging support".to_string());
-    doc_lines.push(" */".to_string());
 
     report!(
         "macro_handler",
-        "generate_macro_documentation",
+        "extract_macro",
         Info,
-        Report,
-        &format!(
-            "Generated documentation for {} macro: {}",
-            macro_info.kind_description, macro_info.name
+        Extract,
+        format!(
+            "Starting recursive extraction with {} tokens",
+            context.tokens[token_range.clone()].len()
         ),
         true
     );
 
-    doc_lines.join("\n")
+    // Find macro start within the token range
+    if let Some(macro_start) =
+        find_macro_start_in_range(&context.tokens[token_range.clone()], token_range.clone())
+    {
+        report!(
+            "macro_handler",
+            "extract_macro",
+            Info,
+            Extract,
+            format!("Found macro start at position {}", macro_start),
+            true
+        );
+
+        // Use recursive window expansion to capture complete macro
+        if let Some(complete_tokens) = expand_to_macro(
+            &context.tokens[token_range.clone()],
+            macro_start,
+            MAX_MACRO_WINDOW,
+        ) {
+            return extract_macro_from_complete_tokens(&complete_tokens);
+        }
+    }
+
+    // Fallback extraction
+    extract_macro_fallback(&context.tokens[token_range.clone()])
 }
 
-/// Postprocesses the converted macro code for better formatting
-fn postprocess_macro_code(mut tokens: Vec<Token>) -> Vec<Token> {
-    let original_count = tokens.len();
+/// Find macro start position within a token range
+fn find_macro_start_in_range(tokens: &[Token], range: Range<usize>) -> Option<usize> {
+    let end = range.end.min(tokens.len());
+    for i in range.start..end {
+        if detect_macro_start(tokens, i) {
+            return Some(i);
+        }
+    }
+    None
+}
 
-    // Clean up and format the converted macro tokens
-    for token in tokens.iter_mut() {
-        let mut content = token.to_string();
+/// Detect if a macro starts at the given position
+fn detect_macro_start(tokens: &[Token], pos: usize) -> bool {
+    if pos >= tokens.len() {
+        return false;
+    }
 
-        // Clean up extra whitespace
-        content = content.trim().to_string();
+    let token_str = tokens[pos].to_string();
+    token_str.starts_with('#')
+}
 
-        // Format const declarations
-        if content.starts_with("pub const") {
-            // Ensure proper spacing in const declarations
-            content = content.replace("pub const", "pub const ");
-            content = content.replace(" : ", ": ");
-            content = content.replace(" = ", " = ");
-            content = content.replace("  ", " ");
+/// Recursively expand token window to capture complete macro definition
+fn expand_to_macro(tokens: &[Token], macro_start: usize, max_window: usize) -> Option<Vec<Token>> {
+    let mut window_size = 2; // Start with minimum tokens
+
+    while window_size <= max_window {
+        let window_end = (macro_start + window_size).min(tokens.len());
+        let current_window = &tokens[macro_start..window_end];
+
+        if is_complete_macro_definition(current_window) {
+            report!(
+                "macro_handler",
+                "expand_to_macro",
+                Info,
+                Extract,
+                format!("Found complete macro with {} tokens", window_size),
+                true
+            );
+            return Some(current_window.to_vec());
         }
 
-        // Format macro_rules! declarations
-        if content.contains("macro_rules!") {
-            // Clean up macro rule formatting
-            content = content.replace("macro_rules! ", "macro_rules! ");
-            content = content.replace("macro_rules!  ", "macro_rules! ");
-            content = content.replace(" {", " {");
-            content = content.replace("{ ", "{");
-            content = content.replace(" }", " }");
-            content = content.replace("}  ", "} ");
-        }
+        window_size += 1;
+    }
 
-        // Format cfg attributes
-        if content.starts_with("#[cfg(") {
-            // Clean up cfg attribute formatting
-            content = content.replace("#[cfg( ", "#[cfg(");
-            content = content.replace(" )]", ")]");
-            content = content.replace("( ", "(");
-            content = content.replace(" )", ")");
-            content = content.replace(" =", "=");
-            content = content.replace("= ", "= ");
-            content = content.replace("  ", " ");
-        }
+    // Return the largest window if no complete definition found
+    let final_end = (macro_start + max_window).min(tokens.len());
+    Some(tokens[macro_start..final_end].to_vec())
+}
 
-        // Format inline function declarations
-        if content.contains("#[inline]") || content.contains("pub fn") {
-            // Clean up function formatting
-            content = content.replace("pub fn ", "pub fn ");
-            content = content.replace("pub fn  ", "pub fn ");
-            content = content.replace(" (", "(");
-            content = content.replace("( ", "(");
-            content = content.replace(" )", ")");
-            content = content.replace(") ", ") ");
-            content = content.replace(" -> ", " -> ");
-            content = content.replace("->  ", "-> ");
-        }
+/// Check if token window represents a complete macro definition
+fn is_complete_macro_definition(tokens: &[Token]) -> bool {
+    if tokens.len() < 2 {
+        return false;
+    }
 
-        // Format compile_error! and other macros
-        if content.contains("compile_error!") || content.contains("todo!") {
-            // Clean up macro call formatting
-            content = content.replace("! (", "!(");
-            content = content.replace("!( ", "!(");
-            content = content.replace(" )", ")");
-            content = content.replace("( ", "(");
-        }
+    let first_token = tokens[0].to_string();
+    if !first_token.starts_with('#') {
+        return false;
+    }
 
-        // Format comments
-        if content.starts_with("//") {
-            // Ensure proper spacing after comment markers
-            content = content.replace("//  ", "// ");
-            content = content.replace("// ", "// ");
+    if tokens.len() >= 2 {
+        let directive = tokens[1].to_string();
+        match directive.as_str() {
+            "define" => {
+                // For #define, we need at least the directive, name, and potentially definition
+                tokens.len() >= 3
+            }
+            "include" | "ifdef" | "ifndef" | "endif" | "undef" => {
+                // These directives typically need just directive + argument
+                tokens.len() >= 2
+            }
+            "pragma" => {
+                // #pragma directives can be complex but often complete with few tokens
+                tokens.len() >= 3
+            }
+            _ => true, // Other directives considered complete as-is
         }
+    } else {
+        false
+    }
+}
 
-        // Ensure proper semicolon formatting
-        if content.ends_with(';') {
-            content = content.trim_end_matches(' ').to_string();
-            if !content.ends_with(';') {
-                content.push(';');
+/// Extract macro details from complete token window
+fn extract_macro_from_complete_tokens(
+    tokens: &[Token],
+) -> Result<Option<ExtractedElement>, C2RError> {
+    if tokens.len() < 2 {
+        return Ok(None);
+    }
+
+    let directive = tokens[1].to_string();
+    let name = if tokens.len() > 2 {
+        tokens[2].to_string()
+    } else {
+        directive.clone()
+    };
+    let mut params = Vec::new();
+    let mut is_function_like = false;
+
+    // Check for function-like macro
+    if tokens.len() > 3 && tokens[3].to_string() == "(" {
+        is_function_like = true;
+        // Extract parameters between parentheses
+        let mut paren_depth = 0;
+        let mut current_param = String::new();
+
+        for i in 4..tokens.len() {
+            let token_str = tokens[i].to_string();
+            match token_str.as_str() {
+                "(" => paren_depth += 1,
+                ")" => {
+                    paren_depth -= 1;
+                    if paren_depth < 0 {
+                        if !current_param.trim().is_empty() {
+                            params.push(current_param.trim().to_string());
+                        }
+                        break;
+                    }
+                }
+                "," if paren_depth == 0 => {
+                    if !current_param.trim().is_empty() {
+                        params.push(current_param.trim().to_string());
+                        current_param.clear();
+                    }
+                }
+                _ => {
+                    if paren_depth >= 0 {
+                        if !current_param.is_empty() {
+                            current_param.push(' ');
+                        }
+                        current_param.push_str(&token_str);
+                    }
+                }
+            }
+        }
+    }
+
+    let body_tokens = if is_function_like {
+        // Find tokens after the parameter list
+        let mut found_closing = false;
+        let mut body_start = 0;
+        for i in 3..tokens.len() {
+            if tokens[i].to_string() == ")" {
+                body_start = i + 1;
+                found_closing = true;
+                break;
+            }
+        }
+        if found_closing && body_start < tokens.len() {
+            tokens[body_start..].to_vec()
+        } else {
+            Vec::new()
+        }
+    } else {
+        // For object-like macros, body starts after the name
+        if tokens.len() > 3 {
+            tokens[3..].to_vec()
+        } else {
+            Vec::new()
+        }
+    };
+
+    let definition = body_tokens
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let code = generate_rust_macro_code(&name, &params, &definition, is_function_like);
+
+    let extracted_macro = ExtractedMacro {
+        name,
+        params,
+        body: body_tokens,
+        tokens: tokens.to_vec(),
+        is_function_like,
+        code,
+    };
+
+    Ok(Some(ExtractedElement::Macro(extracted_macro)))
+}
+
+/// Fallback extraction when pattern matching fails
+fn extract_macro_fallback(tokens: &[Token]) -> Result<Option<ExtractedElement>, C2RError> {
+    if tokens.len() >= 2 && tokens[0].to_string().starts_with('#') {
+        let directive = tokens[1].to_string();
+
+        // Find the end of this macro directive by looking for line boundaries or next macro
+        let mut macro_end = 2; // Start after # and directive
+
+        // For different directive types, find appropriate ending
+        match directive.as_str() {
+            "include" => {
+                // For #include, find closing > or " or end of line
+                for i in 2..tokens.len() {
+                    let token_str = tokens[i].to_string();
+                    if token_str.contains('>')
+                        || token_str.contains('"')
+                        || token_str.contains('\n')
+                    {
+                        macro_end = i + 1;
+                        break;
+                    }
+                    // Stop if we hit another preprocessor directive
+                    if token_str.starts_with('#') {
+                        macro_end = i;
+                        break;
+                    }
+                    // Limit to reasonable length for includes
+                    if i - 2 > 3 {
+                        macro_end = i;
+                        break;
+                    }
+                }
+            }
+            "define" => {
+                // For #define, find end of line or reasonable limit
+                for i in 2..tokens.len() {
+                    let token_str = tokens[i].to_string();
+                    if token_str.contains('\n') || token_str.starts_with('#') {
+                        macro_end = i;
+                        break;
+                    }
+                    // Limit define to reasonable length
+                    if i - 2 > 10 {
+                        macro_end = i;
+                        break;
+                    }
+                }
+            }
+            _ => {
+                // For other directives, limit to very short definitions
+                macro_end = std::cmp::min(tokens.len(), 5);
             }
         }
 
-        // Clean up multiple spaces
-        while content.contains("  ") {
-            content = content.replace("  ", " ");
-        }
-
-        *token = Token::s(content);
-    }
-
-    // Remove any empty tokens
-    tokens.retain(|token| !token.to_string().trim().is_empty());
-
-    report!(
-        "macro_handler",
-        "postprocess_macro_code",
-        Info,
-        Report,
-        &format!(
-            "Postprocessed {} tokens -> {} tokens",
-            original_count,
-            tokens.len()
-        ),
-        true
-    );
-
-    tokens
-}
-
-/// Redirect callback: Handles cases where this handler should pass tokens to a different handler
-fn redirect_macro(
-    tokens: &[Token],
-    result: HandlerResult,
-) -> Result<HandlerResult, ConversionError> {
-    let id = Id::get("redirect_macro");
-    report!(
-        "macro_handler",
-        "redirect_macro",
-        Info,
-        Report,
-        "Checking if macro tokens should be redirected",
-        true
-    );
-
-    // Check if this is actually an include directive
-    if tokens.len() >= 2 && tokens[0].to_string() == "#" && tokens[1].to_string() == "include" {
-        report!(
-            "macro_handler",
-            "redirect_macro",
-            Info,
-            Report,
-            "Redirecting to include handler",
-            true
-        );
-        return Ok(HandlerResult::Redirected(
-            Some(tokens.to_vec()),
-            0..1,
-            "macro_handler".to_string(),
-            id,
-            Id::get("include_handler"),
-        ));
-    }
-
-    // Check if this might be a complex macro that looks like a function definition
-    if tokens.len() >= 3 && tokens[0].to_string() == "#" && tokens[1].to_string() == "define" {
-        // Look for patterns that suggest this should be handled as a function
-        let macro_content = tokens[2..]
+        let name = if tokens.len() > 2 {
+            tokens[2].to_string()
+        } else {
+            directive.clone()
+        };
+        let body_tokens = if macro_end > 3 {
+            tokens[3..macro_end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let definition = body_tokens
             .iter()
             .map(|t| t.to_string())
             .collect::<Vec<_>>()
             .join(" ");
 
-        // If the macro body contains complex function-like syntax, might redirect
-        if macro_content.contains("return")
-            && macro_content.contains("{")
-            && macro_content.contains("}")
-        {
-            report!(
-                "macro_handler",
-                "redirect_macro",
-                Info,
-                Report,
-                "Complex function-like macro detected, considering function handler",
-                true
-            );
-            // For now, we'll handle it here, but could redirect to function handler
-        }
-    }
+        let code = generate_rust_macro_code(&name, &Vec::new(), &definition, false);
 
-    // Check if this is malformed and might be something else entirely
-    if tokens.len() >= 1 && tokens[0].to_string() == "#" {
-        if tokens.len() < 2 {
-            report!(
-                "macro_handler",
-                "redirect_macro",
-                Info,
-                Report,
-                "Malformed preprocessor directive with just #",
-                true
-            );
-            return Ok(result); // Let this handler try to deal with it
-        }
-
-        // Check for non-standard preprocessor directives that might be extensions
-        let directive = tokens[1].to_string();
-        return match directive.as_str() {
-            "define" | "ifdef" | "ifndef" | "if" | "else" | "elif" | "endif" | "undef"
-            | "pragma" | "error" | "warning" | "line" => {
-                // Standard directives - no redirection needed
-                Ok(result)
-            }
-            _ => {
-                report!(
-                    "macro_handler",
-                    "redirect_macro",
-                    Info,
-                    Report,
-                    format!(
-                        "Unknown preprocessor directive: {}, handling here",
-                        directive
-                    ),
-                    true
-                );
-                Ok(result)
-            }
+        let extracted_macro = ExtractedMacro {
+            name,
+            params: Vec::new(),
+            body: body_tokens,
+            tokens: tokens[0..macro_end].to_vec(), // Only consume tokens for this macro
+            is_function_like: false,
+            code,
         };
+
+        return Ok(Some(ExtractedElement::Macro(extracted_macro)));
     }
 
-    // Check if this doesn't start with # - might not be a preprocessor directive
-    if tokens.len() > 0 && tokens[0].to_string() != "#" {
-        report!(
-            "macro_handler",
-            "redirect_macro",
-            Info,
-            Report,
-            "Not a preprocessor directive, might need redirection",
-            true
-        );
-
-        // Could be a macro invocation or something else
-        if tokens.iter().any(|t| t.to_string() == "(")
-            && tokens.iter().any(|t| t.to_string() == ")")
-        {
-            report!(
-                "macro_handler",
-                "redirect_macro",
-                Info,
-                Report,
-                "Possible function call, redirecting to function handler",
-                true
-            );
-            return Ok(HandlerResult::Redirected(
-                Some(tokens.to_vec()),
-                0..1,
-                "macro_handler".to_string(),
-                id,
-                Id::get("function_handler"),
-            ));
-        }
-
-        // Could be a variable declaration
-        if tokens.iter().any(|t| t.to_string() == "=") {
-            report!(
-                "macro_handler",
-                "redirect_macro",
-                Info,
-                Report,
-                "Possible variable declaration, redirecting to global handler",
-                true
-            );
-            return Ok(HandlerResult::Redirected(
-                Some(tokens.to_vec()),
-                0..1,
-                "macro_handler".to_string(),
-                id,
-                Id::get("global_handler"),
-            ));
-        }
-    }
-
-    // No redirection needed
-    Ok(result)
+    Ok(None)
 }
-fn extract_macro_params(tokens: &[Token], start: usize) -> Vec<String> {
-    let mut param_start = start.clone();
-    let param_tokens = tokens;
-    let mut params = Vec::<String>::new();
-    for i in 0..param_tokens.len() {
-        if param_tokens[i].to_string() == "," {
-            if start < i {
-                let param_name = param_tokens[start..i]
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect::<Vec<_>>()
-                    .join("")
-                    .trim()
-                    .to_string();
-                if !param_name.is_empty() {
-                    params.push(param_name);
+
+/// Generate Rust macro code from extracted components
+fn generate_rust_macro_code(
+    name: &str,
+    params: &[String],
+    definition: &str,
+    is_function_like: bool,
+) -> String {
+    if is_function_like {
+        let param_list = params.join(", ");
+        format!(
+            "macro_rules! {} {{
+    ({}) => {{
+        {}
+    }};
+}}",
+            name, param_list, definition
+        )
+    } else {
+        if definition.is_empty() {
+            format!(
+                "const {}: () = (); // Empty macro definition",
+                name.to_uppercase()
+            )
+        } else {
+            format!(
+                "const {}: &str = \"{}\"; // Macro definition",
+                name.to_uppercase(),
+                definition
+            )
+        }
+    }
+}
+
+/// Helper function to parse macro tokens based on pattern type  
+fn parse_macro_tokens(
+    tokens: &[Token],
+    _pattern: &str,
+) -> Result<(String, Vec<String>, Vec<Token>, bool, String), C2RError> {
+    if tokens.len() < 2 {
+        return Err(C2RError::new(
+            Kind::Other,
+            Reason::IsNot("enough tokens for macro"),
+            None,
+        ));
+    }
+
+    let directive = tokens[1].to_string();
+    let name = if tokens.len() > 2 {
+        tokens[2].to_string()
+    } else {
+        directive.clone()
+    };
+    let mut params = Vec::new();
+    let mut body = Vec::new();
+    let mut is_function_like = false;
+
+    match directive.as_str() {
+        "define" => {
+            if tokens.len() > 3 && tokens[3].to_string() == "(" {
+                // Function-like macro
+                is_function_like = true;
+
+                // Find closing parenthesis and extract parameters
+                let mut paren_depth = 0;
+                let mut param_start = 4;
+                let mut body_start = 4;
+
+                for (i, token) in tokens.iter().enumerate().skip(3) {
+                    match token.to_string().as_str() {
+                        "(" => {
+                            paren_depth += 1;
+                            if paren_depth == 1 && i > 3 {
+                                param_start = i + 1;
+                            }
+                        }
+                        ")" => {
+                            paren_depth -= 1;
+                            if paren_depth == 0 {
+                                // Extract parameters
+                                if i > param_start {
+                                    let param_tokens = &tokens[param_start..i];
+                                    let mut current_param = String::new();
+
+                                    for param_token in param_tokens {
+                                        if param_token.to_string() == "," {
+                                            if !current_param.trim().is_empty() {
+                                                params.push(current_param.trim().to_string());
+                                                current_param.clear();
+                                            }
+                                        } else {
+                                            current_param.push_str(&param_token.to_string());
+                                        }
+                                    }
+
+                                    if !current_param.trim().is_empty() {
+                                        params.push(current_param.trim().to_string());
+                                    }
+                                }
+
+                                body_start = i + 1;
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Extract body
+                if body_start < tokens.len() {
+                    body = tokens[body_start..].to_vec();
+                }
+            } else {
+                // Object-like macro
+                if tokens.len() > 3 {
+                    body = tokens[3..].to_vec();
                 }
             }
-            param_start = i + 1;
+        }
+        _ => {
+            // Other preprocessor directives
+            if tokens.len() > 2 {
+                body = tokens[2..].to_vec();
+            }
         }
     }
-    if param_start < param_tokens.len() {
-        let param_name = param_tokens[param_start..]
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join("")
-            .trim()
-            .to_string();
-        if !param_name.is_empty() {
-            params.push(param_name);
+
+    Ok((name, params, body, is_function_like, directive))
+}
+
+/// Convert extracted macro to Rust code using Patternizer exclusively
+fn convert_macro(token_range: Range<usize>) -> Result<Option<ConvertedElement>, C2RError> {
+    let mut context = crate::context!();
+    context.pull();
+    let mut processed_tokens = context.tokens[token_range.clone()].to_vec();
+
+    // Try to match macro patterns
+    let macro_patterns = [
+        "macro_define",
+        "macro_ifdef",
+        "macro_ifndef",
+        "macro_if",
+        "macro_else",
+        "macro_elif",
+        "macro_endif",
+        "macro_undef",
+        "macro_pragma",
+        "macro_error",
+        "macro_warning",
+    ];
+
+    for pattern in &macro_patterns {
+        match context
+            .patternizer
+            .match_pattern(pattern, &processed_tokens[token_range.clone()])
+        {
+            PatternResult::Match { consumed_tokens } => {
+                // Extract macro components
+                let (name, params, body, is_function_like, macro_type) =
+                    parse_macro_tokens(&context.tokens[token_range.clone()], pattern)?;
+
+                let code =
+                    convert_macro_to_rust(&name, &params, &body, is_function_like, &macro_type);
+
+                // Mark processed tokens as consumed
+                for i in 0..consumed_tokens.min(processed_tokens.len()) {
+                    processed_tokens[i] = Token::n();
+                }
+
+                let converted_macro = ConvertedMacro {
+                    parameters: params,
+                    body: body
+                        .iter()
+                        .map(|t| t.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                    code,
+                    is_function_like,
+                };
+
+                return Ok(Some(ConvertedElement::Macro(converted_macro)));
+            }
+            _ => continue,
         }
     }
-    params
+
+    // Fallback conversion for basic preprocessor directives
+    if context.tokens[token_range.clone()].len() >= 2
+        && context.tokens[token_range.clone()][0].to_string() == "#"
+    {
+        let directive = context.tokens[token_range.clone()][1].to_string();
+        let name = if context.tokens[token_range.clone()].len() > 2 {
+            context.tokens[token_range.clone()][2].to_string()
+        } else {
+            directive.clone()
+        };
+        let body: Vec<Token> = context.tokens[token_range.clone()][2..].to_vec();
+
+        let code = convert_macro_to_rust(&name, &Vec::new(), &body, false, &directive);
+
+        let converted_macro = ConvertedMacro {
+            parameters: Vec::new(),
+            body: body
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
+            code,
+            is_function_like: false,
+        };
+
+        return Ok(Some(ConvertedElement::Macro(converted_macro)));
+    }
+
+    Ok(None)
+}
+
+/// Convert macro to appropriate Rust code
+fn convert_macro_to_rust(
+    name: &str,
+    params: &[String],
+    body: &[Token],
+    is_function_like: bool,
+    macro_type: &str,
+) -> String {
+    let body_str = body
+        .iter()
+        .map(|t| t.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    match macro_type {
+        "define" => {
+            if is_function_like {
+                // Function-like macro -> Rust macro or inline function
+                let param_list = params.join(", ");
+                format!(
+                    "macro_rules! {} {{\n    ({}) => {{\n        {}\n    }};\n}}",
+                    name, param_list, body_str
+                )
+            } else {
+                // Object-like macro -> const
+                convert_object_macro_to_rust(name, &body_str)
+            }
+        }
+        "ifdef" => format!("#[cfg(feature = \"{}\")]", name),
+        "ifndef" => format!("#[cfg(not(feature = \"{}\"))]", name),
+        "if" => format!("#[cfg({})]", convert_condition_to_cfg_expr(&body_str)),
+        "else" => "#[cfg(not(any()))]".to_string(),
+        "elif" => format!("#[cfg({})]", convert_condition_to_cfg_expr(&body_str)),
+        "endif" => String::new(), // No direct equivalent
+        "undef" => format!("// #undef {} (no direct Rust equivalent)", name),
+        "pragma" => convert_pragma_to_rust(&body_str),
+        "error" => format!("compile_error!(\"{}\");", body_str.replace("\"", "\\\"")),
+        "warning" => format!("// #warning {} (converted to comment)", body_str),
+        _ => format!("// #{} {} (converted to comment)", macro_type, body_str),
+    }
+}
+
+/// Convert object-like macro to Rust const
+fn convert_object_macro_to_rust(name: &str, value: &str) -> String {
+    match name {
+        "NULL" => "pub const NULL: *const std::ffi::c_void = std::ptr::null();".to_string(),
+        "TRUE" | "true" => "pub const TRUE: bool = true;".to_string(),
+        "FALSE" | "false" => "pub const FALSE: bool = false;".to_string(),
+        _ => {
+            if value.is_empty() {
+                format!("pub const {}: () = ();", name)
+            } else if value.starts_with("\"") && value.ends_with("\"") {
+                format!("pub const {}: &str = {};", name, value)
+            } else if value.parse::<i64>().is_ok() {
+                format!("pub const {}: i32 = {};", name, value)
+            } else if value.parse::<f64>().is_ok() {
+                format!("pub const {}: f64 = {};", name, value)
+            } else {
+                format!(
+                    "pub const {}: &str = \"{}\";",
+                    name,
+                    value.replace("\"", "\\\"")
+                )
+            }
+        }
+    }
+}
+
+/// Convert pragma to Rust equivalent
+fn convert_pragma_to_rust(pragma_text: &str) -> String {
+    match pragma_text.split_whitespace().next() {
+        Some("once") => "#[allow(dead_code)]".to_string(),
+        Some("pack") => "#[repr(packed)]".to_string(),
+        _ => format!("// #pragma {} (no direct Rust equivalent)", pragma_text),
+    }
+}
+
+/// Convert C preprocessor condition to Rust cfg expression
+fn convert_condition_to_cfg_expr(condition: &str) -> String {
+    // Simple conversion - just use the condition as-is for now
+    // In a more sophisticated implementation, this would parse and convert C expressions
+    condition
+        .replace("defined(", "feature = \"")
+        .replace(")", "\"")
 }

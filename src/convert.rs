@@ -21,17 +21,19 @@ pub enum ConvertedElement {
 /// Represents a converted Rust function
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConvertedFunction {
+    pub name: String,
     pub return_type: String,
     pub parameters: Vec<String>,
     pub body: String,
-    pub rust_code: String,
+    pub code: String,
     pub is_unsafe: bool,
     pub is_public: bool,
+    pub is_definition: bool,
 }
 
 impl fmt::Display for ConvertedFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -39,14 +41,14 @@ impl fmt::Display for ConvertedFunction {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConvertedStruct {
     pub fields: Vec<(String, String)>, // (field_name, field_type)
-    pub rust_code: String,
+    pub code: String,
     pub is_public: bool,
     pub derives: Vec<String>,
 }
 
 impl fmt::Display for ConvertedStruct {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -54,14 +56,14 @@ impl fmt::Display for ConvertedStruct {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConvertedEnum {
     pub variants: Vec<(String, Option<String>)>, // (name, value)
-    pub rust_code: String,
+    pub code: String,
     pub is_public: bool,
     pub repr: Option<String>,
 }
 
 impl fmt::Display for ConvertedEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -69,13 +71,13 @@ impl fmt::Display for ConvertedEnum {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConvertedTypedef {
     pub target_type: String,
-    pub rust_code: String,
+    pub code: String,
     pub is_public: bool,
 }
 
 impl fmt::Display for ConvertedTypedef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -84,7 +86,7 @@ impl fmt::Display for ConvertedTypedef {
 pub struct ConvertedGlobal {
     pub var_type: String,
     pub initializer: Option<String>,
-    pub rust_code: String,
+    pub code: String,
     pub is_const: bool,
     pub is_static: bool,
     pub is_public: bool,
@@ -92,7 +94,7 @@ pub struct ConvertedGlobal {
 
 impl fmt::Display for ConvertedGlobal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -101,13 +103,13 @@ impl fmt::Display for ConvertedGlobal {
 pub struct ConvertedMacro {
     pub parameters: Vec<String>,
     pub body: String,
-    pub rust_code: String,
+    pub code: String,
     pub is_function_like: bool,
 }
 
 impl fmt::Display for ConvertedMacro {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -115,13 +117,13 @@ impl fmt::Display for ConvertedMacro {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConvertedInclude {
     pub path: String,
-    pub rust_code: String,
+    pub code: String,
     pub is_external_crate: bool,
 }
 
 impl fmt::Display for ConvertedInclude {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -130,28 +132,27 @@ impl fmt::Display for ConvertedInclude {
 pub struct ConvertedArray {
     pub element_type: String,
     pub size: String,
-    pub rust_code: String,
+    pub code: String,
     pub is_declaration: bool,
 }
 
 impl fmt::Display for ConvertedArray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
 /// Represents a converted Rust comment
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConvertedComment {
-    pub content: String,
-    pub rust_code: String,
+    pub code: String,
     pub is_block: bool,
     pub is_doc_comment: bool,
 }
 
 impl fmt::Display for ConvertedComment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -162,13 +163,13 @@ pub struct ConvertedExpression {
     pub left_operand: String,
     pub operator: String,
     pub right_operand: String,
-    pub rust_code: String,
+    pub code: String,
     pub result_type: Option<String>,
 }
 
 impl fmt::Display for ConvertedExpression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -178,13 +179,13 @@ pub struct ConvertedControlFlow {
     pub control_type: String,
     pub condition: String,
     pub body: String,
-    pub rust_code: String,
+    pub code: String,
     pub has_else: bool,
 }
 
 impl fmt::Display for ConvertedControlFlow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.rust_code)
+        write!(f, "{}", self.code)
     }
 }
 
@@ -221,6 +222,7 @@ pub fn convert_type_tokens(c_type: Vec<Token>) -> Option<Token> {
     MAP.get(&c_type_str)
         .map(|rust_type| Token::s(rust_type.to_string()))
 }
+
 pub fn is_c_keyword(token: Token) -> bool {
     [
         "auto".to_string(),
