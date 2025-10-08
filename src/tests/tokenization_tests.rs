@@ -1,8 +1,11 @@
 //! Comprehensive tests for tokenization functionality
 //! Tests the tokenizer's ability to process C code and generate proper Token sequences
 
+use core::option::Option::{None, Some};
+
 use crate::error::C2RError;
 use crate::token::{Token, Tokenizer};
+use crate::Result;
 
 /// Test basic tokenizer creation and initialization
 #[test]
@@ -19,7 +22,7 @@ fn test_tokenizer_creation() {
 
 /// Test tokenizing simple C identifiers
 #[test]
-fn test_tokenize_identifiers() -> Result<(), C2RError> {
+fn test_tokenize_identifiers() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"int main variable_name".to_vec();
@@ -58,7 +61,7 @@ fn test_tokenize_identifiers() -> Result<(), C2RError> {
 
 /// Test tokenizing C keywords
 #[test]
-fn test_tokenize_keywords() -> Result<(), C2RError> {
+fn test_tokenize_keywords() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"if while for return struct typedef".to_vec();
@@ -106,7 +109,7 @@ fn test_tokenize_keywords() -> Result<(), C2RError> {
 
 /// Test tokenizing numeric literals
 #[test]
-fn test_tokenize_numbers() -> Result<(), C2RError> {
+fn test_tokenize_numbers() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"42 3.14 0x1A 077".to_vec();
@@ -145,7 +148,7 @@ fn test_tokenize_numbers() -> Result<(), C2RError> {
 
 /// Test tokenizing operators and punctuation
 #[test]
-fn test_tokenize_operators() -> Result<(), C2RError> {
+fn test_tokenize_operators() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"+ - * / = == != < > <= >= && ||".to_vec();
@@ -192,7 +195,7 @@ fn test_tokenize_operators() -> Result<(), C2RError> {
 
 /// Test tokenizing string literals
 #[test]
-fn test_tokenize_string_literals() -> Result<(), C2RError> {
+fn test_tokenize_string_literals() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"\"hello world\" 'x' \"escape\\\"test\"".to_vec();
@@ -238,7 +241,7 @@ fn test_tokenize_string_literals() -> Result<(), C2RError> {
 
 /// Test tokenizing C comments
 #[test]
-fn test_tokenize_comments() -> Result<(), C2RError> {
+fn test_tokenize_comments() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"// single line comment\n/* multi line\n   comment */\nint x;".to_vec();
@@ -266,7 +269,7 @@ fn test_tokenize_comments() -> Result<(), C2RError> {
 
 /// Test tokenizing preprocessor directives
 #[test]
-fn test_tokenize_preprocessor() -> Result<(), C2RError> {
+fn test_tokenize_preprocessor() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"#include <stdio.h>\n#define MAX 100\n#ifdef DEBUG".to_vec();
@@ -315,7 +318,7 @@ fn test_tokenize_preprocessor() -> Result<(), C2RError> {
 
 /// Test tokenizing function declarations
 #[test]
-fn test_tokenize_function_declaration() -> Result<(), C2RError> {
+fn test_tokenize_function_declaration() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"int main(int argc, char* argv[]) { return 0; }".to_vec();
@@ -384,7 +387,7 @@ fn test_tokenize_function_declaration() -> Result<(), C2RError> {
 }
 /// Test tokenizing struct definitions
 #[test]
-fn test_tokenize_struct_definition() -> Result<(), C2RError> {
+fn test_tokenize_struct_definition() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"struct Point { int x; int y; };".to_vec();
@@ -453,7 +456,7 @@ fn test_tokenize_struct_definition() -> Result<(), C2RError> {
 
 /// Test tokenizing array declarations
 #[test]
-fn test_tokenize_array_declaration() -> Result<(), C2RError> {
+fn test_tokenize_array_declaration() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"int arr[10]; char buffer[256];".to_vec();
@@ -514,7 +517,7 @@ fn test_tokenize_array_declaration() -> Result<(), C2RError> {
 
 /// Test tokenizing complex expressions
 #[test]
-fn test_tokenize_complex_expression() -> Result<(), C2RError> {
+fn test_tokenize_complex_expression() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"result = (a + b) * c / d - e % f;".to_vec();
@@ -590,7 +593,7 @@ fn test_tokenize_complex_expression() -> Result<(), C2RError> {
 
 /// Test empty input handling
 #[test]
-fn test_tokenize_empty_input() -> Result<(), C2RError> {
+fn test_tokenize_empty_input() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = Vec::new();
@@ -608,7 +611,7 @@ fn test_tokenize_empty_input() -> Result<(), C2RError> {
 
 /// Test whitespace handling
 #[test]
-fn test_tokenize_whitespace_handling() -> Result<(), C2RError> {
+fn test_tokenize_whitespace_handling() -> Result<()> {
     let mut tokenizer = Tokenizer::new("test_tokenizer");
 
     let c_code = b"   int   main   (   )   {   }   ".to_vec();

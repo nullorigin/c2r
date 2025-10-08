@@ -8,7 +8,6 @@ use crate::pattern::Pattern;
 use crate::table::{Table, TableCell};
 use crate::{handler::Handler, lock::Id};
 
-#[derive(Debug, Clone)]
 pub enum Entry {
     Id(Id),
     Val(u64),
@@ -16,7 +15,7 @@ pub enum Entry {
     Bool(bool),
     Func(fn(Entry) -> Entry),
     Path(PathBuf),
-    Handler(Handler),
+    Handler(Box<dyn Handler>),
     HandlerReport(HandlerReport),
     Table(Table),
     TableCell(TableCell),
@@ -29,7 +28,7 @@ pub enum Entry {
     BoolMap(HashMap<bool, Entry>),
     FuncMap(HashMap<fn(Entry) -> Entry, Entry>),
     PathMap(HashMap<PathBuf, Entry>),
-    HandlerMap(HashMap<String, Handler>),
+    HandlerMap(HashMap<String, Box<dyn Handler>>),
     PairMap(HashMap<String, Box<(Entry, Entry)>>),
     AnyMap(HashMap<Entry, Entry>),
     Patternizer(Pattern),
@@ -39,8 +38,86 @@ pub enum Entry {
     SamplizerPattern(crate::sample::SamplizerPattern),
     SamplizerFilePair(crate::sample::FilePair),
     SamplizerValidation(crate::sample::ValidationResult),
+    TokenList(Vec<crate::Token>),
     SamplizerStats(crate::sample::IntegrationStats),
 }
+
+impl std::fmt::Debug for Entry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Entry::Id(id) => f.debug_tuple("Id").field(id).finish(),
+            Entry::Val(val) => f.debug_tuple("Val").field(val).finish(),
+            Entry::Str(s) => f.debug_tuple("Str").field(s).finish(),
+            Entry::Bool(b) => f.debug_tuple("Bool").field(b).finish(),
+            Entry::Func(_) => f.debug_tuple("Func").field(&"<function>").finish(),
+            Entry::Path(p) => f.debug_tuple("Path").field(p).finish(),
+            Entry::Handler(_) => f.debug_tuple("Handler").field(&"<handler>").finish(),
+            Entry::HandlerReport(hr) => f.debug_tuple("HandlerReport").field(hr).finish(),
+            Entry::Table(t) => f.debug_tuple("Table").field(t).finish(),
+            Entry::TableCell(tc) => f.debug_tuple("TableCell").field(tc).finish(),
+            Entry::Pair(p) => f.debug_tuple("Pair").field(p).finish(),
+            Entry::List(l) => f.debug_tuple("List").field(l).finish(),
+            Entry::Any(a) => f.debug_tuple("Any").field(a).finish(),
+            Entry::IdMap(im) => f.debug_tuple("IdMap").field(im).finish(),
+            Entry::ValMap(vm) => f.debug_tuple("ValMap").field(vm).finish(),
+            Entry::StrMap(sm) => f.debug_tuple("StrMap").field(sm).finish(),
+            Entry::BoolMap(bm) => f.debug_tuple("BoolMap").field(bm).finish(),
+            Entry::FuncMap(_) => f.debug_tuple("FuncMap").field(&"<function_map>").finish(),
+            Entry::PathMap(pm) => f.debug_tuple("PathMap").field(pm).finish(),
+            Entry::HandlerMap(_) => f.debug_tuple("HandlerMap").field(&"<handler_map>").finish(),
+            Entry::PairMap(pm) => f.debug_tuple("PairMap").field(pm).finish(),
+            Entry::AnyMap(am) => f.debug_tuple("AnyMap").field(am).finish(),
+            Entry::Patternizer(p) => f.debug_tuple("Patternizer").field(p).finish(),
+            Entry::PatternRule(pr) => f.debug_tuple("PatternRule").field(pr).finish(),
+            Entry::PatternMetrics(pm) => f.debug_tuple("PatternMetrics").field(pm).finish(),
+            Entry::TokenPattern(tp) => f.debug_tuple("TokenPattern").field(tp).finish(),
+            Entry::SamplizerPattern(sp) => f.debug_tuple("SamplizerPattern").field(sp).finish(),
+            Entry::SamplizerFilePair(sfp) => f.debug_tuple("SamplizerFilePair").field(sfp).finish(),
+            Entry::SamplizerValidation(sv) => f.debug_tuple("SamplizerValidation").field(sv).finish(),
+            Entry::SamplizerStats(ss) => f.debug_tuple("SamplizerStats").field(ss).finish(),
+            Entry::TokenList(tokens) => f.debug_tuple("TokenList").field(&tokens.len()).finish(),
+        }
+    }
+}
+
+impl Clone for Entry {
+    fn clone(&self) -> Self {
+        match self {
+            Entry::Id(id) => Entry::Id(id.clone()),
+            Entry::Val(val) => Entry::Val(*val),
+            Entry::Str(s) => Entry::Str(s.clone()),
+            Entry::Bool(b) => Entry::Bool(*b),
+            Entry::Func(f) => Entry::Func(*f),
+            Entry::Path(p) => Entry::Path(p.clone()),
+            Entry::Handler(_) => panic!("Cannot clone Handler trait objects"),
+            Entry::HandlerReport(hr) => Entry::HandlerReport(hr.clone()),
+            Entry::Table(t) => Entry::Table(t.clone()),
+            Entry::TableCell(tc) => Entry::TableCell(tc.clone()),
+            Entry::Pair(p) => Entry::Pair(p.clone()),
+            Entry::List(l) => Entry::List(l.clone()),
+            Entry::Any(a) => Entry::Any(a.clone()),
+            Entry::IdMap(im) => Entry::IdMap(im.clone()),
+            Entry::ValMap(vm) => Entry::ValMap(vm.clone()),
+            Entry::StrMap(sm) => Entry::StrMap(sm.clone()),
+            Entry::BoolMap(bm) => Entry::BoolMap(bm.clone()),
+            Entry::FuncMap(fm) => Entry::FuncMap(fm.clone()),
+            Entry::PathMap(pm) => Entry::PathMap(pm.clone()),
+            Entry::HandlerMap(_) => panic!("Cannot clone HandlerMap with trait objects"),
+            Entry::PairMap(pm) => Entry::PairMap(pm.clone()),
+            Entry::AnyMap(am) => Entry::AnyMap(am.clone()),
+            Entry::Patternizer(p) => Entry::Patternizer(p.clone()),
+            Entry::PatternRule(pr) => Entry::PatternRule(pr.clone()),
+            Entry::PatternMetrics(pm) => Entry::PatternMetrics(pm.clone()),
+            Entry::TokenPattern(tp) => Entry::TokenPattern(tp.clone()),
+            Entry::SamplizerPattern(sp) => Entry::SamplizerPattern(sp.clone()),
+            Entry::SamplizerFilePair(sfp) => Entry::SamplizerFilePair(sfp.clone()),
+            Entry::SamplizerValidation(sv) => Entry::SamplizerValidation(sv.clone()),
+            Entry::SamplizerStats(ss) => Entry::SamplizerStats(ss.clone()),
+            Entry::TokenList(tokens) => Entry::TokenList(tokens.clone()),
+        }
+    }
+}
+
 impl Default for Entry {
     fn default() -> Self {
         Entry::Id(Id::default())
@@ -55,7 +132,7 @@ impl Hash for Entry {
             Entry::Bool(b) => b.hash(state),
             Entry::Func(f) => f.hash(state),
             Entry::Path(p) => p.hash(state),
-            Entry::Handler(h) => h.hash(state),
+            Entry::Handler(h) => h.id().hash(state),
             Entry::HandlerReport(h) => h.hash(state),
             Entry::Table(t) => t.hash(state),
             Entry::TableCell(c) => c.hash(state),
@@ -68,7 +145,7 @@ impl Hash for Entry {
             Entry::BoolMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
             Entry::FuncMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
             Entry::PathMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
-            Entry::HandlerMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
+            Entry::HandlerMap(m) => m.iter().for_each(|(_k, v)| v.id().hash(state)),
             Entry::PairMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
             Entry::AnyMap(m) => m.iter().for_each(|(_k, v)| v.hash(state)),
             Entry::Patternizer(p) => p.id.hash(state),
@@ -79,6 +156,7 @@ impl Hash for Entry {
             Entry::SamplizerFilePair(f) => f.c_file_path.hash(state),
             Entry::SamplizerValidation(v) => v.pattern_id.hash(state),
             Entry::SamplizerStats(s) => s.patterns_generated.hash(state),
+            Entry::TokenList(tokens) => tokens.len().hash(state),
         }
     }
 }
@@ -86,12 +164,15 @@ impl Entry {
     pub fn none() -> Self {
         Entry::Id(Id::get("none"))
     }
+    
     pub fn get(id: Id) -> Entry {
         Entry::Id(id)
     }
+    
     pub fn val(v: u64) -> Entry {
         Entry::Val(v)
     }
+    
     pub fn str(s: &str) -> Entry {
         Entry::Str(s.to_string())
     }
@@ -100,54 +181,71 @@ impl Entry {
     pub fn handler_report(report: HandlerReport) -> Entry {
         Entry::HandlerReport(report)
     }
+    
     pub fn bool(b: bool) -> Entry {
         Entry::Bool(b)
     }
+    
     pub fn func(f: fn(Entry) -> Entry) -> Entry {
         Entry::Func(f)
     }
+    
     pub fn path(p: &Path) -> Entry {
         Entry::Path(p.to_path_buf())
     }
-    pub fn handler(h: Handler) -> Entry {
+    
+    pub fn handler(h: Box<dyn Handler>) -> Entry {
         Entry::Handler(h)
     }
+    
     pub fn table(t: Table) -> Entry {
         Entry::Table(t)
     }
+    
     pub fn pair(left: Entry, right: Entry) -> Entry {
         Entry::Pair(Box::new((left, right)))
     }
+    
     pub fn list(entries: Vec<Entry>) -> Entry {
         Entry::List(entries)
     }
+    
     pub fn id_map(entries: HashMap<Id, Entry>) -> Entry {
         Entry::IdMap(entries)
     }
+    
     pub fn val_map(entries: HashMap<u64, Entry>) -> Entry {
         Entry::ValMap(entries)
     }
+    
     pub fn str_map(entries: HashMap<String, Entry>) -> Entry {
         Entry::StrMap(entries)
     }
+    
     pub fn bool_map(entries: HashMap<bool, Entry>) -> Entry {
         Entry::BoolMap(entries)
     }
+    
     pub fn func_map(entries: HashMap<fn(Entry) -> Entry, Entry>) -> Entry {
         Entry::FuncMap(entries)
     }
+    
     pub fn path_map(entries: HashMap<PathBuf, Entry>) -> Entry {
         Entry::PathMap(entries)
     }
-    pub fn handler_map(map: HashMap<String, Handler>) -> Entry {
+    
+    pub fn handler_map(map: HashMap<String, Box<dyn Handler>>) -> Entry {
         Entry::HandlerMap(map)
     }
+    
     pub fn pair_map(entries: HashMap<String, Box<(Entry, Entry)>>) -> Entry {
         Entry::PairMap(entries)
     }
+    
     pub fn pattern(entry: Pattern) -> Entry {
         Entry::Patternizer(entry)
     }
+    
     pub fn any(entry: Entry) -> Entry {
         Entry::Any(Box::new(entry))
     }
@@ -185,6 +283,7 @@ impl Entry {
             Entry::SamplizerFilePair(_) => "SamplizerFilePair".to_string(),
             Entry::SamplizerValidation(_) => "SamplizerValidation".to_string(),
             Entry::SamplizerStats(_) => "SamplizerStats".to_string(),
+            Entry::TokenList(_) => "TokenList".to_string(),
         }
     }
 
@@ -203,7 +302,7 @@ impl Entry {
             Entry::Bool(b) => b.to_string(),
             Entry::Func(_) => "Function".to_string(),
             Entry::Path(p) => format!("{}", p.display()),
-            Entry::Handler(h) => format!("{}[{}]", h.role, h.priority),
+            Entry::Handler(h) => format!("{}[{}]", h.role(), h.priority()),
             Entry::HandlerReport(r) => format!("{}:{}", r.handler_name, r.level),
             Entry::Table(t) => format!("Table({}×{})", t.rows(), t.columns()),
             Entry::TableCell(c) => format!("Cell@({},{})", c.row(), c.column()),
@@ -230,6 +329,7 @@ impl Entry {
             Entry::SamplizerFilePair(f) => format!("SamplizerFilePair[{}]", f.c_file_path),
             Entry::SamplizerValidation(v) => format!("SamplizerValidation[{}]", v.pattern_id),
             Entry::SamplizerStats(s) => format!("SamplizerStats[{}]", s.patterns_generated),
+            Entry::TokenList(tokens) => format!("TokenList[{}]", tokens.len()),
         }
     }
 
@@ -254,21 +354,22 @@ impl Entry {
             Entry::StrMap(m) => format!("{}strs", m.len()),
             Entry::BoolMap(m) => format!("{}bools", m.len()),
             Entry::FuncMap(m) => format!("{}funcs", m.len()),
-            Entry::PathMap(m) => format!("Handler Entries[{}]", m.len()),
-            Entry::HandlerMap(m) => format!("HandlerMap Entries[{}]", m.len()),
-            Entry::PairMap(m) => format!("Pair Entries[{}]", m.len()),
-            Entry::AnyMap(m) => format!("Any Entries[{}]", m.len()),
-            Entry::Patternizer(p) => format!("Pattern[{}]", p.token_patterns.len()),
+            Entry::PathMap(m) => format!("{}paths", m.len()),
+            Entry::HandlerMap(m) => format!("{}handlers", m.len()),
+            Entry::PairMap(m) => format!("{}pairs", m.len()),
+            Entry::AnyMap(m) => format!("{}entries", m.len()),
+            Entry::Patternizer(p) => format!("{}patterns", p.token_patterns.len()),
             Entry::PatternRule(_) => "1rule".to_string(),
             Entry::PatternMetrics(m) => format!("{}metrics", m.total_matches + m.total_misses),
             Entry::TokenPattern(_) => "1pattern".to_string(),
             Entry::SamplizerPattern(p) => format!(
-                "Rules[{}]",
+                "{}rules",
                 p.extraction_pattern.as_ref().map_or(0, |s| s.len())
             ),
-            Entry::SamplizerFilePair(f) => format!("file pair[{}]", f.c_file_path),
-            Entry::SamplizerValidation(v) => format!("samplizer Validation[{}]", v.pattern_id),
-            Entry::SamplizerStats(s) => format!("Patterns Generated[{}]", s.patterns_generated),
+            Entry::SamplizerFilePair(_) => "filepair".to_string(),
+            Entry::SamplizerValidation(_) => "validation".to_string(),
+            Entry::SamplizerStats(s) => format!("{}patterns", s.patterns_generated),
+            Entry::TokenList(tokens) => format!("{}tokens", tokens.len()),
         }
     }
 }
@@ -281,22 +382,43 @@ impl PartialEq for Entry {
             (Entry::Bool(left), Entry::Bool(right)) => left == right,
             (Entry::Func(left), Entry::Func(right)) => std::ptr::fn_addr_eq(*left, *right),
             (Entry::Path(left), Entry::Path(right)) => left == right,
-            (Entry::Handler(left), Entry::Handler(right)) => left == right,
+            (Entry::Handler(left), Entry::Handler(right)) => left.id() == right.id(),
             (Entry::HandlerReport(left), Entry::HandlerReport(right)) => left == right,
+            (Entry::Table(left), Entry::Table(right)) => left == right,
+            (Entry::TableCell(left), Entry::TableCell(right)) => left == right,
             (Entry::Pair(left), Entry::Pair(right)) => left == right,
             (Entry::List(left), Entry::List(right)) => left == right,
+            (Entry::Any(left), Entry::Any(right)) => left == right,
             (Entry::IdMap(left), Entry::IdMap(right)) => left == right,
+            (Entry::ValMap(left), Entry::ValMap(right)) => left == right,
             (Entry::StrMap(left), Entry::StrMap(right)) => left == right,
             (Entry::BoolMap(left), Entry::BoolMap(right)) => left == right,
             (Entry::FuncMap(left), Entry::FuncMap(right)) => left == right,
             (Entry::PathMap(left), Entry::PathMap(right)) => left == right,
-            (Entry::HandlerMap(left), Entry::HandlerMap(right)) => left == right,
+            (Entry::HandlerMap(left), Entry::HandlerMap(right)) => {
+                // Compare handler IDs instead of handlers (trait objects can't be compared)
+                let left_ids: Vec<_> = left.iter().map(|(k, v)| (k, v.id())).collect();
+                let right_ids: Vec<_> = right.iter().map(|(k, v)| (k, v.id())).collect();
+                left_ids == right_ids
+            },
             (Entry::PairMap(left), Entry::PairMap(right)) => left == right,
-            (Entry::Any(left), Entry::Any(right)) => left == right,
+            (Entry::AnyMap(left), Entry::AnyMap(right)) => left == right,
+            (Entry::Patternizer(left), Entry::Patternizer(right)) => left == right,
+            (Entry::PatternRule(left), Entry::PatternRule(right)) => left == right,
+            (Entry::PatternMetrics(left), Entry::PatternMetrics(right)) => left == right,
+            (Entry::TokenPattern(left), Entry::TokenPattern(right)) => left == right,
+            (Entry::SamplizerPattern(left), Entry::SamplizerPattern(right)) => left == right,
+            (Entry::SamplizerFilePair(left), Entry::SamplizerFilePair(right)) => left == right,
+            (Entry::SamplizerValidation(left), Entry::SamplizerValidation(right)) => left == right,
+            (Entry::SamplizerStats(left), Entry::SamplizerStats(right)) => {
+                left.patterns_generated == right.patterns_generated
+            }
+            (Entry::TokenList(left), Entry::TokenList(right)) => left == right,
             _ => false,
         }
     }
 }
+
 impl Eq for Entry {}
 
 impl std::fmt::Display for Entry {
@@ -308,7 +430,7 @@ impl std::fmt::Display for Entry {
             Entry::Bool(b) => write!(f, "Bool({})", b),
             Entry::Func(_) => write!(f, "Func(<function>)"),
             Entry::Path(p) => write!(f, "Path({})", p.display()),
-            Entry::Handler(h) => write!(f, "Handler({})", h.id.name),
+            Entry::Handler(h) => write!(f, "Handler({})", h.id().name()),
             Entry::HandlerReport(r) => write!(f, "Report({}: {})", r.handler_name, r.message),
             Entry::Table(t) => write!(
                 f,
@@ -355,6 +477,7 @@ impl std::fmt::Display for Entry {
                 v.pattern_id.replace('\n', " | ")
             ),
             Entry::SamplizerStats(s) => write!(f, "SamplizerStats({})", s.patterns_generated),
+            Entry::TokenList(tokens) => write!(f, "TokenList[{}]", tokens.len()),
         }
     }
 }

@@ -1,6 +1,5 @@
 use crate::{
-    HandlerPattern, Id, Kind, PatternResult, PatternRule, Reason, Token, TokenPattern, context,
-    error::C2RError, handler::HandlerResult,
+    Context, Entry, Id, Kind, PatternResult, Reason, Result, Samplizer, Token, context, error::C2RError, handler::HandlerResult
 };
 use core::{ops::Range, option::Option::None};
 
@@ -59,7 +58,7 @@ pub fn find_matching_token(tokens: &[Token], open_token: &str, close_token: &str
     None
 }
 /// Find matching parenthesis with improved error handling
-pub fn find_matching_paren(tokens: &[Token], start: usize) -> Result<usize, C2RError> {
+pub fn find_matching_paren(tokens: &[Token], start: usize) -> Result<usize> {
     if start >= tokens.len() {
         return Err(C2RError::new(
             Kind::Other,
@@ -80,7 +79,7 @@ pub fn find_matching_paren(tokens: &[Token], start: usize) -> Result<usize, C2RE
 }
 
 /// Find matching brace with improved error handling
-pub fn find_matching_brace(tokens: &[Token], start: usize) -> Result<usize, C2RError> {
+pub fn find_matching_brace(tokens: &[Token], start: usize) -> Result<usize> {
     if start >= tokens.len() {
         return Err(C2RError::new(
             Kind::Other,
@@ -181,7 +180,7 @@ pub fn count_until(tokens: &[Token], end_token: &str) -> usize {
 }
 
 /// Check if a token sequence represents a type
-pub fn is_type(tokens: &[Token]) -> bool {
+pub fn is_type(context: &Context, tokens: &[Token]) -> bool {
     if tokens.is_empty() {
         return false;
     }
@@ -195,22 +194,14 @@ pub fn is_type(tokens: &[Token]) -> bool {
 
     // Check for 'const' qualifier
     if is_token(first_token, "const") && tokens.len() > 1 {
-        return is_type(&tokens[1..]);
+        return is_type(context, &tokens[1..]);
     }
 
     // Check for typedefs in the registry
-    if let Some(typedefs) = context!()
-        .registry
-        .entries
-        .get(&Id::new(0, "typedefs".to_string()))
-    {
-        match typedefs {
-            crate::Entry::StrMap(map) => {
-                if map.contains_key(&first_token.to_string()) {
-                    return true;
-                }
-            }
-            _ => {}
+    let typedefs = context.registry.entries.get(&Id::get("typedefs")).cloned();
+    if let Some(Entry::StrMap(map)) = typedefs {
+        if map.contains_key(&first_token.to_string()) {
+            return true;
         }
     }
 
@@ -251,7 +242,7 @@ pub fn is_primitive_type(token: &Token) -> bool {
     )
 }
 /// Create a simple handler result that doesn't handle tokens
-pub fn not_handled() -> Result<HandlerResult, C2RError> {
+pub fn not_handled() -> Result<HandlerResult> {
     Ok(HandlerResult::NotHandled(
         None,
         0..0,
@@ -260,7 +251,7 @@ pub fn not_handled() -> Result<HandlerResult, C2RError> {
 }
 
 /// Create a handler result that replaces the processed tokens with the given Rust code
-pub fn replace_with(rust_code: String, id: Id) -> Result<HandlerResult, C2RError> {
+pub fn replace_with(rust_code: String, id: Id) -> Result<HandlerResult> {
     Ok(HandlerResult::Completed(None, 0..1, rust_code, id))
 }
 
@@ -270,7 +261,7 @@ pub fn replace_with_range(
     rust_code: String,
     token_range: std::ops::Range<usize>,
     id: Id,
-) -> Result<HandlerResult, C2RError> {
+) -> Result<HandlerResult> {
     Ok(HandlerResult::Completed(None, token_range, rust_code, id))
 }
 
@@ -319,114 +310,76 @@ pub fn extract_docs(tokens: &[Token]) -> Option<String> {
 pub fn convert_type_with_pattern(c_type: &str, pattern: &str) -> String {
     let clean_type = c_type.trim();
 
-    let mut context = crate::context!();
-
-    // Add C type patterns to context patternizer
-    let c_int_pattern = HandlerPattern::new("c_int".to_string(), "C integer types".to_string())
-        .with_rules(vec![PatternRule::new(TokenPattern::OneOf(vec![
-            "int".to_string(),
-            "unsigned int".to_string(),
-            "signed int".to_string(),
-        ]))]);
-
-    let c_char_pattern = HandlerPattern::new("c_char".to_string(), "C character types".to_string())
-        .with_rules(vec![PatternRule::new(TokenPattern::OneOf(vec![
-            "char".to_string(),
-            "unsigned char".to_string(),
-            "signed char".to_string(),
-        ]))]);
-
-    let c_pointer_pattern =
-        HandlerPattern::new("c_pointer".to_string(), "C pointer types".to_string()).with_rules(
-            vec![PatternRule::new(TokenPattern::OneOf(vec![
-                "void*".to_string(),
-                "char*".to_string(),
-            ]))],
-        );
-
-    context
-        .patternizer
-        .register_pattern("c_int".to_string(), c_int_pattern);
-    context
-        .patternizer
-        .register_pattern("c_char".to_string(), c_char_pattern);
-    context
-        .patternizer
-        .register_pattern("c_pointer".to_string(), c_pointer_pattern);
-
-    // Create token for pattern matching
-    let token = Token::s(clean_type.to_string());
-    let tokens = vec![token];
-
-    let conversion_result = match pattern {
-        "extern_function" => {
-            if let PatternResult::Match { .. } = context.patternizer.match_pattern("c_int", &tokens)
-            {
-                match clean_type {
-                    "int" => "i32",
-                    "unsigned int" => "u32",
-                    _ => "i32",
-                }
-            } else if let PatternResult::Match { .. } =
-                context.patternizer.match_pattern("c_char", &tokens)
-            {
-                match clean_type {
-                    "char" => "i8",
-                    "unsigned char" => "u8",
-                    _ => "i8",
-                }
-            } else if let PatternResult::Match { .. } =
-                context.patternizer.match_pattern("c_pointer", &tokens)
-            {
-                match clean_type {
-                    "void*" => "*mut std::ffi::c_void",
-                    "char*" => "*const std::ffi::c_char",
-                    _ => clean_type,
-                }
-            } else {
-                match clean_type {
-                    "float" => "f32",
-                    "double" => "f64",
-                    _ => clean_type,
-                }
-            }
-        }
-        _ => {
-            if let PatternResult::Match { .. } = context.patternizer.match_pattern("c_int", &tokens)
-            {
-                match clean_type {
-                    "int" => "i32",
-                    "unsigned int" => "u32",
-                    _ => "i32",
-                }
-            } else if let PatternResult::Match { .. } =
-                context.patternizer.match_pattern("c_char", &tokens)
-            {
-                match clean_type {
-                    "char" => "char",
-                    "unsigned char" => "u8",
-                    _ => "char",
-                }
-            } else if let PatternResult::Match { .. } =
-                context.patternizer.match_pattern("c_pointer", &tokens)
-            {
-                match clean_type {
-                    "void*" => "*mut ()",
-                    "char*" => "&str",
-                    _ => clean_type,
-                }
-            } else {
-                match clean_type {
-                    "float" => "f32",
-                    "double" => "f64",
-                    _ => clean_type,
-                }
-            }
-        }
-    };
-
-    conversion_result.to_string()
+    // Simplified type conversion without complex pattern matching for now
+    // TODO: Implement full pattern-based conversion using Context access
+    match clean_type {
+        "int" => "i32".to_string(),
+        "unsigned int" | "uint" => "u32".to_string(),
+        "short" => "i16".to_string(),
+        "unsigned short" | "ushort" => "u16".to_string(),
+        "long" => "i64".to_string(),
+        "unsigned long" | "ulong" => "u64".to_string(),
+        "char" => "i8".to_string(),
+        "unsigned char" | "uchar" => "u8".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
+        "void*" => "*mut std::ffi::c_void".to_string(),
+        "char*" => "*const std::ffi::c_char".to_string(),
+        "const char*" => "*const std::ffi::c_char".to_string(),
+        _ => clean_type.to_string(),
+    }
 }
+
+/// Centralized C identifier to Rust naming convention converter
+pub fn convert_identifier_to_rust(identifier: &str, target_case: IdentifierCase) -> String {
+    match target_case {
+        IdentifierCase::SnakeCase => to_snake_case(identifier),
+        IdentifierCase::PascalCase => to_pascal_case(identifier),
+        IdentifierCase::ScreamingSnakeCase => to_screaming_snake_case(identifier),
+    }
+}
+
+/// Target case types for identifier conversion
+pub enum IdentifierCase {
+    SnakeCase,    // for functions, variables
+    PascalCase,   // for types, enums, structs
+    ScreamingSnakeCase, // for constants
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut chars = s.chars().peekable();
+    
+    while let Some(ch) = chars.next() {
+        if ch.is_uppercase() && !result.is_empty() {
+            result.push('_');
+        }
+        result.push(ch.to_lowercase().next().unwrap_or(ch));
+    }
+    result
+}
+
+fn to_pascal_case(s: &str) -> String {
+    let mut result = String::new();
+    let mut capitalize_next = true;
+    
+    for ch in s.chars() {
+        if ch == '_' {
+            capitalize_next = true;
+        } else if capitalize_next {
+            result.push(ch.to_uppercase().next().unwrap_or(ch));
+            capitalize_next = false;
+        } else {
+            result.push(ch.to_lowercase().next().unwrap_or(ch));
+        }
+    }
+    result
+}
+
+fn to_screaming_snake_case(s: &str) -> String {
+    to_snake_case(s).to_uppercase()
+}
+
 /// Optimized C type to Rust type conversion with caching and improved logic
 pub fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
     if type_tokens.is_empty() {
@@ -481,7 +434,7 @@ pub fn convert_c_type_to_rust(type_tokens: &[Token]) -> String {
     final_type
 }
 /// Helper function to convert tokens to a string representation
-pub fn tokens_to_string(tokens: &[Token]) -> Result<String, C2RError> {
+pub fn tokens_to_string(tokens: &[Token]) -> Result<String> {
     let mut result = String::new();
 
     for (i, token) in tokens.iter().enumerate() {
@@ -592,3 +545,20 @@ pub fn filter_tokens(
 
     (consumed_count, result_tokens)
 }
+
+/// Helper function for pattern-based token filtering (moved from BaseHandler)
+pub fn filter_tokens_for_handler(tokens: &[Token], token_range: Range<usize>) -> Vec<Token> {
+    if token_range.end > tokens.len() || token_range.start >= tokens.len() {
+        return Vec::new();
+    }
+    
+    tokens[token_range.clone()]
+        .iter()
+        .filter(|token| !matches!(**token, crate::Token::n()))
+        .cloned()
+        .collect()
+}
+
+
+
+

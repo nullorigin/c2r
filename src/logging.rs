@@ -1,6 +1,4 @@
 use std::sync::atomic::Ordering;
-
-// Verbosity levels
 pub const ERROR: u8 = 0;
 pub const WARN: u8 = 1;
 pub const INFO: u8 = 2;
@@ -16,7 +14,6 @@ pub fn set_verbosity_level(level: u8) {
 pub fn get_verbosity_level() -> u8 {
     VERBOSITY_LEVEL.load(Ordering::SeqCst)
 }
-
 use std::sync::atomic::AtomicU8;
 
 /// Convenient macro for creating and adding handler reports to the centralized system
@@ -30,93 +27,67 @@ use std::sync::atomic::AtomicU8;
 #[macro_export]
 macro_rules! report {
     // Basic report with just message and success
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr) => {
-        {
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: 0,
-                tokens_consumed: 0,
-                phase: $phase,
-                success: $success,
-                metadata: std::collections::HashMap::new(),
-            };
-            $crate::config::Global::write(|ctx| ctx.add_report(report.clone()));
-        }
+    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr) => {
+        $context.registry.add_report($crate::HandlerReport::new(
+            &format!("report_{}_{}", $handler_name, $function_name),
+            std::sync::Arc::new($crate::Id::get($handler_name)),
+            $handler_name.to_string(),
+            $function_name.to_string(),
+            $message.to_string(),
+            $level,
+            $phase,
+        ).with_success($success));
     };
 
     // Report with token counts
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
+    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
      $tokens_processed:expr, $tokens_consumed:expr) => {
-        {
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: $tokens_processed,
-                tokens_consumed: $tokens_consumed,
-                phase: $phase,
-                success: $success,
-                metadata: std::collections::HashMap::new(),
-            };
-             $crate::config::Global::write(|ctx| ctx.add_report(report));
-        }
+        $context.registry.add_report($crate::HandlerReport::new(
+            &format!("report_{}_{}", $handler_name, $function_name),
+            std::sync::Arc::new($crate::Id::get($handler_name)),
+            $handler_name.to_string(),
+            $function_name.to_string(),
+            $message.to_string(),
+            $level,
+            $phase,
+        ).with_tokens($tokens_processed, $tokens_consumed)
+         .with_success($success));
     };
 
     // Report with metadata key-value pairs
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
+    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
      $(($key:expr, $value:expr)),+) => {
         {
-            let mut metadata = std::collections::HashMap::new();
-            $(
-                metadata.insert($key.to_string(), $value.to_string());
-            )+
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: 0,
-                tokens_consumed: 0,
-                phase: $phase,
-                success: $success,
-                metadata,
-            };
-            $crate::config::Global::write(|ctx| ctx.add_report(report));
+            let metadata_str: String = vec![$(format!("{}={}", $key, $value)),+].join(", ");
+            let enhanced_message = format!("{} [{}]", $message, metadata_str);
+            $context.registry.add_report($crate::HandlerReport::new(
+                &format!("report_{}_{}", $handler_name, $function_name),
+                std::sync::Arc::new($crate::Id::get($handler_name)),
+                $handler_name.to_string(),
+                $function_name.to_string(),
+                enhanced_message,
+                $level,
+                $phase,
+            ).with_success($success));
         }
     };
 
     // Full report with token counts and metadata
-    ($handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
+    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
      $tokens_processed:expr, $tokens_consumed:expr, $(($key:expr, $value:expr)),+) => {
         {
-            let mut metadata = std::collections::HashMap::new();
-            $(
-                metadata.insert($key.to_string(), $value.to_string());
-            )+
-            let report = $crate::config::HandlerReport {
-                report_id: Box::new($crate::Id::get(&$crate::Id::gen_name(&format!("report_{}_{}", $handler_name, $function_name)))),
-                handler_id: Box::new($crate::Id::get($handler_name)),
-                handler_name: $handler_name.to_string(),
-                function_name: $function_name.to_string(),
-                message: $message.to_string(),
-                level: $level,
-                tokens_processed: $tokens_processed,
-                tokens_consumed: $tokens_consumed,
-                phase: $phase,
-                success: $success,
-                metadata,
-            };
-             $crate::context!(add_report(report));
+            let metadata_str: String = vec![$(format!("{}={}", $key, $value)),+].join(", ");
+            let enhanced_message = format!("{} [{}]", $message, metadata_str);
+            $context.registry.add_report($crate::HandlerReport::new(
+                &format!("report_{}_{}", $handler_name, $function_name),
+                std::sync::Arc::new($crate::Id::get($handler_name)),
+                $handler_name.to_string(),
+                $function_name.to_string(),
+                enhanced_message,
+                $level,
+                $phase,
+            ).with_tokens($tokens_processed, $tokens_consumed)
+             .with_success($success));
         }
     };
 }
@@ -206,7 +177,7 @@ macro_rules! trace {
 
 // Function to initialize logging based on command line args
 pub fn initialize(verbose_count: u64) {
-    let level = LEVELS[verbose_count as usize];
+    let level = LEVELS[std::cmp::min(verbose_count as usize, LEVELS.len() - 1)];
     set_verbosity_level(level);
     debug!("Logging initialized at level {}", level);
 }

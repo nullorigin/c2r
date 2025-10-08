@@ -5,9 +5,9 @@
 //! This test provides pattern debugging functionality as a standalone test
 //! rather than integrated into the main conversion process.
 
-use crate::error::C2RError;
 use crate::pattern::PatternResult;
 use crate::token::{Token, Tokenizer};
+use crate::Result;
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::SystemTime;
@@ -69,6 +69,12 @@ pub enum PatternMatchResult {
         reason: String,
     },
     CachedNegative {
+        pattern_id: String,
+        cache_hit_count: usize,
+        reason: String,
+    },
+
+    CachedPositive {
         pattern_id: String,
         cache_hit_count: usize,
         reason: String,
@@ -138,8 +144,8 @@ impl StandalonePatternDebugger {
         &mut self,
         pattern_name: String,
         handler_type: String,
-        tokens: &[Token],
-        result: &PatternResult,
+        tokens: &[crate::Token],
+        result: &crate::PatternResult,
         position: usize,
         total_tokens: usize,
         file_path: Option<String>,
@@ -147,7 +153,7 @@ impl StandalonePatternDebugger {
         let attempt = PatternMatchAttempt {
             pattern_name: pattern_name.clone(),
             handler_type: handler_type.clone(),
-            tokens: tokens.iter().take(5).map(|t| format!("{:?}", t)).collect(),
+            tokens: tokens.iter().take(5).map(|t| t.to_string()).collect(),
             result: Self::convert_pattern_result(result),
             context: MatchContext {
                 file_path,
@@ -162,7 +168,7 @@ impl StandalonePatternDebugger {
         self.update_stats(&pattern_name, &handler_type, result);
     }
 
-    fn update_stats(&mut self, pattern_name: &str, handler_type: &str, result: &PatternResult) {
+    fn update_stats(&mut self, pattern_name: &str, handler_type: &str, result: &crate::PatternResult) {
         self.stats.total_attempts += 1;
         self.stats.patterns_tried.insert(pattern_name.to_string());
         self.stats
@@ -170,9 +176,9 @@ impl StandalonePatternDebugger {
             .insert(handler_type.to_string());
 
         match result {
-            PatternResult::Match { .. }
-            | PatternResult::Sequence { .. }
-            | PatternResult::Fuzzy { .. } => {
+            crate::PatternResult::Match { .. }
+            | crate::PatternResult::Sequence { .. }
+            | crate::PatternResult::Fuzzy { .. } => {
                 self.stats.successful_matches += 1;
             }
             _ => {
@@ -182,28 +188,28 @@ impl StandalonePatternDebugger {
     }
 
     /// Convert PatternResult to our simplified version
-    fn convert_pattern_result(result: &PatternResult) -> PatternMatchResult {
+    fn convert_pattern_result(result: &crate::PatternResult) -> PatternMatchResult {
         match result {
-            PatternResult::Match { consumed_tokens } => PatternMatchResult::Match {
+            crate::PatternResult::Match { consumed_tokens } => PatternMatchResult::Match {
                 consumed_tokens: *consumed_tokens,
             },
-            PatternResult::CountOf { offsets } => PatternMatchResult::CountOf {
+            crate::PatternResult::CountOf { offsets } => PatternMatchResult::CountOf {
                 offset_count: offsets.len(),
             },
-            PatternResult::Sequence { range } => PatternMatchResult::Sequence {
+            crate::PatternResult::Sequence { range } => PatternMatchResult::Sequence {
                 range_start: range.start,
                 range_end: range.end,
             },
-            PatternResult::Fuzzy { offsets } => PatternMatchResult::Fuzzy {
+            crate::PatternResult::Fuzzy { offsets } => PatternMatchResult::Fuzzy {
                 offset_count: offsets.len(),
             },
-            PatternResult::NoMatch { reason } => PatternMatchResult::NoMatch {
+            crate::PatternResult::NoMatch { reason } => PatternMatchResult::NoMatch {
                 reason: reason.clone(),
             },
-            PatternResult::Reject { reason } => PatternMatchResult::Reject {
+            crate::PatternResult::Reject { reason } => PatternMatchResult::Reject {
                 reason: reason.clone(),
             },
-            PatternResult::TypeMismatch {
+            crate::PatternResult::TypeMismatch {
                 expected_type,
                 actual_type,
                 position,
@@ -214,7 +220,7 @@ impl StandalonePatternDebugger {
                 position: *position,
                 reason: reason.clone(),
             },
-            PatternResult::ValueMismatch {
+            crate::PatternResult::ValueMismatch {
                 expected_value,
                 actual_value,
                 position,
@@ -225,7 +231,7 @@ impl StandalonePatternDebugger {
                 position: *position,
                 reason: reason.clone(),
             },
-            PatternResult::StructureMismatch {
+            crate::PatternResult::StructureMismatch {
                 expected_pattern,
                 actual_structure,
                 reason,
@@ -234,7 +240,7 @@ impl StandalonePatternDebugger {
                 actual_structure: actual_structure.clone(),
                 reason: reason.clone(),
             },
-            PatternResult::CachedNegative {
+            crate::PatternResult::CachedNegative {
                 pattern_id,
                 cache_hit_count,
                 reason,
@@ -243,11 +249,20 @@ impl StandalonePatternDebugger {
                 cache_hit_count: *cache_hit_count,
                 reason: reason.clone(),
             },
+            crate::PatternResult::CachedPositive {
+                pattern_id,
+                cache_hit_count,
+                reason,
+            } => PatternMatchResult::CachedPositive {
+                pattern_id: pattern_id.clone(),
+                cache_hit_count: *cache_hit_count,
+                reason: reason.clone(),
+            },
         }
     }
 
     /// Export all collected pattern debugging data to JSON files
-    pub fn export_results(&self, output_dir: &str) -> Result<(), std::io::Error> {
+    pub fn export_results(&self, output_dir: &str) -> std::result::Result<(), std::io::Error> {
         std::fs::create_dir_all(output_dir)?;
 
         // Separate matched and unmatched attempts
@@ -291,7 +306,7 @@ impl StandalonePatternDebugger {
         attempts: &[&PatternMatchAttempt],
         file_path: &str,
         is_matched: bool,
-    ) -> Result<(), std::io::Error> {
+    ) -> std::result::Result<(), std::io::Error> {
         let key = if is_matched {
             "matched_patterns"
         } else {
@@ -349,7 +364,7 @@ impl StandalonePatternDebugger {
         Ok(())
     }
 
-    fn export_statistics_to_json(&self, file_path: &str) -> Result<(), std::io::Error> {
+    fn export_statistics_to_json(&self, file_path: &str) -> std::result::Result<(), std::io::Error> {
         let mut json = String::from("{\n  \"statistics\": {\n");
         json.push_str(&format!(
             "    \"total_attempts\": {},\n",
@@ -429,14 +444,14 @@ impl StandalonePatternDebugger {
 
 /// Test that demonstrates standalone pattern debugging
 #[test]
-fn test_standalone_pattern_debugging() -> Result<(), C2RError> {
+fn test_standalone_pattern_debugging() -> Result<()> {
     println!("🧪 Testing standalone pattern debugging...");
 
     // Create a test debugger
     let mut debugger = StandalonePatternDebugger::new("test_file.c".to_string());
 
     // Create some test tokens
-    let mut tokenizer = Tokenizer::new("test_tokenizer");
+    let mut tokenizer = Tokenizer::new();
     let c_code = b"int main(int argc, char* argv[]) { return 0; }".to_vec();
     let tokens = tokenizer.tokenize(c_code)?;
 
@@ -496,7 +511,7 @@ fn test_standalone_pattern_debugging() -> Result<(), C2RError> {
 
 /// Comprehensive test with real C code parsing and pattern matching
 #[test]
-fn test_comprehensive_standalone_pattern_debugging() -> Result<(), C2RError> {
+fn test_comprehensive_standalone_pattern_debugging() -> Result<()> {
     println!("🧪 Testing comprehensive standalone pattern debugging with real C code...");
 
     let mut debugger = StandalonePatternDebugger::new("comprehensive_test.c".to_string());
@@ -525,7 +540,7 @@ fn test_comprehensive_standalone_pattern_debugging() -> Result<(), C2RError> {
     "
     .to_vec();
 
-    let mut tokenizer = Tokenizer::new("comprehensive_tokenizer");
+    let mut tokenizer = Tokenizer::new();
     let tokens = tokenizer.tokenize(c_code)?;
 
     println!(

@@ -6,12 +6,13 @@
     non_upper_case_globals
 )]
 
-use crate::convert;
+use crate::{convert, ArrayInfo, CommentInfo, EnumInfo, ExpressionInfo, FunctionInfo, GlobalInfo, Id, IncludeInfo, MacroInfo, StructInfo, TypedefInfo};
 use crate::{Token, tok};
 use std::fmt;
+use std::ops::Range;
 
 /// Represents different types of extractable C elements
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ExtractedElement {
     Function(ExtractedFunction),
     Struct(ExtractedStruct),
@@ -27,31 +28,23 @@ pub enum ExtractedElement {
 }
 
 /// Represents an extracted C function
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedFunction {
-    pub name: String,
-    pub return_type: Vec<Token>,
-    pub parameters: Vec<Token>, // (param_name, param_type)
-    pub body: Vec<Token>,
-    pub is_variadic: bool,
-    pub is_static: bool,
-    pub is_inline: bool,
-    pub is_extern: bool,
-    pub tokens: Vec<Token>,
-    pub from_recovery: bool, // New field
-    pub is_definition: bool,
+    pub id: Id,
     pub code: String,
+    pub info: FunctionInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedFunction {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "fn {}(", self.name)?;
+        write!(f, "fn {}(", self.info.name)?;
 
         // Format parameters
         let mut first = true;
-        for param_token in &self.parameters {
-            // This needs proper parameter extraction logic
-            let param_str = tokens_to_rust(&[param_token.clone()]);
+        for param_str in self.info.parameters.clone() {
             if !param_str.is_empty() {
                 if !first {
                     write!(f, ", ")?;
@@ -61,7 +54,7 @@ impl fmt::Display for ExtractedFunction {
             }
         }
 
-        if self.is_variadic {
+        if self.info.is_variadic {
             if !first {
                 write!(f, ", ")?;
             }
@@ -69,7 +62,7 @@ impl fmt::Display for ExtractedFunction {
         }
 
         // Format return type
-        let return_type_str = tokens_to_rust(&self.return_type);
+        let return_type_str = &self.info.return_type;
         if !return_type_str.is_empty() && return_type_str != "void" {
             write!(f, ") -> {}", return_type_str)?;
         } else {
@@ -81,44 +74,41 @@ impl fmt::Display for ExtractedFunction {
 }
 
 /// Represents an extracted C struct
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedStruct {
-    pub name: String,
-    pub fields: Vec<(String, Vec<Token>)>, // (field_name, field_type)
-    pub tokens: Vec<Token>,
-    pub is_typedef: bool,
-    pub is_forward_declaration: bool,
-    pub typedef_name: Option<String>,
+    pub id: Id,
     pub code: String,
+    pub info: StructInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedStruct {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pub struct {} {{\n", self.name)?;
-        for (field_name, field_type) in &self.fields {
-            let type_str = tokens_to_rust(field_type);
-            write!(f, "    pub {}: {},\n", field_name, type_str)?;
+        write!(f, "pub struct {} {{\n", self.info.name)?;
+        for (field_name, field_type) in &self.info.fields {
+            write!(f, "    pub {}: {},\n", field_name, field_type)?;
         }
         write!(f, "}}\n")
     }
 }
 
 /// Represents an extracted C enum
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedEnum {
-    pub name: String,
-    pub values: Vec<(String, Option<i64>)>, // (name, value)
-    pub tokens: Vec<Token>,
-    pub typedef_name: Option<String>,
-    pub is_typedef: bool,
-    pub is_forward_declaration: bool,
+    pub id: Id,
     pub code: String,
+    pub info: EnumInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: std::ops::Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedEnum {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pub enum {} {{\n", self.name)?;
-        for (variant, val) in &self.values {
+        write!(f, "pub enum {} {{\n", self.info.name)?;
+        for (variant, val) in &self.info.variants {
             if let Some(v) = val {
                 write!(f, "    {} = {},\n", variant, v)?;
             } else {
@@ -130,67 +120,64 @@ impl fmt::Display for ExtractedEnum {
 }
 
 /// Represents an extracted C typedef
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedTypedef {
-    pub name: String,
-    pub tokens: Vec<Token>,
+    pub id: Id,
     pub code: String,
+    pub info: TypedefInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: std::ops::Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedTypedef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let orig_type = tokens_to_rust(&self.tokens);
-        write!(f, "type {} = {};\n", self.name, orig_type)
+        write!(f, "type {} = {};\n", self.info.name, orig_type)
     }
 }
 
 /// Represents an extracted global variable
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedGlobal {
-    pub name: String,
-    pub array_dims: Vec<String>,
-    pub initial_value: Option<Vec<Token>>,
-    pub is_const: bool,
-    pub is_static: bool,
-    pub tokens: Vec<Token>,
-    pub is_extern: bool,
-    pub array_size: Option<String>,
-    pub initializer: Option<String>,
-    pub type_name: String,
-    pub storage_class: Option<String>,
+    pub id: Id,
     pub code: String,
+    pub info: GlobalInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedGlobal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let type_str = &self.type_name;
+        let type_str = &self.info.type_name;
         let mut result = String::new();
 
-        if self.is_const {
+        if self.info.is_const {
             result.push_str("pub const ");
-        } else if self.is_static {
+        } else if self.info.is_static {
             result.push_str("pub static ");
         } else {
             result.push_str("pub static mut ");
         }
 
-        result.push_str(&self.name);
+        result.push_str(&self.info.name);
         result.push_str(": ");
 
         // Handle array dimensions
-        if self.array_dims.is_empty() {
+        if self.info.dimensions == 0 {
             result.push_str(&type_str);
         } else {
             // Format arrays as [type; size]
-            for dim in &self.array_dims {
+            for dim in 0..self.info.dimensions {
                 result = format!("[{}; {}]", type_str, dim);
             }
         }
 
         write!(f, "{}", result)?;
 
-        if let Some(init) = &self.initial_value {
-            let init_tokens: Vec<String> = init.iter().map(|t| t.to_string()).collect();
+        if let Some(init)    = &self.info.initializer {
+            let init_tokens: Vec<String> = init.chars().map(|t| t.to_string()).collect();
             let init_str = init_tokens.join(" ");
             write!(f, " = {}", init_str)?;
         }
@@ -200,28 +187,28 @@ impl fmt::Display for ExtractedGlobal {
 }
 
 /// Represents an extracted macro
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedMacro {
-    pub name: String,
-    pub params: Vec<String>,
-    pub body: Vec<Token>,
-    pub tokens: Vec<Token>,
-    pub is_function_like: bool,
+    pub id: Id,
     pub code: String,
+    pub info: MacroInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: std::ops::Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedMacro {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "// macro {}", self.name)?;
+        write!(f, "// macro {}", self.info.name)?;
 
-        if !self.params.is_empty() {
-            write!(f, "({})", self.params.join(", "))?;
+        if !self.info.params.is_empty() {
+            write!(f, "({})", self.info.params.join(", "))?;
         }
 
-        if !self.body.is_empty() {
+        if !self.info.body.is_empty() {
             let body_text = self
-                .body
-                .iter()
+                .info.body
+                .chars()
                 .map(|t| t.to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -232,57 +219,62 @@ impl fmt::Display for ExtractedMacro {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedInclude {
-    pub path: String,
-    pub tokens: Vec<Token>,
-    pub is_system_include: bool,
+    pub id: Id,
     pub code: String,
+    pub info: IncludeInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedInclude {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "// include {}\n", self.path)
+        write!(f, "// include {}\n", self.info.path)
     }
 }
 
 /// Represents an extracted C array
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedArray {
-    pub name: String,
-    pub element_type: String,
-    pub size: String,
-    pub is_declaration: bool,
+    pub id: Id,
     pub code: String,
+    pub info: ArrayInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: std::ops::Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedArray {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_declaration {
+        if self.info.is_declaration {
             write!(
                 f,
                 "let mut {}: [{}; {}] = [Default::default(); {}];",
-                self.name, self.element_type, self.size, self.size
+                self.info.name, self.info.element_type, self.info.size.as_ref().unwrap(), self.info.size.as_ref().unwrap()
             )
         } else {
-            write!(f, "{}[{}]", self.name, self.size)
+            write!(f, "{}[{}]", self.info.name, self.info.size.as_ref().unwrap())
         }
     }
 }
 
 /// Represents an extracted C comment
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedComment {
+    pub id: Id,
     pub code: String,
-    pub is_block: bool,
-    pub is_doc_comment: bool,
+    pub info: CommentInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
-
 impl fmt::Display for ExtractedComment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.is_doc_comment {
+        if self.info.is_documentation {
             write!(f, "/// {}", self.code)
-        } else if self.is_block {
+        } else if self.info.is_multiline {
             if self.code.contains('\n') {
                 write!(f, "/* {} */", self.code)
             } else {
@@ -295,53 +287,53 @@ impl fmt::Display for ExtractedComment {
 }
 
 /// Represents an extracted C expression
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedExpression {
-    pub expression_type: String,
-    pub left_operand: String,
-    pub operator: String,
-    pub right_operand: String,
-    pub result_type: Option<String>,
+    pub id: Id,
     pub code: String,
+    pub info: ExpressionInfo,
     pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedExpression {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.expression_type.as_str() {
+        match self.info.expression_type.as_str() {
             "ternary" => {
-                let parts: Vec<&str> = self.right_operand.split(" : ").collect();
+                let parts: Vec<&str> = self.info.right_operand.split(" : ").collect();
                 if parts.len() == 2 {
                     write!(
                         f,
                         "if {} {{ {} }} else {{ {} }}",
-                        self.left_operand, parts[0], parts[1]
+                        self.info.left_operand, parts[0], parts[1]
                     )
                 } else {
                     write!(
                         f,
                         "{} {} {}",
-                        self.left_operand, self.operator, self.right_operand
+                        self.info.left_operand, self.info.operator, self.info.right_operand
                     )
                 }
             }
             _ => write!(
                 f,
                 "{} {} {}",
-                self.left_operand, self.operator, self.right_operand
+                self.info.left_operand, self.info.operator, self.info.right_operand
             ),
         }
     }
 }
 
 /// Represents an extracted C control flow statement
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedControlFlow {
     pub control_type: String,
     pub condition: Vec<Token>,
     pub body: Vec<Token>,
     pub tokens: Vec<Token>,
     pub code: String,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedControlFlow {

@@ -1,5 +1,6 @@
 use crate::error::C2RError;
-use crate::{Kind, Reason};
+use crate::{Kind, Reason, Result};
+use core::result::Result::{Err, Ok};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -8,7 +9,7 @@ pub struct FileUtils;
 
 impl FileUtils {
     /// Read a file and return its contents as a string
-    pub fn read_file(path: &str) -> Result<String, C2RError> {
+    pub fn read_file(path: &str) -> Result<String> {
         let result = fs::read_to_string(path);
         match result {
             Ok(content) => Ok(content),
@@ -59,7 +60,7 @@ impl FileUtils {
     }
 
     /// Read file content from a path
-    pub fn read_file_content(path: &Path) -> Result<String, C2RError> {
+    pub fn read_file_content(path: &Path) -> Result<String> {
         match fs::read_to_string(path) {
             Ok(content) => Ok(content),
             Err(err) => Err(C2RError::new(
@@ -71,7 +72,7 @@ impl FileUtils {
     }
 
     /// Get all files with a specific extension in a directory (recursive)
-    pub fn get_files_with_extension(dir: &str, extension: &str) -> Result<Vec<PathBuf>, C2RError> {
+    pub fn get_files_with_extension(dir: &str, extension: &str) -> Result<Vec<PathBuf>> {
         let mut result = Vec::new();
         Self::get_files_with_extension_recursive(Path::new(dir), extension, &mut result)?;
         Ok(result)
@@ -82,7 +83,7 @@ impl FileUtils {
         dir: &Path,
         extension: &str,
         result: &mut Vec<PathBuf>,
-    ) -> Result<(), C2RError> {
+    ) -> Result<()> {
         if !dir.is_dir() {
             return Ok(());
         }
@@ -152,11 +153,11 @@ mod tests {
     #[test]
     fn test_resolve_path() {
         // Mock the Path::is_dir() behavior since we can't test with actual directories in unit tests
-        let path = FileUtils::resolve_path("/home/user/", "file.txt");
+        let path: PathBuf = FileUtils::resolve_path("/home/user/", "file.txt");
         assert_eq!(path, PathBuf::from("/home/user/file.txt"));
 
         // When base is a file
-        let path = FileUtils::resolve_path("/home/user/base.c", "file.h");
+        let path: PathBuf = FileUtils::resolve_path("/home/user/base.c", "file.h");
         assert_eq!(path, PathBuf::from("/home/user/file.h"));
     }
 }

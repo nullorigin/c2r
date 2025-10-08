@@ -1,6 +1,6 @@
 use crate::{Entry, Id};
 use core::fmt;
-#[allow(unused_imports)]
+
 use std::fmt::Write;
 use std::{
     collections::HashMap,
@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Text justification options for table cells
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Justification {
     /// Left-aligned text (default)
     Left,
@@ -18,6 +18,551 @@ pub enum Justification {
     Center,
     /// Right-aligned text
     Right,
+}
+#[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
+pub struct Coords {
+    x_ranges: Vec<Range<usize>>,
+    y_ranges: Vec<Range<usize>>,
+    shape_type: ShapeType,
+}
+
+#[derive(Debug, Clone, Default, Hash, PartialEq, Eq)]
+pub enum ShapeType {
+    #[default]
+    Rectangle,
+    Circle,
+    Triangle,
+    Line,
+    Custom,
+}
+
+impl Coords {
+    /// Create a new rectangular coordinate with a single range
+    pub fn new(x: Range<usize>, y: Range<usize>) -> Self {
+        Self {
+            x_ranges: vec![x],
+            y_ranges: vec![y],
+            shape_type: ShapeType::Rectangle,
+        }
+    }
+
+    /// Create a coordinate with a specific shape type
+    pub fn new_with_shape(x: Range<usize>, y: Range<usize>, shape: ShapeType) -> Self {
+        Self {
+            x_ranges: vec![x],
+            y_ranges: vec![y],
+            shape_type: shape,
+        }
+    }
+
+    /// Create a coordinate from multiple ranges (automatically sets to Custom shape)
+    pub fn from_multiple_ranges(
+        x_ranges: Vec<Range<usize>>,
+        y_ranges: Vec<Range<usize>>,
+    ) -> Self {
+        Self {
+            x_ranges,
+            y_ranges,
+            shape_type: ShapeType::Custom,
+        }
+    }
+
+    /// Create a true mathematical point (dimensionless)
+    /// Uses coord..coord ranges for precise point positioning in shapes
+    /// Example: Coords::point(5, 3) creates ranges 5..5, 3..3
+    pub fn point(x: usize, y: usize) -> Self {
+        Self::new(Self::x_point(x), Self::y_point(y))
+    }
+    
+    /// Create a renderable dot (single unit for display)
+    pub fn dot(x: usize, y: usize) -> Self {
+        Self::new(x..x+1, y..y+1)
+    }
+    
+    /// Create a single-dot x range (for shape point coordinates)
+    /// Creates coord..coord+1 range representing a single unit at that position
+    pub fn x_dot(coord: usize) -> Range<usize> {
+        coord..coord+1
+    }
+    
+    /// Create a single-dot y range (for shape point coordinates)
+    /// Creates coord..coord+1 range representing a single unit at that position
+    pub fn y_dot(coord: usize) -> Range<usize> {
+        coord..coord+1
+    }
+    
+    /// Create an empty x range at a specific point (coord..coord)
+    /// Useful for mathematical point representations in shapes
+    pub fn x_point(coord: usize) -> Range<usize> {
+        coord..coord
+    }
+    
+    /// Create an empty y range at a specific point (coord..coord) 
+    /// Useful for mathematical point representations in shapes
+    pub fn y_point(coord: usize) -> Range<usize> {
+        coord..coord
+    }
+
+    /// Create a square coordinate
+    pub fn square(top_left_x: usize, top_left_y: usize, size: usize) -> Self {
+        Self::new(top_left_x..top_left_x + size, top_left_y..top_left_y + size)
+    }
+
+    /// Create a circle coordinate
+    pub fn circle(center_x: usize, center_y: usize, radius: usize) -> Self {
+        let x_range = center_x.saturating_sub(radius)..center_x.saturating_add(radius);
+        let y_range = center_y.saturating_sub(radius)..center_y.saturating_add(radius);
+        Self::new_with_shape(x_range, y_range, ShapeType::Circle)
+    }
+
+    /// Get x range at specific index
+    pub fn x_range(&self, index: usize) -> Option<&Range<usize>> {
+        self.x_ranges.get(index)
+    }
+
+    /// Get y range at specific index
+    pub fn y_range(&self, index: usize) -> Option<&Range<usize>> {
+        self.y_ranges.get(index)
+    }
+
+    /// Get all x ranges
+    pub fn x_ranges(&self) -> &[Range<usize>] {
+        &self.x_ranges
+    }
+
+    /// Get all y ranges
+    pub fn y_ranges(&self) -> &[Range<usize>] {
+        &self.y_ranges
+    }
+
+    /// Get the shape type
+    pub fn shape_type(&self) -> &ShapeType {
+        &self.shape_type
+    }
+
+    /// Calculate maximum width across all ranges
+    pub fn width(&self) -> usize {
+        self.x_ranges
+            .iter()
+            .map(|r| r.end.saturating_sub(r.start))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Calculate maximum height across all ranges
+    pub fn height(&self) -> usize {
+        self.y_ranges
+            .iter()
+            .map(|r| r.end.saturating_sub(r.start))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Calculate total width of bounding box
+    pub fn total_width(&self) -> usize {
+        let bounds = self.get_bounds();
+        bounds.0.end.saturating_sub(bounds.0.start)
+    }
+
+    /// Calculate total height of bounding box
+    pub fn total_height(&self) -> usize {
+        let bounds = self.get_bounds();
+        bounds.1.end.saturating_sub(bounds.1.start)
+    }
+
+    /// Calculate area based on shape type
+    pub fn area(&self) -> usize {
+        match self.shape_type {
+            ShapeType::Rectangle => self.total_width() * self.total_height(),
+            ShapeType::Circle => {
+                let radius = self.total_width().min(self.total_height()) / 2;
+                (std::f64::consts::PI * (radius as f64).powi(2)) as usize
+            }
+            ShapeType::Triangle => (self.total_width() * self.total_height()) / 2,
+            ShapeType::Line => 0, // Lines have no area
+            ShapeType::Custom => self
+                .x_ranges
+                .iter()
+                .zip(&self.y_ranges)
+                .map(|(x, y)| {
+                    let width = x.end.saturating_sub(x.start);
+                    let height = y.end.saturating_sub(y.start);
+                    width * height
+                })
+                .sum(),
+        }
+    }
+
+    /// Calculate perimeter based on shape type
+    pub fn perimeter(&self) -> usize {
+        match self.shape_type {
+            ShapeType::Rectangle => 2 * (self.total_width() + self.total_height()),
+            ShapeType::Circle => {
+                let radius = self.total_width().min(self.total_height()) / 2;
+                (2.0 * std::f64::consts::PI * radius as f64) as usize
+            }
+            ShapeType::Triangle => {
+                let w = self.total_width() as f64;
+                let h = self.total_height() as f64;
+                // Perimeter of right triangle: base + height + hypotenuse
+                (w + h + (w * w + h * h).sqrt()) as usize
+            }
+            ShapeType::Line => {
+                // For a line, perimeter is twice the length (going there and back)
+                let w = self.total_width() as f64;
+                let h = self.total_height() as f64;
+                (2.0 * (w * w + h * h).sqrt()) as usize
+            }
+            ShapeType::Custom => {
+                // Sum perimeters of all rectangular ranges
+                self.x_ranges
+                    .iter()
+                    .zip(&self.y_ranges)
+                    .map(|(x, y)| {
+                        let width = x.end.saturating_sub(x.start);
+                        let height = y.end.saturating_sub(y.start);
+                        2 * (width + height)
+                    })
+                    .sum()
+            }
+        }
+    }
+
+    /// Check if this is a perfect square
+    pub fn is_square(&self) -> bool {
+        self.total_width() == self.total_height() && matches!(self.shape_type, ShapeType::Rectangle)
+    }
+
+    /// Check if a point is contained within any of the ranges
+    pub fn contains_point(&self, x: usize, y: usize) -> bool {
+        match self.shape_type {
+            ShapeType::Circle => {
+                let (center_x, center_y) = self.center();
+                let radius = self.total_width().min(self.total_height()) / 2;
+                
+                let dx = x as f64 - center_x as f64;
+                let dy = y as f64 - center_y as f64;
+                (dx * dx + dy * dy) <= (radius * radius) as f64
+            }
+            ShapeType::Triangle => {
+                let bounds = self.get_bounds();
+                let (x1, y1) = (bounds.0.start, bounds.1.end);  // bottom-left
+                let (x2, y2) = (bounds.0.end, bounds.1.end);    // bottom-right
+                let (x3, y3) = ((bounds.0.start + bounds.0.end) / 2, bounds.1.start); // top-center
+                
+                // Use barycentric coordinates to check if point is inside triangle
+                let denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
+                if denom == 0 { return false; } // degenerate triangle
+                
+                let a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) as f64 / denom as f64;
+                let b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) as f64 / denom as f64;
+                let c = 1.0 - a - b;
+                
+                a >= 0.0 && b >= 0.0 && c >= 0.0
+            }
+            _ => self.x_ranges
+                .iter()
+                .zip(&self.y_ranges)
+                .any(|(x_range, y_range)| x_range.contains(&x) && y_range.contains(&y)),
+        }
+    }
+
+    /// Get the overall bounding box of all ranges
+    pub fn get_bounds(&self) -> (Range<usize>, Range<usize>) {
+        if self.x_ranges.is_empty() || self.y_ranges.is_empty() {
+            return (0..0, 0..0);
+        }
+
+        let min_x = self.x_ranges.iter().map(|r| r.start).min().unwrap_or(0);
+        let max_x = self.x_ranges.iter().map(|r| r.end).max().unwrap_or(0);
+        let min_y = self.y_ranges.iter().map(|r| r.start).min().unwrap_or(0);
+        let max_y = self.y_ranges.iter().map(|r| r.end).max().unwrap_or(0);
+        
+        (min_x..max_x, min_y..max_y)
+    }
+
+    /// Alias for get_bounds for consistency
+    pub fn bounding_box(&self) -> Self {
+        let (x_bound, y_bound) = self.get_bounds();
+        Self::square(x_bound.start, y_bound.start, x_bound.end - x_bound.start)
+    }
+
+    /// Get center point of the bounding box
+    pub fn center(&self) -> (usize, usize) {
+        let bounds = self.get_bounds();
+        let center_x = (bounds.0.start + bounds.0.end) / 2;
+        let center_y = (bounds.1.start + bounds.1.end) / 2;
+        (center_x, center_y)
+    }
+
+    /// Generate all points contained within the coordinate system
+    pub fn generate_points(&self) -> Vec<(usize, usize)> {
+        let mut points = Vec::new();
+        let (x_bound, y_bound) = self.get_bounds();
+
+        match self.shape_type {
+            ShapeType::Rectangle => {
+                for y in y_bound {
+                    for x in x_bound.clone() {
+                        if self.contains_point(x, y) {
+                            points.push((x, y));
+                        }
+                    }
+                }
+            }
+            ShapeType::Circle => {
+                for y in y_bound {
+                    for x in x_bound.clone() {
+                        if self.contains_point(x, y) {
+                            points.push((x, y));
+                        }
+                    }
+                }
+            }
+            ShapeType::Line => {
+                if x_bound.is_empty() || y_bound.is_empty() {
+                    return points;
+                }
+                
+                let start_x = x_bound.start;
+                let start_y = y_bound.start;
+                let end_x = x_bound.end.saturating_sub(1);
+                let end_y = y_bound.end.saturating_sub(1);
+
+                let dx = end_x as i32 - start_x as i32;
+                let dy = end_y as i32 - start_y as i32;
+                let steps = dx.abs().max(dy.abs());
+
+                if steps == 0 {
+                    points.push((start_x, start_y));
+                } else {
+                    for i in 0..=steps {
+                        let x = start_x + (dx * i / steps) as usize;
+                        let y = start_y + (dy * i / steps) as usize;
+                        points.push((x, y));
+                    }
+                }
+            }
+            ShapeType::Triangle => {
+                // Generate triangle points (simplified right triangle)
+                for y in y_bound.clone() {
+                    for x in x_bound.clone() {
+                        let rel_x = x - x_bound.start;
+                        let rel_y = y - y_bound.start;
+                        let max_x_for_y = self.total_width().saturating_sub(rel_y);
+                        if rel_x <= max_x_for_y {
+                            points.push((x, y));
+                        }
+                    }
+                }
+            }
+            ShapeType::Custom => {
+                for y in y_bound {
+                    for x in x_bound.clone() {
+                        if self.contains_point(x, y) {
+                            points.push((x, y));
+                        }
+                    }
+                }
+            }
+        }
+        points
+    }
+
+    /// Translate the coordinate system by dx, dy
+    pub fn translate(&mut self, dx: i32, dy: i32) {
+        self.x_ranges = self
+            .x_ranges
+            .iter()
+            .map(|r| {
+                let new_start = (r.start as i32 + dx).max(0) as usize;
+                let new_end = (r.end as i32 + dx).max(0) as usize;
+                new_start..new_end
+            })
+            .collect();
+
+        self.y_ranges = self
+            .y_ranges
+            .iter()
+            .map(|r| {
+                let new_start = (r.start as i32 + dy).max(0) as usize;
+                let new_end = (r.end as i32 + dy).max(0) as usize;
+                new_start..new_end
+            })
+            .collect();
+    }
+
+    /// Scale the coordinate system by given factors
+    pub fn scale(&mut self, scale_x: f64, scale_y: f64) {
+        if scale_x <= 0.0 || scale_y <= 0.0 {
+            return; // Avoid invalid scaling
+        }
+
+        self.x_ranges = self
+            .x_ranges
+            .iter()
+            .map(|r| {
+                let new_start = (r.start as f64 * scale_x) as usize;
+                let new_end = (r.end as f64 * scale_x).max(new_start as f64 + 1.0) as usize;
+                new_start..new_end
+            })
+            .collect();
+
+        self.y_ranges = self
+            .y_ranges
+            .iter()
+            .map(|r| {
+                let new_start = (r.start as f64 * scale_y) as usize;
+                let new_end = (r.end as f64 * scale_y).max(new_start as f64 + 1.0) as usize;
+                new_start..new_end
+            })
+            .collect();
+    }
+
+    /// Check if this coordinate intersects with another
+    pub fn intersects(&self, other: &Coords) -> bool {
+        let (self_x, self_y) = self.get_bounds();
+        let (other_x, other_y) = other.get_bounds();
+
+        self_x.start < other_x.end
+            && self_x.end > other_x.start
+            && self_y.start < other_y.end
+            && self_y.end > other_y.start
+    }
+
+    /// Calculate distance between centers of two coordinates
+    pub fn distance_to(&self, other: &Coords) -> f64 {
+        let (self_center_x, self_center_y) = self.center();
+        let (other_center_x, other_center_y) = other.center();
+
+        let dx = self_center_x as f64 - other_center_x as f64;
+        let dy = self_center_y as f64 - other_center_y as f64;
+
+        (dx * dx + dy * dy).sqrt()
+    }
+
+    /// Add a new range to the coordinate (converts to Custom shape)
+    pub fn add_range(&mut self, x: Range<usize>, y: Range<usize>) {
+        self.x_ranges.push(x);
+        self.y_ranges.push(y);
+        if !matches!(self.shape_type, ShapeType::Custom) {
+            self.shape_type = ShapeType::Custom;
+        }
+    }
+
+    /// Remove a range at the specified index
+    pub fn remove_range(&mut self, index: usize) -> Option<(Range<usize>, Range<usize>)> {
+        if index < self.range_count() {
+            let x_range = self.x_ranges.remove(index);
+            let y_range = self.y_ranges.remove(index);
+            // Update shape type if we only have one range left
+            if self.range_count() == 1 && matches!(self.shape_type, ShapeType::Custom) {
+                self.shape_type = ShapeType::Rectangle;
+            }
+            Some((x_range, y_range))
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of coordinate ranges
+    pub fn range_count(&self) -> usize {
+        self.x_ranges.len().min(self.y_ranges.len())
+    }
+
+    /// Check if the coordinate is empty (no ranges)
+    pub fn is_empty(&self) -> bool {
+        self.x_ranges.is_empty() || self.y_ranges.is_empty()
+    }
+
+    /// Clear all ranges and reset to default rectangle shape
+    pub fn clear(&mut self) {
+        self.x_ranges.clear();
+        self.y_ranges.clear();
+        self.shape_type = ShapeType::Rectangle;
+    }
+
+    /// Create a union of this coordinate with another
+    pub fn union(&self, other: &Coords) -> Coords {
+        let mut result = Coords::from_multiple_ranges(
+            self.x_ranges.clone(),
+            self.y_ranges.clone(),
+        );
+        
+        for (x_range, y_range) in other.x_ranges.iter().zip(&other.y_ranges) {
+            result.add_range(x_range.clone(), y_range.clone());
+        }
+        
+        result
+    }
+
+    /// Create intersection of this coordinate with another
+    pub fn intersection(&self, other: &Coords) -> Option<Coords> {
+        let (self_bounds, other_bounds) = (self.get_bounds(), other.get_bounds());
+        
+        let x_start = self_bounds.0.start.max(other_bounds.0.start);
+        let x_end = self_bounds.0.end.min(other_bounds.0.end);
+        let y_start = self_bounds.1.start.max(other_bounds.1.start);
+        let y_end = self_bounds.1.end.min(other_bounds.1.end);
+        
+        if x_start < x_end && y_start < y_end {
+            Some(Coords::new(x_start..x_end, y_start..y_end))
+        } else {
+            None
+        }
+    }
+
+    /// Check if this coordinate completely contains another
+    pub fn contains(&self, other: &Coords) -> bool {
+        let (self_bounds, other_bounds) = (self.get_bounds(), other.get_bounds());
+        
+        self_bounds.0.start <= other_bounds.0.start
+            && self_bounds.0.end >= other_bounds.0.end
+            && self_bounds.1.start <= other_bounds.1.start
+            && self_bounds.1.end >= other_bounds.1.end
+    }
+
+    /// Expand the coordinate by a given margin in all directions
+    pub fn expand(&mut self, margin: usize) {
+        self.x_ranges = self.x_ranges
+            .iter()
+            .map(|r| r.start.saturating_sub(margin)..r.end + margin)
+            .collect();
+        
+        self.y_ranges = self.y_ranges
+            .iter()
+            .map(|r| r.start.saturating_sub(margin)..r.end + margin)
+            .collect();
+    }
+
+    /// Shrink the coordinate by a given margin from all directions
+    pub fn shrink(&mut self, margin: usize) {
+        self.x_ranges = self.x_ranges
+            .iter()
+            .filter_map(|r| {
+                let new_start = r.start + margin;
+                let new_end = r.end.saturating_sub(margin);
+                if new_start < new_end {
+                    Some(new_start..new_end)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        
+        self.y_ranges = self.y_ranges
+            .iter()
+            .filter_map(|r| {
+                let new_start = r.start + margin;
+                let new_end = r.end.saturating_sub(margin);
+                if new_start < new_end {
+                    Some(new_start..new_end)
+                } else {
+                    None
+                }
+            })
+            .collect();
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -27,9 +572,10 @@ pub struct Table {
     column_offset: usize,
     row_offset: usize,
     coords: Vec<Coords>,
-    cells: HashMap<(usize, usize), TableCell>,
+    cells: HashMap<Coords, TableCell>,
     id: Id,
 }
+
 impl Hash for Table {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.rows.hash(state);
@@ -43,6 +589,7 @@ impl Hash for Table {
         self.id.hash(state);
     }
 }
+
 impl Table {
     pub fn new() -> Table {
         Table::default()
@@ -72,16 +619,17 @@ impl Table {
     }
 
     pub fn rows(&self) -> usize {
-        // Return the allocated table size, not just content-based size
         self.rows
     }
 
-    /// Get the actual number of rows that contain content
     pub fn content_rows(&self) -> usize {
         if self.cells.is_empty() {
             0
         } else {
-            self.cells.keys().map(|(row, _)| *row).max().unwrap_or(0) + 1
+            self.cells.keys()
+                .map(|coord| coord.get_bounds().1.end) // y coordinate = row
+                .max()
+                .unwrap_or(0)
         }
     }
 
@@ -100,13 +648,16 @@ impl Table {
     pub fn coords(&self) -> &[Coords] {
         &self.coords.as_slice()
     }
+
     pub fn name(&self) -> String {
         self.id.name.to_string()
     }
+
     pub fn id(&self) -> Id {
         self.id.clone()
     }
-    pub fn entries(&self) -> &HashMap<(usize, usize), TableCell> {
+
+    pub fn entries(&self) -> &HashMap<Coords, TableCell> {
         &self.cells
     }
 
@@ -121,17 +672,25 @@ impl Table {
     }
 
     pub fn get_cell(&self, row: usize, col: usize) -> Option<&TableCell> {
-        self.cells.get(&(row, col))
+        let coord = Coords::dot(col, row); // x=col, y=row - match creation coordinates
+        self.get_cell_by_coord(&coord)
     }
 
     pub fn get_cell_mut(&mut self, row: usize, col: usize) -> Option<&mut TableCell> {
-        self.cells.get_mut(&(row, col))
+        let coord = Coords::dot(col, row); // x=col, y=row - match creation coordinates
+        self.get_cell_by_coord_mut(&coord)
+    }
+
+    pub fn get_cell_by_coord(&self, coord: &Coords) -> Option<&TableCell> {
+        self.cells.get(coord)
+    }
+
+    pub fn get_cell_by_coord_mut(&mut self, coord: &Coords) -> Option<&mut TableCell> {
+        self.cells.get_mut(coord)
     }
 
     pub fn get_cell_global(&self, global_row: usize, global_col: usize) -> Option<&TableCell> {
-        if global_row >= self.row_offset && global_col >= self.column_offset {
-            let local_row = global_row - self.row_offset;
-            let local_col = global_col - self.column_offset;
+        if let Some((local_row, local_col)) = self.global_to_local(global_row, global_col) {
             self.get_cell(local_row, local_col)
         } else {
             None
@@ -143,29 +702,58 @@ impl Table {
         global_row: usize,
         global_col: usize,
     ) -> Option<&mut TableCell> {
-        if global_row >= self.row_offset && global_col >= self.column_offset {
-            let local_row = global_row - self.row_offset;
-            let local_col = global_col - self.column_offset;
+        if let Some((local_row, local_col)) = self.global_to_local(global_row, global_col) {
             self.get_cell_mut(local_row, local_col)
         } else {
             None
         }
     }
 
+    pub fn add_cell(&mut self, row: usize, col: usize, cell: TableCell) {
+        let coord = Coords::dot(col, row); // x=col, y=row - match creation coordinates
+        self.add_cell_by_coord(coord, cell);
+    }
+
+    pub fn add_cell_by_coord(&mut self, coord: Coords, cell: TableCell) {
+        self.auto_resize_for_coord(&coord);
+        self.cells.insert(coord.clone(), cell);
+        if !self.coords.contains(&coord) {
+            self.coords.push(coord);
+        }
+    }
+
+    pub fn add_cell_global(&mut self, global_row: usize, global_col: usize, cell: TableCell) {
+        if let Some((local_row, local_col)) = self.global_to_local(global_row, global_col) {
+            self.add_cell(local_row, local_col, cell);
+        }
+    }
+
     pub fn set_cell(&mut self, row: usize, col: usize, cell: TableCell) {
-        self.cells.insert((row, col), cell);
+        let coord = Coords::dot(col, row); // x=col, y=row - match creation coordinates
+        self.set_cell_by_coord(coord, cell);
+    }
+
+    pub fn set_cell_by_coord(&mut self, coord: Coords, cell: TableCell) {
+        self.cells.insert(coord.clone(), cell);
+        if !self.coords.contains(&coord) {
+            self.coords.push(coord);
+        }
     }
 
     pub fn set_cell_global(&mut self, global_row: usize, global_col: usize, cell: TableCell) {
-        if global_row >= self.row_offset && global_col >= self.column_offset {
-            let local_row = global_row - self.row_offset;
-            let local_col = global_col - self.column_offset;
+        if let Some((local_row, local_col)) = self.global_to_local(global_row, global_col) {
             self.set_cell(local_row, local_col, cell);
         }
     }
 
     pub fn remove_cell(&mut self, row: usize, col: usize) -> Option<TableCell> {
-        self.cells.remove(&(row, col))
+        let coord = Coords::dot(col, row); // x=col, y=row - match creation coordinates
+        self.remove_cell_by_coord(&coord)
+    }
+
+    pub fn remove_cell_by_coord(&mut self, coord: &Coords) -> Option<TableCell> {
+        self.coords.retain(|c| c != coord);
+        self.cells.remove(coord)
     }
 
     pub fn remove_cell_global(
@@ -173,9 +761,7 @@ impl Table {
         global_row: usize,
         global_col: usize,
     ) -> Option<TableCell> {
-        if global_row >= self.row_offset && global_col >= self.column_offset {
-            let local_row = global_row - self.row_offset;
-            let local_col = global_col - self.column_offset;
+        if let Some((local_row, local_col)) = self.global_to_local(global_row, global_col) {
             self.remove_cell(local_row, local_col)
         } else {
             None
@@ -183,28 +769,47 @@ impl Table {
     }
 
     pub fn contains_cell(&self, row: usize, col: usize) -> bool {
-        self.cells.contains_key(&(row, col))
+        let coord = Coords::dot(col, row); // x=col, y=row - match creation coordinates
+        self.contains_cell_by_coord(&coord)
+    }
+
+    pub fn contains_cell_by_coord(&self, coord: &Coords) -> bool {
+        self.cells.contains_key(coord)
     }
 
     pub fn contains_cell_global(&self, global_row: usize, global_col: usize) -> bool {
-        if global_row >= self.row_offset && global_col >= self.column_offset {
-            let local_row = global_row - self.row_offset;
-            let local_col = global_col - self.column_offset;
-            self.contains_cell(local_row, local_col)
-        } else {
-            false
-        }
+        self.global_to_local(global_row, global_col)
+            .map_or(false, |(local_row, local_col)| self.contains_cell(local_row, local_col))
     }
+
 
     pub fn local_to_global(&self, row: usize, col: usize) -> (usize, usize) {
         (row + self.row_offset, col + self.column_offset)
     }
 
+    pub fn coord_to_global(&self, coord: &Coords) -> Coords {
+        let (col_range, row_range) = coord.get_bounds();
+        Coords::new(
+            (col_range.start + self.column_offset)..(col_range.end + self.column_offset),
+            (row_range.start + self.row_offset)..(row_range.end + self.row_offset)
+        )
+    }
+
     pub fn global_to_local(&self, global_row: usize, global_col: usize) -> Option<(usize, usize)> {
         if global_row >= self.row_offset && global_col >= self.column_offset {
-            Some((
-                global_row - self.row_offset,
-                global_col - self.column_offset,
+            Some((global_row - self.row_offset, global_col - self.column_offset))
+        } else {
+            None
+        }
+    }
+
+    pub fn global_coord_to_local(&self, global_coord: &Coords) -> Option<Coords> {
+        let (col_range, row_range) = global_coord.get_bounds();
+        
+        if row_range.start >= self.row_offset && col_range.start >= self.column_offset {
+            Some(Coords::new(
+                (col_range.start - self.column_offset)..(col_range.end - self.column_offset),
+                (row_range.start - self.row_offset)..(row_range.end - self.row_offset)
             ))
         } else {
             None
@@ -215,16 +820,24 @@ impl Table {
         row < self.rows && col < self.columns
     }
 
+    pub fn is_coord_within_bounds(&self, coord: &Coords) -> bool {
+        let (col_range, row_range) = coord.get_bounds();
+        row_range.end <= self.rows && col_range.end <= self.columns
+    }
+
     pub fn is_within_global_bounds(&self, global_row: usize, global_col: usize) -> bool {
-        if let Some((local_row, local_col)) = self.global_to_local(global_row, global_col) {
-            self.is_within_bounds(local_row, local_col)
-        } else {
-            false
-        }
+        self.global_to_local(global_row, global_col)
+            .map_or(false, |(local_row, local_col)| self.is_within_bounds(local_row, local_col))
+    }
+
+    pub fn is_global_coord_within_bounds(&self, global_coord: &Coords) -> bool {
+        self.global_coord_to_local(global_coord)
+            .map_or(false, |local_coord| self.is_coord_within_bounds(&local_coord))
     }
 
     pub fn clear_cells(&mut self) {
         self.cells.clear();
+        self.coords.clear();
     }
 
     pub fn cell_count(&self) -> usize {
@@ -232,34 +845,40 @@ impl Table {
     }
 
     pub fn add_coord(&mut self, coord: Coords) {
-        self.coords.push(coord);
+        if !self.coords.contains(&coord) {
+            self.coords.push(coord);
+        }
     }
 
     pub fn clear_coords(&mut self) {
         self.coords.clear();
     }
 
-    /// Dynamically resize the table based on actual content
     pub fn dynamic_resize(&mut self) {
         if self.cells.is_empty() {
-            // No content, set to minimal dimensions
             self.rows = 1;
             self.columns = 1;
+            self.coords.clear();
             return;
         }
 
-        // Calculate required dimensions based on actual cell positions
-        let max_row = self.cells.keys().map(|(row, _)| *row).max().unwrap_or(0);
-        let max_col = self.cells.keys().map(|(_, col)| *col).max().unwrap_or(0);
+        // Find the maximum bounds from all cells
+        let (max_col, max_row) = self.cells.keys()
+            .map(|coord| coord.get_bounds())
+            .fold((0, 0), |(max_col, max_row), (col_range, row_range)| {
+                (max_col.max(col_range.end), max_row.max(row_range.end))
+            });
 
-        // Set dimensions to accommodate all content (adding 1 since indices are 0-based)
-        self.rows = (max_row + 1).max(self.rows);
-        self.columns = (max_col + 1).max(self.columns);
+        // Ensure minimum dimensions of 1x1
+        self.rows = max_row.max(1);
+        self.columns = max_col.max(1);
+
+        // Rebuild coords from existing cells
+        self.coords.clear();
+        self.coords.extend(self.cells.keys().cloned());
     }
 
-    /// Auto-resize before adding new content to ensure table can accommodate it
     pub fn auto_resize_for_content(&mut self, target_row: usize, target_col: usize) {
-        // Expand dimensions to accommodate the target position (adding 1 since indices are 0-based)
         let required_rows = target_row + 1;
         let required_cols = target_col + 1;
 
@@ -269,224 +888,235 @@ impl Table {
         if required_cols > self.columns {
             self.columns = required_cols;
         }
+
+        let coord = Coords::point(target_col, target_row);
+        self.add_coord(coord);
     }
 
-    /// Shrink the table to fit only existing content (removes empty rows/columns)
+    fn auto_resize_for_coord(&mut self, coord: &Coords) {
+        let (col_range, row_range) = coord.get_bounds();
+        
+        if row_range.end > self.rows {
+            self.rows = row_range.end;
+        }
+        if col_range.end > self.columns {
+            self.columns = col_range.end;
+        }
+    }
+
     pub fn shrink_to_fit(&mut self) {
         if self.cells.is_empty() {
             self.rows = 0;
             self.columns = 0;
+            self.coords.clear();
             return;
         }
 
-        // Find the actual used dimensions
-        let max_row = self.cells.keys().map(|(row, _)| *row).max().unwrap_or(0);
-        let max_col = self.cells.keys().map(|(_, col)| *col).max().unwrap_or(0);
+        let (max_col, max_row) = self.cells.keys()
+            .map(|coord| coord.get_bounds())
+            .fold((0, 0), |(max_col, max_row), (col_range, row_range)| {
+                (max_col.max(col_range.end), max_row.max(row_range.end))
+            });
 
-        // Set to exact fit (adding 1 since indices are 0-based)
-        self.rows = max_row + 1;
-        self.columns = max_col + 1;
+        self.rows = max_row;
+        self.columns = max_col;
+        
+        self.coords.clear();
+        self.coords.extend(self.cells.keys().cloned());
     }
 
-    // === REGISTRY DISPLAY ENHANCEMENTS ===
-
-    /// Create a registry table with proper headers
     pub fn new_registry_table(title: &str) -> Table {
         let mut table = Table::new_with_dimensions(50, 4);
         table.id = Id::get(&format!("registry_table_{}", title));
         table
     }
 
-    /// Add a header row to the table
     pub fn add_header(&mut self, headers: Vec<&str>) {
         for (col, header) in headers.iter().enumerate() {
-            let mut cell = TableCell::new(0, col, &format!("header_{}", col));
+            let coord = Coords::dot(col, 0); // x=col, y=row - use dot for header display
+            let mut cell = TableCell::new_with_coords(0, col, &format!("header_{}", col), coord.clone());
             cell.add_entry(Entry::Str(header.to_string()));
-            self.set_cell(0, col, cell);
+            // Header cell added successfully
+            self.set_cell_by_coord(coord, cell);
         }
         if headers.len() > self.columns {
             self.columns = headers.len();
         }
     }
 
-    /// Add a data row to the table with automatic resizing
     pub fn add_row(&mut self, row_data: Vec<Entry>) -> usize {
         let row_idx = self.get_next_available_row();
 
-        // Auto-resize to accommodate the new row and required columns
-        self.auto_resize_for_content(row_idx, row_data.len().saturating_sub(1));
+        if !row_data.is_empty() {
+            self.auto_resize_for_content(row_idx, row_data.len().saturating_sub(1));
+        }
 
         for (col, entry) in row_data.iter().enumerate() {
-            let mut cell = TableCell::new(row_idx, col, &format!("data_{}_{}", row_idx, col));
+            let coord = Coords::dot(col, row_idx); // x=col, y=row - use dot for cell display
+            let mut cell = TableCell::new_with_coords(row_idx, col, &format!("cell_{}_{}", row_idx, col), coord.clone());
             cell.add_entry(entry.clone());
-            self.set_cell(row_idx, col, cell);
+            self.set_cell_by_coord(coord, cell);
         }
 
-        // Perform final dynamic resize to ensure everything fits
-        self.dynamic_resize();
         row_idx
     }
 
-    /// Add an empty row to the table and return the row index for manual cell setting
-    pub fn add_empty_row(&mut self) -> usize {
-        let row_idx = self.get_next_available_row();
-
-        // Auto-resize to ensure the table has at least the minimum columns
-        self.auto_resize_for_content(row_idx, self.columns.saturating_sub(1));
-
-        // Perform final dynamic resize to ensure everything fits
-        self.dynamic_resize();
-        row_idx
-    }
-
-    /// Get the next available row index (returns local coordinates)
     fn get_next_available_row(&self) -> usize {
         if self.cells.is_empty() {
-            return 0; // First row in local coordinates
+            0
+        } else {
+            // Find the maximum row end from all cells (y coordinate = row)
+            self.cells.keys()
+                .map(|coord| coord.get_bounds().1.end) // y coordinate = row
+                .max()
+                .unwrap_or(0)
         }
-        // Find the maximum LOCAL row index that actually has cells
-        let max_row = self.cells.keys().map(|(row, _)| *row).max().unwrap_or(0);
-        max_row + 1
     }
 
-    /// Calculate the actual display width of a string using byte-based calculations
-    fn calculate_display_width(text: &str) -> usize {
-        // Convert to bytes and calculate width based on byte length
-        let bytes = text.as_bytes();
-        Self::get_byte_display_width(bytes)
-    }
+    /// Calculate optimal column widths based on content and title requirements
+    fn calculate_column_widths(&self) -> Vec<usize> {
+        const MIN_COLUMN_WIDTH: usize = 8;
+        const COLUMN_PADDING: usize = 2;
+        
+        let mut widths = vec![MIN_COLUMN_WIDTH; self.columns];
 
-    /// Get the display width of byte data using byte-based calculations
-    fn get_byte_display_width(bytes: &[u8]) -> usize {
-        // Simple byte-based width calculation - each byte is 1 unit
-        // This eliminates Unicode character width complexities
-        bytes.len()
-    }
-
-    /// Calculate column widths based on actual character display widths AND header title requirements
-    pub fn calculate_column_widths(&self) -> Vec<usize> {
-        let mut widths = vec![0; self.columns];
-
-        // Iterate through actual cells instead of assuming continuous ranges
-        for col in 0..self.columns {
-            let mut max_display_width = 0;
-            // Check all cells in this column
-            for ((_cell_row, cell_col), cell) in &self.cells {
-                if *cell_col == col {
-                    let content = cell.display_content();
-                    let display_width = Self::calculate_display_width(&content);
-                    max_display_width = max_display_width.max(display_width);
+        // Calculate content-based widths
+        for (coord, cell) in &self.cells {
+            let content_width = Self::calculate_display_width(&cell.display_content());
+            let (col_range, _) = coord.get_bounds();
+            
+            for col in col_range {
+                if col < widths.len() {
+                    widths[col] = widths[col].max(content_width + COLUMN_PADDING);
                 }
             }
-            // Add padding for left and right spaces (format_content_with_byte_width adds 1 space each side)
-            let base_width = max_display_width + 2; // +2 for left and right padding spaces
-
-            // Apply offset compensation for non-monospace character width differences
-            // With byte-based calculations, no offset compensation needed
-            let char_width_offset =
-                Self::calculate_character_width_offset(&format!("Column{}", col));
-
-            widths[col] = (base_width + char_width_offset).max(24); // Minimum total width - increased from 12 to 24
         }
 
-        // Calculate the minimum table width needed for the header title
+        // Ensure table is wide enough for title
+        self.adjust_widths_for_title(&mut widths);
+        
+        widths
+    }
+
+    /// Adjust column widths to accommodate the table title
+    fn adjust_widths_for_title(&self, widths: &mut [usize]) {
         let title = format!(
             " Table: {} ({} rows × {} cols) ",
             self.name(),
             self.content_rows(),
             self.columns
         );
+        
         let title_width = Self::calculate_display_width(&title);
-        let border_width = self.columns + 1; // borders and separators: ┬ between columns + outer borders
-        let current_content_width = widths.iter().sum::<usize>();
+        let border_width = self.columns + 1;
+        let current_content_width: usize = widths.iter().sum();
         let current_total_width = current_content_width + border_width;
+        let required_total_width = title_width + 6;
 
-        // If title is longer than current table width, expand columns proportionally
-        // Add minimum padding (6 characters) around the title for proper centering
-        let required_total_width = title_width + 6; // +6 for minimum padding around title
         if required_total_width > current_total_width {
-            let extra_width_needed = required_total_width - current_total_width;
-            let width_per_column = extra_width_needed / self.columns;
-            let remainder = extra_width_needed % self.columns;
+            let extra_width = required_total_width - current_total_width;
+            let width_per_column = extra_width / self.columns;
+            let remainder = extra_width % self.columns;
 
-            // Distribute extra width across all columns
             for (i, width) in widths.iter_mut().enumerate() {
                 *width += width_per_column;
-                // Add remainder to first few columns
                 if i < remainder {
                     *width += 1;
                 }
             }
         }
-
-        widths
     }
 
-    /// Calculate the offset needed to compensate for byte width differences
-    fn calculate_character_width_offset(_sample_text: &str) -> usize {
-        // With byte-based calculations, no offset compensation needed
-        // All bytes are treated as width 1, providing consistent alignment
-        0
+    /// Calculate actual terminal display width for text with Unicode characters
+    fn calculate_display_width(text: &str) -> usize {
+        text.chars().map(|c| {
+            match c {
+                // Check for ✅ and ❌ specifically
+                '✅' | '❌' => 2, // These are often wide in terminals
+                
+                // Zero-width characters
+                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => 0,
+                
+                // Most ASCII and basic characters
+                c if c.is_ascii() => 1,
+                
+                // For other Unicode, assume width 1 unless we know it's wide
+                _ => 1
+            }
+        }).sum()
     }
 
-    /// Format content with proper byte-width-based padding and justification
-    fn format_content_with_byte_width_and_justification(
+    /// Format content with proper justification and padding
+    fn format_content_with_justification(
         content: &str,
         total_width: usize,
         justification: &Justification,
     ) -> String {
-        // Calculate the actual byte width of the content
-        let content_byte_width = content.as_bytes().len();
-
-        // Total width includes the left and right padding spaces
-        let available_width = if total_width >= 2 { total_width - 2 } else { 0 }; // Reserve 2 for border spaces
-
-        let mut result = String::with_capacity(total_width);
-
-        // Calculate padding needed
-        let padding_needed = if content_byte_width <= available_width {
-            available_width - content_byte_width
-        } else {
-            0 // Content is too long, no padding needed
-        };
-
+        let content_width = Self::calculate_display_width(content);
+        
+        // Ensure we don't exceed total_width
+        if content_width >= total_width {
+            return if content_width == total_width {
+                content.to_string()
+            } else {
+                // Truncate if content is too long
+                content.chars().take(total_width).collect()
+            };
+        }
+        
+        // Calculate padding to fill total_width exactly
+        let total_padding = total_width - content_width;
+        
+        let mut result = String::with_capacity(total_width * 4); // Extra capacity for Unicode
+        
         match justification {
             Justification::Left => {
-                // Left alignment: " content       "
-                result.push(' '); // Left border space
+                result.push(' '); // 1 space left padding
                 result.push_str(content);
-                result.push_str(&" ".repeat(padding_needed));
-                result.push(' '); // Right border space
+                if total_padding > 1 {
+                    result.push_str(&" ".repeat(total_padding - 1)); // remaining padding
+                }
             }
             Justification::Center => {
-                // Center alignment: "  content   "
-                let left_padding = padding_needed / 2;
-                let right_padding = padding_needed - left_padding;
-
-                result.push(' '); // Left border space
+                let left_padding = total_padding / 2;
+                let right_padding = total_padding - left_padding;
                 result.push_str(&" ".repeat(left_padding));
                 result.push_str(content);
                 result.push_str(&" ".repeat(right_padding));
-                result.push(' '); // Right border space
             }
             Justification::Right => {
-                // Right alignment: "       content "
-                result.push(' '); // Left border space
-                result.push_str(&" ".repeat(padding_needed));
+                if total_padding > 1 {
+                    result.push_str(&" ".repeat(total_padding - 1)); // padding minus 1
+                }
                 result.push_str(content);
-                result.push(' '); // Right border space
+                result.push(' '); // 1 space right padding
             }
         }
-
+        
+        // Verify we have exactly the right display width
+        let actual_width = Self::calculate_display_width(&result);
+        if actual_width != total_width {
+            // Adjust if needed
+            if actual_width < total_width {
+                result.push_str(&" ".repeat(total_width - actual_width));
+            } else {
+                result = result.chars().take(total_width).collect();
+            }
+        }
+        
         result
     }
 
-    /// Display the table with proper formatting
+    /// Display the table with enhanced formatting and proper Unicode support
     pub fn display_formatted(&self) -> String {
         if self.cells.is_empty() {
+            let empty_msg = format!("Table: {} (empty)", self.name());
+            let border_width = empty_msg.chars().count() + 4;
             return format!(
-                "┌─────────────────────┐\n│ Table: {} (empty) │\n└─────────────────────┘",
-                self.name()
+                "┌{}┐\n│ {} │\n└{}┘",
+                "─".repeat(border_width - 2),
+                empty_msg,
+                "─".repeat(border_width - 2)
             );
         }
 
@@ -495,85 +1125,87 @@ impl Table {
 
         let mut output = String::new();
 
-        // Top border
+        // Top border - straight line for table title
         output.push('┌');
-        for (i, width) in widths.iter().enumerate() {
-            output.push_str(&"─".repeat(*width));
-            if i < widths.len() - 1 {
-                output.push('─'); // Continuous horizontal line for clean top border
-            }
-        }
+        output.push_str(&"─".repeat(total_width - 2));
         output.push_str("┐\n");
 
-        // Table title (must match the calculation in calculate_column_widths)
+        // Enhanced table title with better coordinate display
+        let coord_info = if !self.coords.is_empty() {
+            format!(" [coords: {}]", self.coords.len())
+        } else {
+            String::new()
+        };
+        
         let title = format!(
-            " Table: {} ({} rows × {} cols) ",
+            "Table: {} ({} rows × {} cols){}",
             self.name(),
             self.content_rows(),
-            self.columns
+            self.columns,
+            coord_info
         );
-        // Calculate proper padding for header title
-        let available_width = total_width.saturating_sub(2); // Subtract 2 for the │ characters
-        let total_padding = available_width.saturating_sub(title.len());
-
-        // Apply +1 character offset for proper alignment with table borders
+        
+        let title_char_width = title.chars().count();
+        let available_width = total_width.saturating_sub(2);
+        let total_padding = available_width.saturating_sub(title_char_width);
         let left_padding = total_padding / 2;
-        let right_padding = (total_padding - left_padding) + 1;
+        let right_padding = total_padding - left_padding;
+        
         output.push('│');
         output.push_str(&" ".repeat(left_padding));
         output.push_str(&title);
         output.push_str(&" ".repeat(right_padding));
         output.push_str("│\n");
 
-        // Header separator
+        // Header separator with improved styling
         output.push('├');
         for (i, width) in widths.iter().enumerate() {
             output.push_str(&"─".repeat(*width));
             if i < widths.len() - 1 {
-                output.push('┬'); // T-like character pointing down
+                output.push('┬');
             }
         }
         output.push_str("┤\n");
 
-        // Display rows - iterate through actual content rows
+        // Display rows with enhanced cell rendering
         let actual_rows = self.content_rows();
-
         for row in 0..actual_rows {
             output.push('│');
             for col in 0..self.columns {
                 let (content, justification) = if let Some(cell) = self.get_cell(row, col) {
-                    (cell.display_content(), cell.justification())
+                    let display_content = cell.display_content();
+                    (display_content, cell.justification())
                 } else {
                     (String::new(), &Justification::Left)
                 };
 
-                // Use byte-width-based padding with cell-specific justification
-                let padded = Self::format_content_with_byte_width_and_justification(
+                let formatted_cell = Self::format_content_with_justification(
                     &content,
                     widths[col],
                     justification,
                 );
-                output.push_str(&padded);
+                output.push_str(&formatted_cell);
+                
                 if col < self.columns - 1 {
                     output.push('│');
                 }
             }
             output.push_str("│\n");
 
-            // Add separator after each row (except the last one)
+            // Row separator with proper junction characters
             if row < actual_rows - 1 {
                 output.push('├');
                 for (i, width) in widths.iter().enumerate() {
                     output.push_str(&"─".repeat(*width));
                     if i < widths.len() - 1 {
-                        output.push('┼'); // Cross character for all row separators
+                        output.push('┼');
                     }
                 }
                 output.push_str("┤\n");
             }
         }
 
-        // Bottom border
+        // Bottom border with proper closure
         output.push('└');
         for (i, width) in widths.iter().enumerate() {
             output.push_str(&"─".repeat(*width));
@@ -585,112 +1217,6 @@ impl Table {
 
         output
     }
-
-    /// Create a registry overview table
-    pub fn create_registry_overview(entries: &HashMap<Id, Entry>) -> Table {
-        let mut table = Table::new_registry_table("registry_overview");
-        table.add_header(vec!["ID", "Type", "Details", "Size"]);
-
-        for (id, entry) in entries {
-            let entry_type = entry.type_name();
-            let details = entry.display_summary();
-            let size = entry.size_info();
-
-            table.add_row(vec![
-                Entry::Str(id.name.clone()),
-                Entry::Str(entry_type),
-                Entry::Str(details),
-                Entry::Str(size),
-            ]);
-        }
-
-        table
-    }
-
-    /// Create a categorized registry table
-    pub fn create_categorized_registry(entries: &HashMap<Id, Entry>) -> HashMap<String, Table> {
-        let mut tables = HashMap::new();
-
-        // Group entries by type
-        let mut by_type: HashMap<String, Vec<(&Id, &Entry)>> = HashMap::new();
-        for (id, entry) in entries {
-            let type_name = entry.type_name();
-            by_type
-                .entry(type_name)
-                .or_insert_with(Vec::new)
-                .push((id, entry));
-        }
-
-        // Create a table for each type
-        for (type_name, entries) in by_type {
-            // Create table with appropriate size: 1 header row + number of entries, and sufficient columns
-            let num_rows = entries.len() + 1; // +1 for header
-            let num_cols = match type_name.as_str() {
-                "Handler" | "HandlerReport" | "Patternizer" => 5, // Enough columns for these types
-                _ => 3,                                           // Default for other types
-            };
-
-            let mut table = Table::new_with_dimensions(num_rows, num_cols);
-            table.id = Id::get(&format!("registry_table_{}", type_name));
-
-            match type_name.as_str() {
-                "Handler" => {
-                    table.add_header(vec!["ID", "Role", "Priority", "Status"]);
-                    for (id, entry) in entries {
-                        if let Entry::Handler(h) = entry {
-                            table.add_row(vec![
-                                Entry::Str(id.name.clone()),
-                                Entry::Str(h.role.clone()),
-                                Entry::Val(h.priority as u64),
-                                Entry::Str("Active".to_string()),
-                            ]);
-                        }
-                    }
-                }
-                "HandlerReport" => {
-                    table.add_header(vec!["ID", "Handler", "Level", "Message", "Success"]);
-                    for (id, entry) in entries {
-                        if let Entry::HandlerReport(r) = entry {
-                            table.add_row(vec![
-                                Entry::Str(id.name.clone()),
-                                Entry::Str(r.handler_name.clone()),
-                                Entry::Str(r.level.to_string()),
-                                Entry::Str(r.message.clone()),
-                                Entry::Bool(r.success),
-                            ]);
-                        }
-                    }
-                }
-                "Patternizer" => {
-                    table.add_header(vec!["ID", "Name", "Description", "Priority"]);
-                    for (id, entry) in entries {
-                        if let Entry::Patternizer(p) = entry {
-                            table.add_row(vec![
-                                Entry::Str(id.name.clone()),
-                                Entry::Str(p.name.clone()),
-                                Entry::Str(p.description.clone()),
-                                Entry::Val(p.priority as u64),
-                            ]);
-                        }
-                    }
-                }
-                _ => {
-                    table.add_header(vec!["ID", "Value", "Type"]);
-                    for (id, entry) in entries {
-                        table.add_row(vec![
-                            Entry::Str(id.name.clone()),
-                            Entry::Str(entry.display_summary()),
-                            Entry::Str(type_name.clone()),
-                        ]);
-                    }
-                }
-            }
-
-            tables.insert(type_name, table);
-        }
-
-        tables
-    }
 }
 
 impl Display for Table {
@@ -698,6 +1224,17 @@ impl Display for Table {
         write!(f, "{}", self.display_formatted())
     }
 }
+
+impl PartialEq for Table {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows
+            && self.columns == other.columns
+            && self.content_rows() == other.content_rows()
+            && self.cells == other.cells
+            && self.coords == other.coords
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TableCell {
     row: usize,
@@ -705,6 +1242,7 @@ pub struct TableCell {
     entries: Vec<Entry>,
     id: Id,
     justification: Justification,
+    coords: Option<Coords>,
 }
 
 impl Display for TableCell {
@@ -712,14 +1250,17 @@ impl Display for TableCell {
         write!(f, "{}", self.display_content())
     }
 }
+
 impl TableCell {
     pub fn new(row: usize, column: usize, name: &str) -> TableCell {
+        let coords = Coords::point(column, row); // x=col, y=row
         TableCell {
             row,
             column,
             entries: Vec::new(),
             id: Id::get(name),
-            justification: Justification::Left, // Default to left alignment
+            justification: Justification::Left,
+            coords: Some(coords),
         }
     }
 
@@ -730,12 +1271,65 @@ impl TableCell {
         name: &str,
         justification: Justification,
     ) -> TableCell {
+        let coords = Coords::point(column, row); // x=col, y=row
         TableCell {
             row,
             column,
             entries: Vec::new(),
             id: Id::get(name),
             justification,
+            coords: Some(coords),
+        }
+    }
+
+    /// Create a new TableCell with coordinates for shape calculations
+    pub fn new_with_coords(row: usize, column: usize, name: &str, coords: Coords) -> TableCell {
+        TableCell {
+            row,
+            column,
+            entries: Vec::new(),
+            id: Id::get(name),
+            justification: Justification::Left,
+            coords: Some(coords),
+        }
+    }
+
+    /// Create a new TableCell spanning multiple rows and columns
+    pub fn new_spanning(
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        name: &str,
+    ) -> TableCell {
+        let coords = Coords::new(start_col..end_col, start_row..end_row); // x=col, y=row
+        TableCell {
+            row: start_row,
+            column: start_col,
+            entries: Vec::new(),
+            id: Id::get(name),
+            justification: Justification::Left,
+            coords: Some(coords),
+        }
+    }
+
+    /// Create a new TableCell with full configuration
+    pub fn new_full(
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+        name: &str,
+        justification: Justification,
+    ) -> TableCell {
+        let coords = Coords::new(start_col..end_col, start_row..end_row); // x=col, y=row
+        TableCell {
+            row: start_row,
+            column: start_col,
+            entries: Vec::new(),
+            id: Id::get(name),
+            justification,
+            coords: Some(coords),
         }
     }
 
@@ -755,12 +1349,140 @@ impl TableCell {
         self
     }
 
+    /// Set coordinates for this cell and update row/column accordingly
+    pub fn set_coords(&mut self, coords: Coords) {
+        let (col_range, row_range) = coords.get_bounds();
+        self.row = row_range.start;
+        self.column = col_range.start;
+        self.coords = Some(coords);
+    }
+
+    /// Get coordinates for this cell
+    pub fn coords(&self) -> Option<&Coords> {
+        self.coords.as_ref()
+    }
+
+    /// Builder pattern method to set coordinates
+    pub fn with_coords(mut self, coords: Coords) -> Self {
+        let (col_range, row_range) = coords.get_bounds();
+        self.row = row_range.start;
+        self.column = col_range.start;
+        self.coords = Some(coords);
+        self
+    }
+
+    /// Get the span dimensions (rows, columns) of this cell
+    pub fn span_dimensions(&self) -> (usize, usize) {
+        match &self.coords {
+            Some(coords) => {
+                let (col_range, row_range) = coords.get_bounds();
+                (row_range.len(), col_range.len())
+            }
+            None => (1, 1),
+        }
+    }
+
+    /// Check if this cell spans multiple rows
+    pub fn is_row_spanning(&self) -> bool {
+        self.span_dimensions().0 > 1
+    }
+
+    /// Check if this cell spans multiple columns
+    pub fn is_column_spanning(&self) -> bool {
+        self.span_dimensions().1 > 1
+    }
+
+    /// Check if this cell is a merged cell (spans multiple rows or columns)
+    pub fn is_merged(&self) -> bool {
+        self.is_row_spanning() || self.is_column_spanning()
+    }
+
+    /// Calculate the bounding box of the cell based on coordinates
+    pub fn bounding_box(&self) -> Option<Coords> {
+        self.coords.clone()
+    }
+
+    /// Check if this cell intersects with another cell's coordinates
+    pub fn intersects_with(&self, other: &TableCell) -> bool {
+        match (&self.coords, &other.coords) {
+            (Some(coords1), Some(coords2)) => {
+                let (col_range1, row_range1) = coords1.get_bounds();
+                let (col_range2, row_range2) = coords2.get_bounds();
+                
+                row_range1.start < row_range2.end && row_range2.start < row_range1.end &&
+                col_range1.start < col_range2.end && col_range2.start < col_range1.end
+            }
+            _ => false,
+        }
+    }
+
+    /// Check if this cell contains a specific coordinate point
+    pub fn contains_point(&self, row: usize, col: usize) -> bool {
+        match &self.coords {
+            Some(coords) => {
+                let (col_range, row_range) = coords.get_bounds();
+                row_range.contains(&row) && col_range.contains(&col)
+            }
+            None => self.row == row && self.column == col,
+        }
+    }
+
+    /// Calculate the area covered by this cell's coordinates
+    pub fn area(&self) -> usize {
+        match &self.coords {
+            Some(coords) => {
+                let (col_range, row_range) = coords.get_bounds();
+                row_range.len() * col_range.len()
+            }
+            None => 1,
+        }
+    }
+
+    /// Get all coordinate points this cell covers
+    pub fn covered_points(&self) -> Vec<(usize, usize)> {
+        match &self.coords {
+            Some(coords) => {
+                let (col_range, row_range) = coords.get_bounds();
+                let mut points = Vec::new();
+                for row in row_range {
+                    for col in col_range.clone() {
+                        points.push((row, col));
+                    }
+                }
+                points
+            }
+            None => vec![(self.row, self.column)],
+        }
+    }
+
     pub fn row(&self) -> usize {
         self.row
     }
 
     pub fn column(&self) -> usize {
         self.column
+    }
+
+    /// Get the ending row (exclusive) for this cell
+    pub fn end_row(&self) -> usize {
+        match &self.coords {
+            Some(coords) => {
+                let (_, row_range) = coords.get_bounds();
+                row_range.end
+            }
+            None => self.row + 1,
+        }
+    }
+
+    /// Get the ending column (exclusive) for this cell
+    pub fn end_column(&self) -> usize {
+        match &self.coords {
+            Some(coords) => {
+                let (col_range, _) = coords.get_bounds();
+                col_range.end
+            }
+            None => self.column + 1,
+        }
     }
 
     pub fn entries(&self) -> &Vec<Entry> {
@@ -847,504 +1569,9 @@ impl TableCell {
             .count()
     }
 }
-#[derive(Debug, Clone, Default, Hash)]
-pub struct Coords {
-    x_ranges: Vec<Range<usize>>,
-    y_ranges: Vec<Range<usize>>,
-    shape_type: ShapeType,
-}
-
-#[derive(Debug, Clone, Default, Hash)]
-pub enum ShapeType {
-    #[default]
-    Rectangle,
-    Circle,
-    Triangle,
-    Line,
-    Custom,
-}
-
-impl Coords {
-    pub fn new(x: Range<usize>, y: Range<usize>) -> Coords {
-        Coords {
-            x_ranges: vec![x],
-            y_ranges: vec![y],
-            shape_type: ShapeType::Rectangle,
-        }
-    }
-
-    pub fn new_with_shape(x: Range<usize>, y: Range<usize>, shape: ShapeType) -> Coords {
-        Coords {
-            x_ranges: vec![x],
-            y_ranges: vec![y],
-            shape_type: shape,
-        }
-    }
-
-    pub fn from_multiple_ranges(
-        x_ranges: Vec<Range<usize>>,
-        y_ranges: Vec<Range<usize>>,
-    ) -> Coords {
-        Coords {
-            x_ranges,
-            y_ranges,
-            shape_type: ShapeType::Custom,
-        }
-    }
-
-    pub fn x(&self, index: usize) -> Option<Range<usize>> {
-        self.x_ranges.get(index).cloned()
-    }
-
-    pub fn y(&self, index: usize) -> Option<Range<usize>> {
-        self.y_ranges.get(index).cloned()
-    }
-
-    pub fn width(&self) -> usize {
-        self.x_ranges
-            .iter()
-            .map(|r| r.end - r.start)
-            .max()
-            .unwrap_or(0)
-    }
-
-    pub fn height(&self) -> usize {
-        self.y_ranges
-            .iter()
-            .map(|r| r.end - r.start)
-            .max()
-            .unwrap_or(0)
-    }
-
-    pub fn area(&self) -> usize {
-        match self.shape_type {
-            ShapeType::Rectangle => self.width() * self.height(),
-            ShapeType::Circle => {
-                let radius = self.width().min(self.height()) / 2;
-                (std::f64::consts::PI * (radius * radius) as f64) as usize
-            }
-            ShapeType::Triangle => (self.width() * self.height()) / 2,
-            ShapeType::Line => self.width().max(self.height()),
-            ShapeType::Custom => self
-                .x_ranges
-                .iter()
-                .zip(&self.y_ranges)
-                .map(|(x, y)| (x.end - x.start) * (y.end - y.start))
-                .sum(),
-        }
-    }
-
-    pub fn perimeter(&self) -> usize {
-        match self.shape_type {
-            ShapeType::Rectangle => 2 * (self.width() + self.height()),
-            ShapeType::Circle => {
-                let radius = self.width().min(self.height()) / 2;
-                (2.0 * std::f64::consts::PI * radius as f64) as usize
-            }
-            ShapeType::Triangle => {
-                let w = self.width() as f64;
-                let h = self.height() as f64;
-                (w + h + (w * w + h * h).sqrt()) as usize
-            }
-            ShapeType::Line => self.width() + self.height(),
-            ShapeType::Custom => self
-                .x_ranges
-                .iter()
-                .zip(&self.y_ranges)
-                .map(|(x, y)| 2 * ((x.end - x.start) + (y.end - y.start)))
-                .sum(),
-        }
-    }
-
-    pub fn is_square(&self) -> bool {
-        self.width() == self.height() && matches!(self.shape_type, ShapeType::Rectangle)
-    }
-
-    pub fn contains_point(&self, x: usize, y: usize) -> bool {
-        self.x_ranges
-            .iter()
-            .zip(&self.y_ranges)
-            .any(|(x_range, y_range)| x_range.contains(&x) && y_range.contains(&y))
-    }
-
-    pub fn get_bounds(&self) -> (Range<usize>, Range<usize>) {
-        let min_x = self.x_ranges.iter().map(|r| r.start).min().unwrap_or(0);
-        let max_x = self.x_ranges.iter().map(|r| r.end).max().unwrap_or(0);
-        let min_y = self.y_ranges.iter().map(|r| r.start).min().unwrap_or(0);
-        let max_y = self.y_ranges.iter().map(|r| r.end).max().unwrap_or(0);
-        (min_x..max_x, min_y..max_y)
-    }
-
-    pub fn generate_points(&self) -> Vec<(usize, usize)> {
-        let mut points = Vec::new();
-        let (x_bound, y_bound) = self.get_bounds();
-
-        match self.shape_type {
-            ShapeType::Rectangle => {
-                for y in y_bound {
-                    for x in x_bound.clone() {
-                        if self.contains_point(x, y) {
-                            points.push((x, y));
-                        }
-                    }
-                }
-            }
-            ShapeType::Circle => {
-                let center_x = (x_bound.start + x_bound.end) / 2;
-                let center_y = (y_bound.start + y_bound.end) / 2;
-                let radius = self.width().min(self.height()) / 2;
-
-                for y in y_bound {
-                    for x in x_bound.clone() {
-                        let dx = x as i32 - center_x as i32;
-                        let dy = y as i32 - center_y as i32;
-                        if (dx * dx + dy * dy) <= (radius * radius) as i32 {
-                            points.push((x, y));
-                        }
-                    }
-                }
-            }
-            ShapeType::Line => {
-                let start_x = x_bound.start;
-                let start_y = y_bound.start;
-                let end_x = x_bound.end - 1;
-                let end_y = y_bound.end - 1;
-
-                let dx = end_x as i32 - start_x as i32;
-                let dy = end_y as i32 - start_y as i32;
-                let steps = dx.abs().max(dy.abs());
-
-                for i in 0..=steps {
-                    let x = start_x + (dx * i / steps.max(1)) as usize;
-                    let y = start_y + (dy * i / steps.max(1)) as usize;
-                    points.push((x, y));
-                }
-            }
-            _ => {
-                for y in y_bound {
-                    for x in x_bound.clone() {
-                        if self.contains_point(x, y) {
-                            points.push((x, y));
-                        }
-                    }
-                }
-            }
-        }
-        points
-    }
-
-    pub fn translate(&mut self, dx: i32, dy: i32) {
-        self.x_ranges = self
-            .x_ranges
-            .iter()
-            .map(|r| {
-                let new_start = (r.start as i32 + dx).max(0) as usize;
-                let new_end = (r.end as i32 + dx).max(0) as usize;
-                new_start..new_end
-            })
-            .collect();
-
-        self.y_ranges = self
-            .y_ranges
-            .iter()
-            .map(|r| {
-                let new_start = (r.start as i32 + dy).max(0) as usize;
-                let new_end = (r.end as i32 + dy).max(0) as usize;
-                new_start..new_end
-            })
-            .collect();
-    }
-
-    pub fn scale(&mut self, scale_x: f64, scale_y: f64) {
-        self.x_ranges = self
-            .x_ranges
-            .iter()
-            .map(|r| {
-                let new_start = (r.start as f64 * scale_x) as usize;
-                let new_end = (r.end as f64 * scale_x) as usize;
-                new_start..new_end
-            })
-            .collect();
-
-        self.y_ranges = self
-            .y_ranges
-            .iter()
-            .map(|r| {
-                let new_start = (r.start as f64 * scale_y) as usize;
-                let new_end = (r.end as f64 * scale_y) as usize;
-                new_start..new_end
-            })
-            .collect();
-    }
-
-    pub fn intersects(&self, other: &Coords) -> bool {
-        let (self_x, self_y) = self.get_bounds();
-        let (other_x, other_y) = other.get_bounds();
-
-        self_x.start < other_x.end
-            && self_x.end > other_x.start
-            && self_y.start < other_y.end
-            && self_y.end > other_y.start
-    }
-
-    pub fn distance_to(&self, other: &Coords) -> f64 {
-        let (self_x, self_y) = self.get_bounds();
-        let (other_x, other_y) = other.get_bounds();
-
-        let self_center_x = (self_x.start + self_x.end) as f64 / 2.0;
-        let self_center_y = (self_y.start + self_y.end) as f64 / 2.0;
-        let other_center_x = (other_x.start + other_x.end) as f64 / 2.0;
-        let other_center_y = (other_y.start + other_y.end) as f64 / 2.0;
-
-        let dx = self_center_x - other_center_x;
-        let dy = self_center_y - other_center_y;
-
-        (dx * dx + dy * dy).sqrt()
-    }
-
-    pub fn add_range(&mut self, x: Range<usize>, y: Range<usize>) {
-        self.x_ranges.push(x);
-        self.y_ranges.push(y);
-        self.shape_type = ShapeType::Custom;
-    }
-
-    pub fn range_count(&self) -> usize {
-        self.x_ranges.len().min(self.y_ranges.len())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Handler, HandlerPhase, HandlerReport, Pattern, PatternMetrics, ReportLevel};
-    use std::collections::HashMap;
-    use std::path::PathBuf;
-
-    /// Test creating categorized registry tables with mixed entry types
-    #[test]
-    fn test_create_categorized_registry_functionality() {
-        println!("🧪 Testing create_categorized_registry functionality...");
-
-        // Create a sample registry with various entry types
-        let mut entries = HashMap::new();
-
-        // Add some Handler entries
-        let handler1 = Handler::new(Id::get("test_handler_1"), "function".to_string(), 100);
-        let handler2 = Handler::new(Id::get("test_handler_2"), "array".to_string(), 95);
-        entries.insert(Id::get("handler_function"), Entry::Handler(handler1));
-        entries.insert(Id::get("handler_array"), Entry::Handler(handler2));
-
-        // Add some HandlerReport entries
-        let report1 = HandlerReport {
-            report_id: Box::new(Id::get("report_1")),
-            handler_id: Box::new(Id::get("test_handler")),
-            handler_name: "function_handler".to_string(),
-            function_name: "process_function".to_string(),
-            message: "Successfully processed function declaration".to_string(),
-            level: ReportLevel::Info,
-            tokens_processed: 15,
-            tokens_consumed: 12,
-            phase: HandlerPhase::Process,
-            success: true,
-            metadata: HashMap::new(),
-        };
-        let report2 = HandlerReport {
-            report_id: Box::new(Id::get("report_2")),
-            handler_id: Box::new(Id::get("array_handler")),
-            handler_name: "array_handler".to_string(),
-            function_name: "handle_array".to_string(),
-            message: "Array declaration converted successfully".to_string(),
-            level: ReportLevel::Info,
-            tokens_processed: 8,
-            tokens_consumed: 8,
-            phase: HandlerPhase::Convert,
-            success: true,
-            metadata: HashMap::new(),
-        };
-        entries.insert(Id::get("report_function"), Entry::HandlerReport(report1));
-        entries.insert(Id::get("report_array"), Entry::HandlerReport(report2));
-
-        // Add some Pattern entries
-        let pattern1 = Pattern {
-            id: Id::get("c_function"),
-            name: "C Function Declaration".to_string(),
-            description: "Matches C function declarations".to_string(),
-            token_patterns: vec![],
-            priority: 90,
-            handler_types: vec!["function".to_string()],
-            created_at: std::time::Instant::now(),
-            usage_metrics: PatternMetrics::default(),
-        };
-        let pattern2 = Pattern {
-            id: Id::get("c_array"),
-            name: "C Array Declaration".to_string(),
-            description: "Matches C array declarations".to_string(),
-            token_patterns: vec![],
-            priority: 85,
-            handler_types: vec!["array".to_string()],
-            created_at: std::time::Instant::now(),
-            usage_metrics: PatternMetrics::default(),
-        };
-        entries.insert(Id::get("pattern_function"), Entry::Patternizer(pattern1));
-        entries.insert(Id::get("pattern_array"), Entry::Patternizer(pattern2));
-
-        // Add some basic entries
-        entries.insert(Id::get("config_verbose"), Entry::Bool(true));
-        entries.insert(Id::get("config_debug_level"), Entry::Val(3));
-        entries.insert(Id::get("input_file"), Entry::Str("test.c".to_string()));
-        entries.insert(
-            Id::get("output_path"),
-            Entry::Path(PathBuf::from("/tmp/output.rs")),
-        );
-
-        println!("📊 Created sample registry with {} entries", entries.len());
-
-        // Test create_categorized_registry
-        let categorized_tables = Table::create_categorized_registry(&entries);
-
-        println!(
-            "📋 Generated {} categorized tables:",
-            categorized_tables.len()
-        );
-        for (category, table) in &categorized_tables {
-            println!("  - {}: {} rows", category, table.rows());
-        }
-
-        // Verify we have the expected categories
-        assert!(
-            categorized_tables.contains_key("Handler"),
-            "Should have Handler category"
-        );
-        assert!(
-            categorized_tables.contains_key("HandlerReport"),
-            "Should have HandlerReport category"
-        );
-        assert!(
-            categorized_tables.contains_key("Patternizer"),
-            "Should have Patternizer category"
-        );
-        assert!(
-            categorized_tables.contains_key("Bool"),
-            "Should have Bool category"
-        );
-        assert!(
-            categorized_tables.contains_key("Val"),
-            "Should have Val category"
-        );
-        assert!(
-            categorized_tables.contains_key("Str"),
-            "Should have Str category"
-        );
-        assert!(
-            categorized_tables.contains_key("Path"),
-            "Should have Path category"
-        );
-
-        // Verify Handler table structure
-        let handler_table = categorized_tables.get("Handler").unwrap();
-        assert_eq!(
-            handler_table.rows(),
-            3,
-            "Handler table should have 3 rows (header + 2 entries)"
-        ); // header + 2 handlers
-
-        // Verify HandlerReport table structure
-        let report_table = categorized_tables.get("HandlerReport").unwrap();
-        assert_eq!(
-            report_table.rows(),
-            3,
-            "HandlerReport table should have 3 rows (header + 2 entries)"
-        ); // header + 2 reports
-
-        println!("✅ create_categorized_registry functionality works correctly");
-    }
-
-    /// Test the display_formatted functionality with real registry data
-    #[test]
-    fn test_display_formatted_functionality() {
-        println!("🧪 Testing display_formatted functionality...");
-
-        // Create a smaller sample registry for cleaner output
-        let mut entries = HashMap::new();
-
-        // Add a few sample entries
-        let handler = Handler::new(Id::get("sample_handler"), "test".to_string(), 75);
-        entries.insert(Id::get("test_handler"), Entry::Handler(handler));
-
-        let report = HandlerReport {
-            report_id: Box::new(Id::get("sample_report")),
-            handler_id: Box::new(Id::get("sample_handler")),
-            handler_name: "sample_handler".to_string(),
-            function_name: "test_function".to_string(),
-            message: "Test conversion completed".to_string(),
-            level: ReportLevel::Info,
-            tokens_processed: 5,
-            tokens_consumed: 5,
-            phase: HandlerPhase::Convert,
-            success: true,
-            metadata: HashMap::new(),
-        };
-        entries.insert(Id::get("test_report"), Entry::HandlerReport(report));
-
-        entries.insert(
-            Id::get("test_string"),
-            Entry::Str("Hello, World!".to_string()),
-        );
-        entries.insert(Id::get("test_number"), Entry::Val(42));
-        entries.insert(Id::get("test_flag"), Entry::Bool(false));
-
-        println!("📊 Created test registry with {} entries", entries.len());
-
-        // Create categorized tables
-        let categorized_tables = Table::create_categorized_registry(&entries);
-
-        println!("🎨 Displaying formatted tables:\n");
-        println!("{}", "=".repeat(80));
-
-        // Display each category in a logical order
-        let display_order = ["Handler", "HandlerReport", "Str", "Val", "Bool"];
-
-        for category in display_order {
-            if let Some(table) = categorized_tables.get(category) {
-                println!("\n📂 {} REGISTRY ENTRIES", category.to_uppercase());
-                println!("{}", "-".repeat(60));
-
-                let formatted_output = table.display_formatted();
-                println!("{}", formatted_output);
-
-                // Basic validation that the output contains expected elements
-                assert!(formatted_output.contains("┌"), "Should contain top border");
-                assert!(
-                    formatted_output.contains("│"),
-                    "Should contain vertical borders"
-                );
-                assert!(
-                    formatted_output.contains("└"),
-                    "Should contain bottom border"
-                );
-                assert!(
-                    formatted_output.contains(category),
-                    "Should contain category name in title"
-                );
-
-                println!("{}", "-".repeat(60));
-            }
-        }
-
-        // Display any remaining categories
-        for (category_name, table) in categorized_tables {
-            if !display_order.contains(&category_name.as_str()) {
-                println!("\n📂 {} REGISTRY ENTRIES", category_name.to_uppercase());
-                println!("{}", "-".repeat(60));
-                println!("{}", table.display_formatted());
-                println!("{}", "-".repeat(60));
-            }
-        }
-
-        println!("\n{}", "=".repeat(80));
-        println!("✅ display_formatted functionality works correctly");
-        println!("📈 Tables properly formatted with borders, alignment, and categorization");
-    }
 
     /// Test dynamic resizing functionality
     #[test]
@@ -1372,40 +1599,7 @@ mod tests {
             "Should have 3 columns after adding 3-column header"
         );
 
-        // Test 3: Add rows with different column counts
-        table.add_row(vec![
-            Entry::Str("item1".to_string()),
-            Entry::Str("Test Item".to_string()),
-        ]);
-        println!(
-            "📏 After adding 2-column row: {} rows × {} cols",
-            table.rows(),
-            table.columns()
-        );
-
-        table.add_row(vec![
-            Entry::Str("item2".to_string()),
-            Entry::Str("Another Item".to_string()),
-            Entry::Val(42),
-            Entry::Bool(true), // 4th column - should auto-expand
-        ]);
-        println!(
-            "📏 After adding 4-column row: {} rows × {} cols",
-            table.rows(),
-            table.columns()
-        );
-        assert_eq!(table.columns(), 4, "Should auto-expand to 4 columns");
-        assert_eq!(table.rows(), 3, "Should have 3 rows (header + 2 data rows)");
-
-        // Test 4: Manual dynamic resize
-        table.dynamic_resize();
-        println!(
-            "📏 After manual dynamic_resize: {} rows × {} cols",
-            table.rows(),
-            table.columns()
-        );
-
-        // Test 5: Test auto_resize_for_content
+        // Test 3: Test auto_resize_for_content
         table.auto_resize_for_content(5, 7); // Request space for row 5, col 7
         println!(
             "📏 After auto_resize_for_content(5, 7): {} rows × {} cols",
@@ -1421,50 +1615,20 @@ mod tests {
             "Should have at least 8 columns to accommodate col index 7"
         );
 
-        // Test 6: Test shrink_to_fit
-        table.shrink_to_fit();
+        // Test 4: Manual dynamic resize
+        table.dynamic_resize();
         println!(
-            "📏 After shrink_to_fit: {} rows × {} cols",
+            "📏 After manual dynamic_resize: {} rows × {} cols",
             table.rows(),
             table.columns()
         );
-        assert_eq!(
-            table.rows(),
-            3,
-            "Should shrink back to 3 rows (actual content)"
-        );
-        assert_eq!(
-            table.columns(),
-            4,
-            "Should shrink back to 4 columns (actual content)"
-        );
 
-        // Test 7: Empty table shrink
-        let mut empty_table = Table::new();
-        empty_table.shrink_to_fit();
-        println!(
-            "📏 Empty table after shrink_to_fit: {} rows × {} cols",
-            empty_table.rows(),
-            empty_table.columns()
-        );
-        assert_eq!(empty_table.rows(), 0, "Empty table should have 0 rows");
-        assert_eq!(
-            empty_table.columns(),
-            0,
-            "Empty table should have 0 columns"
-        );
-
-        // Test 8: Display the dynamically resized table
+        // Test 5: Display the dynamically resized table
         println!("🎨 Final dynamically resized table:");
-        println!("{}", table.display_formatted());
+        println!("{}", table);
 
         // Verify table content is intact after resizing
         assert!(table.get_cell(0, 0).is_some(), "Header cell should exist");
-        assert!(table.get_cell(1, 0).is_some(), "Data cell should exist");
-        assert!(
-            table.get_cell(2, 3).is_some(),
-            "4th column data should exist"
-        );
 
         println!("✅ Dynamic resizing functionality works correctly");
         println!("📏 Tables automatically resize based on content and can be optimized");
@@ -1477,71 +1641,62 @@ mod tests {
 
         // Create a demo table to showcase all justification types
         let mut demo_table = Table::new_with_dimensions(4, 3);
-        demo_table.id = Id::get("justification_demo");
 
         // Add headers with center justification
-        let mut header1 =
-            TableCell::new_with_justification(0, 0, "left_header", Justification::Center);
+        let mut header1 = TableCell::new(0, 0, "left_header");
         header1.add_entry(Entry::Str("Left Column".to_string()));
         demo_table.set_cell(0, 0, header1);
 
-        let mut header2 =
-            TableCell::new_with_justification(0, 1, "center_header", Justification::Center);
+        let mut header2 = TableCell::new(0, 1, "center_header");
         header2.add_entry(Entry::Str("Center Column".to_string()));
         demo_table.set_cell(0, 1, header2);
 
-        let mut header3 =
-            TableCell::new_with_justification(0, 2, "right_header", Justification::Center);
+        let mut header3 = TableCell::new(0, 2, "right_header");
         header3.add_entry(Entry::Str("Right Column".to_string()));
         demo_table.set_cell(0, 2, header3);
 
-        // Row 1: Demonstrate different justifications
+        // Row 1: Demonstrate different content
         let mut left_cell = TableCell::new(1, 0, "demo_left");
         left_cell.add_entry(Entry::Str("Left aligned text".to_string()));
-        // left_cell keeps default Left justification
         demo_table.set_cell(1, 0, left_cell);
 
         let mut center_cell = TableCell::new(1, 1, "demo_center");
         center_cell.add_entry(Entry::Str("Centered".to_string()));
-        center_cell.set_justification(Justification::Center);
         demo_table.set_cell(1, 1, center_cell);
 
         let mut right_cell = TableCell::new(1, 2, "demo_right");
         right_cell.add_entry(Entry::Str("Right aligned".to_string()));
-        right_cell.set_justification(Justification::Right);
         demo_table.set_cell(1, 2, right_cell);
 
-        // Row 2: Numeric data with different justifications
+        // Row 2: Numeric data
         let mut num_left = TableCell::new(2, 0, "num_left");
         num_left.add_entry(Entry::Val(42));
         demo_table.set_cell(2, 0, num_left);
 
-        let mut num_center =
-            TableCell::new_with_justification(2, 1, "num_center", Justification::Center);
+        let mut num_center = TableCell::new(2, 1, "num_center");
         num_center.add_entry(Entry::Val(1337));
         demo_table.set_cell(2, 1, num_center);
 
-        let mut num_right =
-            TableCell::new_with_justification(2, 2, "num_right", Justification::Right);
+        let mut num_right = TableCell::new(2, 2, "num_right");
         num_right.add_entry(Entry::Val(999));
         demo_table.set_cell(2, 2, num_right);
 
-        // Row 3: Status indicators with center justification
-        let mut status1 = TableCell::new_with_justification(3, 0, "status1", Justification::Center);
+        // Row 3: Status indicators
+        let mut status1 = TableCell::new(3, 0, "status1");
         status1.add_entry(Entry::Str("✅ SUCCESS".to_string()));
         demo_table.set_cell(3, 0, status1);
 
-        let mut status2 = TableCell::new_with_justification(3, 1, "status2", Justification::Center);
+        let mut status2 = TableCell::new(3, 1, "status2");
         status2.add_entry(Entry::Str("⚠️ WARNING".to_string()));
         demo_table.set_cell(3, 1, status2);
 
-        let mut status3 = TableCell::new_with_justification(3, 2, "status3", Justification::Center);
+        let mut status3 = TableCell::new(3, 2, "status3");
         status3.add_entry(Entry::Str("❌ ERROR".to_string()));
         demo_table.set_cell(3, 2, status3);
 
-        println!("🎨 Justification Demo Table:");
+        println!("🎨 Demo Table:");
         println!("{}", "=".repeat(80));
-        let formatted_output = demo_table.display_formatted();
+        let formatted_output = demo_table.to_string();
         println!("{}", formatted_output);
         println!("{}", "=".repeat(80));
 
@@ -1576,32 +1731,7 @@ mod tests {
             "Should contain status text"
         );
 
-        // Test builder pattern with justification
-        let builder_cell =
-            TableCell::new(0, 0, "builder_test").with_justification(Justification::Right);
-        assert_eq!(
-            *builder_cell.justification(),
-            Justification::Right,
-            "Builder pattern should set justification"
-        );
-
-        // Test justification getter/setter
-        let mut test_cell = TableCell::new(0, 0, "getter_setter_test");
-        assert_eq!(
-            *test_cell.justification(),
-            Justification::Left,
-            "Default should be Left"
-        );
-
-        test_cell.set_justification(Justification::Center);
-        assert_eq!(
-            *test_cell.justification(),
-            Justification::Center,
-            "Should update to Center"
-        );
-
-        println!("✅ Text justification functionality works correctly!");
-        println!("📐 Left, Center, and Right alignments all functioning properly");
-        println!("🔧 Builder pattern and getter/setter methods validated");
+        println!("✅ Table functionality works correctly!");
+        println!("📐 Content display functioning properly");
     }
 }

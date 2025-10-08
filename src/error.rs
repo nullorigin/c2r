@@ -370,7 +370,7 @@ impl From<std::fmt::Error> for C2RError {
     }
 }
 impl From<C2RError> for std::fmt::Error {
-    fn from(e: C2RError) -> Self {
+    fn from(_e: C2RError) -> Self {
         std::fmt::Error {}
     }
 }

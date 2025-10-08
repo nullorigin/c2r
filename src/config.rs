@@ -1,4 +1,6 @@
 #![allow(
+    unsafe_code,
+    static_mut_refs,
     unused_variables,
     unused_assignments,
     non_camel_case_types,
@@ -7,431 +9,131 @@
 )]
 
 use crate::{
-    Entry, Handler, HandlerMap, Id, Lock, Pattern, Patternizer, Registry, ReportLevel, Token,
-    Tokenizer, VERBOSITY_LEVEL, time,
+    Entry, Handler, HandlerResult, Handlizer, Id, Maybe, MaybeLock, OptionLock, Pattern,
+    PatternResult, Patternizer, ReadGuard, Registry, ReportLevel, Result, Samplizer, Table, Token,
+    TokenBox, Tokenizer, WriteGuard, array_handler::ArrayHandler, comment_handler::CommentHandler,
+    enum_handler::EnumHandler, expression_handler::ExpressionHandler,
+    function_handler::FunctionHandler, global_handler::GlobalHandler, handlers, logging,
+    loop_handler::LoopHandler, macro_handler::MacroHandler, maybe::lock::MaybeLockWriteGuard,
+    registry, struct_handler::StructHandler, token, typedef_handler::TypedefHandler,
+    variable_handler::VariableHandler,
+};
+use core::{
+    ops::FnOnce,
+    option::Option::{None, Some},
 };
 use std::{
-    any::Any,
     cmp::Ordering,
     collections::HashMap,
-    convert::Into,
     fmt::Debug,
     hash::{Hash, Hasher},
-    ops::{FnMut, Range},
-    option::Option::None,
+    ops::Range,
     path::PathBuf,
+    result,
+    sync::LazyLock,
     time::{SystemTime, UNIX_EPOCH},
 };
-// Range operators used in tokens! macro indexing
 
-pub static CONTEXT: Lock<Context> = Lock::<Context>::new();
-pub struct Global;
-impl Global {
-    pub fn write<F, R>(mut f: F) -> R
-    where
-        F: FnMut(&mut Context) -> R,
-    {
-        let guard: &mut Context = &mut CONTEXT.lock_mut();
-        f(guard)
-    }
-
-    pub fn read<F, R>(mut f: F) -> R
-    where
-        F: FnMut(&Context) -> R,
-    {
-        let guard: &Context = &CONTEXT.lock();
-        f(guard)
-    }
-
-    pub fn update<F: FnMut(&mut Context) -> Context>(mut f: F) {
-        Self::write(|ctx: &mut Context| {
-            let mut ctx = ctx.clone();
-            f(&mut ctx)
-        });
-    }
-    pub fn registry() -> Registry {
-        Self::read(|ctx: &Context| ctx.registry.clone())
-    }
-    pub fn handler_map() -> HandlerMap {
-        Self::read(|ctx: &Context| ctx.handlers.clone())
-    }
-    pub fn tokens() -> Vec<Token> {
-        Self::read(|ctx: &Context| ctx.tokens.clone())
-    }
-    pub fn tokenizer() -> Tokenizer {
-        Self::read(|ctx: &Context| ctx.tokenizer.clone())
-    }
-    pub fn patternizer() -> Patternizer {
-        Self::read(|ctx: &Context| ctx.patternizer.clone())
-    }
-    pub fn pending() -> Vec<HandlerRedirect> {
-        Self::read(|ctx: &Context| ctx.pending_redirects.clone())
-    }
-}
+const TOKEN_MAX: usize = 8192;
 
 #[macro_export]
+#[allow(static_mut_refs, unsafe_code)]
 macro_rules! context {
-    () => {
-        {
-            $crate::config::Global::read(|ctx: &$crate::config::Context| ctx.clone())
-        }
+    [w] => {
+        *$crate::config::context()
     };
-    ($cmd:ident($($args:expr),+)) => {
-        {
-            $crate::config::Global::write(|ctx: &mut $crate::config::Context| ctx.$cmd($($args),+))
-        }
+    [r] => {
+        $crate::config::context()
     };
-    ($cmd:ident()) => {
-        {
-            $crate::config::Global::write(|ctx: &mut $crate::config::Context| ctx.$cmd())
-        }
+    [r,$field:ident] => {
+        $crate::config::context_with(|ctx| &ctx.$field)
     };
-    ($context:expr) => {
-        {
-            $crate::config::Global::write(|ctx| *ctx = $context)
-        }
-    };
-    ($field:ident, $value:expr, $op:tt) => {
-        {
-            $crate::config::Global::write(|ctx| ctx.$field $op $value)
-        }
+    [$field:ident: $value:expr] => {
+        $crate::config::context_with_mut(|ctx| ctx.$field = $value)
     };
 }
 
-#[macro_export]
-macro_rules! tokens {
-    () => {{ $crate::config::Global::tokens() }};
-    ($range:expr) => {
-        $crate::config::Global::read(|ctx| {
-            let tokens = &ctx.tokens();
-            let range = $range;
-            if range.end <= tokens.len() {
-                tokens[range].to_vec()
-            } else {
-                Vec::new()
-            }
-        })
-    };
-    ($range1:expr, $value:expr) => {
-        $crate::config::Global::write(|ctx: &mut $crate::config::Context| {
-            ctx.tokens[$range1] = $value.clone()
-        })
-    };
-    ($range1:expr, $range2:expr) => {
-        $crate::config::Global::write(|ctx: &mut $crate::config::Context| {
-            ctx.tokens[$range1] = ctx.tokens[$range2].clone()
-        })
-    };
-}
-
-impl From<Context> for Registry {
-    fn from(value: Context) -> Self {
-        value.registry
+#[allow(static_mut_refs, unsafe_code)]
+pub fn context() -> MaybeLockWriteGuard<'static, Context> {
+    unsafe {
+        static mut CONTEXT: MaybeLock<Context> = MaybeLock::new();
+        if let Maybe::Some(guard) = CONTEXT.try_write() {
+            guard
+        } else {
+            CONTEXT.force();
+            CONTEXT
+                .try_write()
+                .unwrap_or_else(|| panic!("Failed to initialize context"))
+        }
     }
 }
-
-impl From<Context> for HandlerMap {
-    fn from(value: Context) -> Self {
-        value.handlers
-    }
-}
-
-impl From<&mut Context> for Option<Context> {
-    fn from(value: &mut Context) -> Self {
-        Some(value.clone())
-    }
-}
-/// Configuration options for the C2R converter
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct Context {
-    pub handlers: HandlerMap,
-    pub patternizer: Patternizer,
-    pub pending_redirects: Vec<HandlerRedirect>,
-    pub registry: Registry,
     pub tokenizer: Tokenizer,
-    pub tokens: Vec<Token>,
-    pub original_tokens: Vec<Token>,
+    pub tokenbox: TokenBox,
+    pub patternizer: Patternizer,
+    pub samplizer: Samplizer,
+    pub handlizer: Handlizer, // Now includes adaptive, analysis, and redirect functionality
+    pub registry: Registry,
 }
-impl Clone for Context {
-    fn clone(&self) -> Self {
-        Self {
-            handlers: self.handlers.clone(),
-            tokenizer: self.tokenizer.clone(),
-            patternizer: self.patternizer.clone(),
-            registry: self.registry.clone(),
-            pending_redirects: self.pending_redirects.clone(),
-            tokens: self.tokens.clone(),
-            original_tokens: self.original_tokens.clone(),
-        }
-    }
-}
-impl Eq for Context {}
-impl PartialEq for Context {
-    fn eq(&self, other: &Self) -> bool {
-        self.registry == other.registry
-            && self.handlers == other.handlers
-            && self.tokenizer == other.tokenizer
-            && self.patternizer == other.patternizer
-            && self.pending_redirects == other.pending_redirects
-    }
-}
-
 impl Context {
-    /// Create a new configuration with the given name
-    pub fn new(name: &str) -> Self {
+    #[allow(static_mut_refs, unsafe_code)]
+    pub fn new() -> Self {
         Context {
-            handlers: HandlerMap::new(name),
-            tokenizer: Tokenizer::new(name),
-            patternizer: Patternizer::new(name),
-            registry: Registry::new(name),
-            pending_redirects: Vec::<HandlerRedirect>::new(),
-            tokens: Vec::<Token>::new(),
-            original_tokens: Vec::<Token>::new(),
+            tokenizer: Tokenizer::new(),
+            tokenbox: TokenBox::new(Id::get("tokenbox"), TOKEN_MAX),
+            patternizer: Patternizer::new(),
+            samplizer: Samplizer::new(),
+            handlizer: Handlizer::new(), // Handlizer now contains adaptive, analysis, and redirect functionality
+            registry: Registry::new(),
         }
     }
+    pub fn sync_tokenizer(&self) {
+        context().tokenizer = self.tokenizer.clone();
+    }
+
+    pub fn sync_tokenbox(&self) {
+        context().tokenbox = self.tokenbox.clone();
+    }
+
+    pub fn sync_patternizer(&self) {
+        context().patternizer = self.patternizer.clone();
+    }
+
+    pub fn sync_samplizer(&self) {
+        context().samplizer = self.samplizer.clone();
+    }
+
+    pub fn sync_analyzer(&self) {
+        context().handlizer = self.handlizer.clone();
+    }
+
+    pub fn sync_registry(&self) {
+        context().registry = self.registry.clone();
+    }
+
+    /// Shutdown all background threads and resources
+    pub fn shutdown(&mut self) {
+        // Shutdown the samplizer's thread pool
+        self.samplizer.shutdown();
+
+        // Shutdown global thread pool
+        crate::thread::shutdown_global_pool();
+    }
+
     /// Get the current verbosity level
     pub fn get_verbosity(&self) -> u8 {
-        let entry = self.get_entry("verbosity");
-        if let Some(Entry::Val(verbosity)) = entry {
-            verbosity.clone() as u8
-        } else {
-            0
-        }
+        self.registry
+            .get_u64("verbosity")
+            .map(|v| v as u8)
+            .unwrap_or(0)
     }
 
     /// Set the verbosity level
     pub fn set_verbosity(&mut self, level: u8) {
-        self.set_entry("verbosity", Entry::Val(level as u64));
+        self.registry.set_value("verbosity", level as u64);
     }
 
-    /// Get a reference to the registry
-    pub fn get_registry(&self) -> &Registry {
-        &self.registry
-    }
-
-    /// Get a mutable reference to the registry
-    pub fn get_registry_mut(&mut self) -> &mut Registry {
-        &mut self.registry
-    }
-
-    /// Replace the current registry
-    pub fn set_registry(&mut self, registry: Registry) {
-        self.registry = registry;
-    }
-
-    /// Add an include directory
-    pub fn add_include_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
-        let id = Id::get("include_directories");
-        let paths = match self.registry.entries.get(&id) {
-            Some(Entry::List(paths)) => {
-                let mut paths = paths.clone();
-                paths.push(Entry::Path(dir.into()));
-                paths
-            }
-            Some(Entry::Path(existing)) => {
-                let mut paths = Vec::new();
-                paths.push(Entry::Path(existing.clone()));
-                paths.push(Entry::Path(dir.into()));
-                paths
-            }
-            _ => vec![Entry::Path(dir.into())],
-        };
-
-        self.registry.insert(id, Entry::List(paths));
-        self
-    }
-
-    /// Set the base directory and return self for builder pattern
-    pub fn with_base_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Context {
-        let id = Id::get("base_dir");
-        self.registry.insert(id, Entry::Path(dir.into()));
-        self
-    }
-
-    /// Set verbosity level and return self for builder pattern
-    pub fn with_verbosity(&mut self, level: u8) -> &mut Context {
-        let _id = Id::get("verbosity");
-        self.set_verbosity(level);
-        self
-    }
-
-    /// Get system includes setting
-    pub fn get_system_includes(&self) -> bool {
-        let id = Id::get("system_includes");
-        self.registry
-            .entries
-            .get(&id)
-            .and_then(|entry| match entry {
-                Entry::Bool(value) => Some(*value),
-                _ => None,
-            })
-            .unwrap_or(false)
-    }
-
-    /// Apply this configuration globally
-    pub fn push(&mut self) {
-        Global::write(|ctx| *ctx = self.clone());
-    }
-
-    pub fn pull(&mut self) {
-        Global::read(|ctx| *self = ctx.clone());
-    }
-
-    /// Set a feature flag with the given name and value
-    pub fn set_feature(&mut self, name: &str, value: bool) -> Option<bool> {
-        let id = Id::get(name);
-        let features_entry = self
-            .registry
-            .entries
-            .entry(id)
-            .or_insert_with(|| Entry::StrMap(HashMap::new()));
-
-        if let Entry::StrMap(features_map) = features_entry {
-            let previous = features_map.insert(name.to_string(), Entry::Bool(value));
-            previous.and_then(|entry| match entry {
-                Entry::Bool(prev_value) => Some(prev_value),
-                _ => None,
-            })
-        } else {
-            None
-        }
-    }
-
-    /// Get the value of a feature flag
-    pub fn get_feature(&self, name: &str) -> Option<bool> {
-        let id = Id::get("features");
-        self.registry
-            .entries
-            .get(&id)
-            .and_then(|entry| match entry {
-                Entry::StrMap(features_map) => {
-                    features_map.get(name).and_then(|value| match value {
-                        Entry::Bool(b) => Some(*b),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            })
-    }
-
-    pub fn get_entry(&self, name: &str) -> Option<&Entry> {
-        let id = Id::get(name);
-        println!("🔍 Getting entry '{}' with ID: {}", name, id);
-        let registry_entries_count = self.registry.entries.len();
-        println!("🔍 Registry has {} entries", registry_entries_count);
-
-        if name.starts_with("pattern_") {
-            println!("🔍 Registry contents for pattern lookup:");
-            for (entry_id, entry) in self.registry.entries.iter() {
-                let clean_id = entry_id.name().trim_end_matches("\n");
-                let clean_entry = match entry {
-                    Entry::Patternizer(p) => {
-                        format!("Patternizer({})", p.name().replace("\n", " | "))
-                    }
-                    _ => "Other".to_string(),
-                };
-                println!(" - ID: {} -> {}", clean_id, clean_entry);
-            }
-        }
-
-        let result = self.registry.entries.get(&id);
-        if result.is_some() {
-            println!("✅ Found entry '{}' in registry", name);
-        } else {
-            println!("❌ Entry '{}' NOT found in registry", name);
-        }
-        result
-    }
-    /// Set a value in the registry
-    pub fn set_entry(&mut self, name: &str, entry: Entry) {
-        let id = Id::get(name);
-        let entry_count = self.registry.entries.len();
-        println!("🔧 Setting entry '{}' with ID: {}", name, id);
-        println!("🔧 Registry before insert has {} entries", entry_count);
-        self.registry.entries.insert(id.clone(), entry);
-        let entry_count_after = self.registry.entries.len();
-        println!("🔧 Registry after insert has {} entries", entry_count_after);
-
-        // Verify the entry was actually stored
-        if self.registry.entries.contains_key(&id) {
-            println!("✅ Verified entry '{}' was stored successfully", name);
-        } else {
-            println!("❌ Entry '{}' was NOT stored!", name);
-        }
-    }
-    pub fn id(&self, name: &str) -> Option<Id> {
-        let entry = self.registry.entries.get(&Id::get(name));
-        if let Some(Entry::Id(value)) = entry {
-            return Some(value.clone());
-        } else {
-            None
-        }
-    }
-    pub fn pattern(&self, name: &str) -> Option<Pattern> {
-        let entry = self.registry.entries.get(&Id::get(name));
-        if let Some(Entry::Patternizer(value)) = entry {
-            return Some(value.clone());
-        } else {
-            None
-        }
-    }
-    pub fn original_tokens(&self) -> &[Token] {
-        &self.original_tokens
-    }
-    pub fn tokens(&self) -> &[Token] {
-        &self.tokens
-    }
-    pub fn tokens_mut(&mut self) -> &mut [Token] {
-        &mut self.tokens
-    }
-    pub fn token_at(&self, index: usize) -> Option<&Token> {
-        self.tokens.get(index)
-    }
-    pub fn token_at_mut(&mut self, index: usize) -> Option<&mut Token> {
-        self.tokens.get_mut(index)
-    }
-    pub fn token_range(&self, range: Range<usize>) -> &[Token] {
-        &self.tokens[range]
-    }
-    pub fn token_range_mut(&mut self, range: Range<usize>) -> &mut [Token] {
-        &mut self.tokens[range]
-    }
-    /// Initialize common patterns in the patternizer (proper Context method)
-    pub fn initialize_patterns(&mut self) {
-        self.patternizer.initialize_common_patterns();
-    }
-
-    /// Match patterns for a handler using the patternizer (proper Context method)
-    pub fn match_pattern(
-        &mut self,
-        handler_type: &str,
-        tokens: &[crate::Token],
-    ) -> crate::pattern::PatternResult {
-        self.patternizer.match_pattern(handler_type, tokens)
-    }
-
-    /// Check if tokens should be rejected by any handler (proper Context method)
-    pub fn should_reject_tokens(&mut self, handler_type: &str, tokens: &[crate::Token]) -> bool {
-        self.patternizer.should_reject_tokens(handler_type, tokens)
-    }
-
-    /// Get pattern statistics (read-only Context method)
-    pub fn get_pattern_stats(&self) -> std::collections::HashMap<String, usize> {
-        self.patternizer.get_stats()
-    }
-    /// Get a value from the registry
-    /// Get a value from the registry
-    /// Get a value from the registry (delegates to Registry)
-    pub fn get_value<T: Any + Clone + Debug>(&self, name: &str) -> Box<T> {
-        self.registry.get_value(name)
-    }
-
-    /// Set a value in the registry (delegates to Registry)
-    pub fn set_value<T: Any + Clone + Debug>(&mut self, name: &str, value: T) {
-        self.registry.set_value(name, value);
-    }
-
-    /// Get the base directory
     pub fn get_base_dir(&self) -> Option<PathBuf> {
         let id = Id::get("base_dir");
         self.registry
@@ -443,234 +145,822 @@ impl Context {
             })
     }
 
-    /// Get include directories
-    pub fn get_include_dirs(&self) -> Vec<PathBuf> {
-        match self
-            .registry
-            .entries
-            .get(&Id::new(0, "include_directories".to_string()))
-        {
-            Some(Entry::Path(path)) => vec![path.clone()],
-            Some(Entry::List(paths)) => paths
-                .iter()
-                .filter_map(|e| match e {
-                    Entry::Path(p) => Some(p.clone()),
+    /// Set the base directory
+    pub fn set_base_dir(&mut self, dir: PathBuf) {
+        let id = Id::get("base_dir");
+        self.registry.entries.insert(id, Entry::Path(dir));
+    }
+
+    /// Set verbosity level
+    pub fn with_verbosity(&mut self, level: u8) {
+        self.registry.set_value("verbosity", level as u64);
+    }
+
+    /// Get system includes setting
+    pub fn get_system_includes(&self) -> bool {
+        self.registry.get_bool("system_includes").unwrap_or(false)
+    }
+
+    /// Set a feature flag with the given name and value
+    pub fn set_feature(&mut self, name: &str, value: bool) -> Option<bool> {
+        let features_id = Id::get("features");
+        match self.registry.entries.get_mut(&features_id) {
+            Some(Entry::StrMap(map)) => {
+                let previous = map.insert(name.to_string(), Entry::Bool(value));
+                previous.and_then(|entry| match entry {
+                    Entry::Bool(prev_value) => Some(prev_value),
                     _ => None,
                 })
-                .collect(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// Set include directories
-    pub fn set_include_dirs(&mut self, paths: Vec<PathBuf>) -> &mut Self {
-        self.registry.insert(
-            Id::get("include_directories"),
-            Entry::List(paths.into_iter().map(Entry::Path).collect()),
-        );
-        self
-    }
-
-    /// Configure system includes and return self for builder pattern
-    pub fn with_system_includes(&mut self, enabled: bool) -> &mut Context {
-        self.registry
-            .insert(Id::get("system_includes"), Entry::Bool(enabled));
-        self
-    }
-
-    /// Register a handler with the context
-    pub fn register_handler(&mut self, handler: Handler) {
-        let id = handler.id.clone();
-        self.handlers.register_shared(handler, &id);
-    }
-
-    /// Store a Patternizer directly in the registry (bypasses dyn Any)
-    pub fn store_pattern(&mut self, pattern_id: &str, pattern: Pattern) {
-        let key = format!("pattern_{}", pattern_id);
-        let id = Id::get(&key);
-        let pattern_name: String = pattern.name.clone(); // Clone name before move
-        self.registry.insert(id, Entry::Patternizer(pattern));
-        println!(
-            "📋 Stored pattern '{}' in registry with key '{}'",
-            pattern_name, key
-        );
-    }
-
-    /// Retrieve a Patternizer directly from the registry (bypasses dyn Any)
-    pub fn get_pattern(&self, pattern_id: &str) -> Option<&Pattern> {
-        let key = format!("pattern_{}", pattern_id);
-        match self.get_entry(&key) {
-            Some(Entry::Patternizer(pattern)) => {
-                let pattern_name: String = pattern.name.clone(); // Clone name before move
-                println!(
-                    "✅ Found pattern '{}' in registry with key '{}'",
-                    pattern_name, key
-                );
-                Some(pattern)
             }
             _ => {
-                println!(
-                    "❌ Pattern '{}' not found in registry (key: '{}')",
-                    pattern_id, key
-                );
+                let mut map = HashMap::new();
+                map.insert(name.to_string(), Entry::Bool(value));
+                self.registry
+                    .entries
+                    .insert(features_id, Entry::StrMap(map));
                 None
             }
         }
     }
 
+    /// Get the value of a feature flag
+    pub fn get_feature(&self, name: &str) -> Option<bool> {
+        let features_id = Id::get("features");
+        match self.registry.entries.get(&features_id) {
+            Some(Entry::StrMap(map)) => match map.get(name) {
+                Some(Entry::Bool(value)) => Some(*value),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Get an entry by name
+    pub fn get_entry(&self, id: &Id) -> Option<Entry> {
+        self.registry.entries.get(id).cloned()
+    }
+
+    pub fn get_entry_count(&self) -> usize {
+        self.registry.entries.len()
+    }
+
+    /// Set an entry by name
+    pub fn set_entry(&mut self, id: Id, entry: Entry) {
+        self.registry.insert(id, entry);
+    }
+    pub fn initialize(&mut self) {
+        // Clear any existing handlers to ensure clean initialization
+        self.handlizer.handlers.clear();
+        
+        let start_time = std::time::Instant::now();
+        let mut handler_count = 0;
+        
+        // Register handlers with proper priority ordering
+        // Core language construct handlers - highest priority
+        self.handlizer.register(FunctionHandler::new()); // Priority: 200
+        self.handlizer.register(StructHandler::new());   // Priority: 180
+        self.handlizer.register(EnumHandler::new());     // Priority: 160
+        handler_count += 3;
+
+        // Specialized pattern handlers - high priority for specific constructs
+        self.handlizer.register(LoopHandler::new());     // Priority: 150
+        self.handlizer.register(TypedefHandler::new());  // Priority: 140
+        self.handlizer.register(VariableHandler::new()); // Priority: 140
+        handler_count += 3;
+
+        // Expression and syntax handlers - medium-high priority
+        self.handlizer.register(ExpressionHandler::new()); // Priority: 120
+        self.handlizer.register(ArrayHandler::new());      // Priority: 110
+        self.handlizer.register(MacroHandler::new());      // Priority: 100
+        handler_count += 3;
+
+        // Documentation and metadata handlers - lower priority
+        self.handlizer.register(CommentHandler::new());  // Priority: 170
+        self.handlizer.register(GlobalHandler::new());   // Priority: 60
+        handler_count += 2;
+
+        let elapsed = start_time.elapsed();
+        
+        // Create comprehensive initialization report
+        let init_report = HandlerReport::new(
+            "handler_initialization",
+            std::sync::Arc::new(Id::get("initialize_handlers")),
+            "Context".to_string(),
+            "initialize".to_string(),
+            format!(
+                "Successfully initialized {} handlers in {:?} with priority ordering",
+                handler_count, elapsed
+            ),
+            ReportLevel::Info,
+            HandlerPhase::Initialize,
+        )
+        .with_tokens(0, 0)
+        .with_success(true)
+        .with_metadata("handler_count".to_string(), handler_count.to_string())
+        .with_metadata("initialization_time_ms".to_string(), elapsed.as_millis().to_string());
+
+        self.registry.add_report(init_report);
+        
+        // Log initialization success
+        self.report(
+            "context",
+            "initialize",
+            ReportLevel::Info,
+            HandlerPhase::Initialize,
+            &format!("Handler initialization completed with {} registered handlers", handler_count),
+            true,
+        );
+    }
+    pub fn process(
+        &mut self,
+        token_slot: usize,
+        token_range: Range<usize>,
+    ) -> Result<Vec<HandlerResult>> {
+        let mut results = Vec::new();
+        let start_time = std::time::Instant::now();
+        
+        // Initial validation and reporting
+        if token_range.is_empty() {
+            self.report(
+                "handlizer",
+                "process",
+                ReportLevel::Warning,
+                HandlerPhase::Process,
+                "Empty token range provided",
+                false,
+            );
+            return Ok(results);
+        }
+
+        let tokens = self.tokenizer.get_tokens(token_slot, token_range.clone());
+        if tokens.is_empty() {
+            self.report(
+                "handlizer",
+                "process",
+                ReportLevel::Warning,
+                HandlerPhase::Process,
+                "No tokens found in range",
+                false,
+            );
+            return Ok(results);
+        }
+
+        self.report_with_tokens(
+            "handlizer",
+            "process",
+            ReportLevel::Info,
+            HandlerPhase::Process,
+            &format!(
+                "Starting token processing for {} tokens in range {:?}",
+                tokens.len(),
+                token_range
+            ),
+            true,
+            tokens.len(),
+            0,
+        );
+
+        let mut handlers_attempted = 0;
+        let mut handlers_successful = 0;
+        let sorted_handlers: Vec<_> = self
+            .handlizer
+            .get_sorted_handlers()
+            .into_iter()
+            .cloned()
+            .collect();
+
+        for handler in sorted_handlers {
+            handlers_attempted += 1;
+
+            match handler.can_process(self, token_slot, token_range.clone()) {
+                Ok(can_process) => {
+                    if can_process {
+                        self.report_with_tokens(
+                            &handler.id().name(),
+                            "process",
+                            ReportLevel::Info,
+                            HandlerPhase::Process,
+                            "Attempting processing",
+                            true,
+                            tokens.len(),
+                            0,
+                        );
+
+                        match handler.process(self, token_slot, token_range.clone()) {
+                            Ok(result) => {
+                                handlers_successful += 1;
+
+                                self.report_with_tokens(
+                                    &handler.id().name(),
+                                    "process",
+                                    ReportLevel::Info,
+                                    HandlerPhase::Process,
+                                    &format!("Successfully processed tokens: {:?}", result),
+                                    true,
+                                    tokens.len(),
+                                    result.token_count(),
+                                );
+
+                                results.push(result.clone());
+
+                                // Stop processing if a handler completed successfully
+                                if matches!(result, HandlerResult::Completed(_, _, _, _)) {
+                                    self.report(
+                                        "handlizer",
+                                        "process",
+                                        ReportLevel::Info,
+                                        HandlerPhase::Process,
+                                        "Processing completed successfully, stopping further attempts",
+                                        true,
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                self.report(
+                                    &handler.id().name(),
+                                    "process",
+                                    ReportLevel::Warning,
+                                    HandlerPhase::Process,
+                                    &format!("Handler processing failed: {}", e),
+                                    false,
+                                );
+
+                                // Try redirect on processing failure
+                                if let Ok(redirect_result) = self.try_redirect(
+                                    token_slot,
+                                    token_range.clone(),
+                                    HandlerResult::NotHandled(
+                                        Some(tokens.clone()),
+                                        token_range.clone(),
+                                        handler.id(),
+                                    ),
+                                    &handler.id(),
+                                ) {
+                                    if !matches!(
+                                        redirect_result,
+                                        HandlerResult::NotHandled(_, _, _)
+                                    ) {
+                                        results.push(redirect_result);
+                                        handlers_successful += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    self.report(
+                        &handler.id().name(),
+                        "can_process",
+                        ReportLevel::Error,
+                        HandlerPhase::Process,
+                        &format!("Error checking handler capability: {}", e),
+                        false,
+                    );
+                }
+            }
+        }
+
+        let elapsed = start_time.elapsed();
+        self.report_with_tokens(
+            "handlizer",
+            "process",
+            if handlers_successful > 0 {
+                ReportLevel::Info
+            } else {
+                ReportLevel::Warning
+            },
+            HandlerPhase::Process,
+            &format!(
+                "Processing complete: {}/{} handlers successful, {} results, took {:?}",
+                handlers_successful,
+                handlers_attempted,
+                results.len(),
+                elapsed
+            ),
+            handlers_successful > 0,
+            tokens.len(),
+            results.iter().map(|r| r.token_count()).sum(),
+        );
+
+        Ok(results)
+    }
+    /// Enhanced redirect system with intelligent routing and learning
+    pub fn try_redirect(
+        &mut self,
+        token_slot: usize,
+        token_range: Range<usize>,
+        result: HandlerResult,
+        handler_id: &Id,
+    ) -> Result<HandlerResult> {
+        let start_time = std::time::Instant::now();
+        let tokens = self.tokenizer.get_tokens(token_slot, token_range.clone());
+
+        self.report_with_tokens(
+            "handlizer",
+            "try_redirect",
+            ReportLevel::Info,
+            HandlerPhase::Process,
+            &format!(
+                "Attempting intelligent redirect for failed handler: {}",
+                handler_id.name()
+            ),
+            true,
+            tokens.len(),
+            0,
+        );
+
+        // Create redirect request
+        let redirect_request = crate::handler::RedirectRequest {
+            from_handler: handler_id.clone(),
+            token_range: token_range.clone(),
+            failed_patterns: Vec::new(),
+            suggested_handler: None,
+            metadata: Vec::new(),
+        };
+
+        // Use the workflow helper to handle redirect with proper borrowing
+        match Handlizer::handle_redirect_workflow(
+            self,
+            token_slot,
+            token_range.clone(),
+            redirect_request,
+        ) {
+            Ok(redirect_result) => {
+                if !matches!(redirect_result, HandlerResult::NotHandled(_, _, _)) {
+                    let elapsed = start_time.elapsed();
+                    self.report_with_tokens(
+                        "handlizer",
+                        "try_redirect",
+                        ReportLevel::Info,
+                        HandlerPhase::Process,
+                        &format!("Redirect successful in {:?}", elapsed),
+                        true,
+                        tokens.len(),
+                        redirect_result.token_count(),
+                    );
+                    return Ok(redirect_result);
+                }
+            }
+            Err(e) => {
+                self.report_with_tokens(
+                    "handlizer",
+                    "try_redirect",
+                    ReportLevel::Debug,
+                    HandlerPhase::Process,
+                    &format!("Redirect workflow failed: {}", e),
+                    false,
+                    tokens.len(),
+                    0,
+                );
+            }
+        }
+
+        // If all redirects failed, return the original result
+        let elapsed = start_time.elapsed();
+        self.report_with_tokens(
+            "handlizer",
+            "try_redirect",
+            ReportLevel::Warning,
+            HandlerPhase::Process,
+            &format!("All redirect strategies exhausted in {:?}", elapsed),
+            false,
+            tokens.len(),
+            0,
+        );
+
+        Ok(HandlerResult::NotHandled(
+            Some(tokens),
+            token_range,
+            handler_id.clone(),
+        ))
+    }
+    /// Match patterns for a handler using the patternizer
+    pub fn match_pattern(&mut self, handler_type: &str, tokens: &[crate::Token]) -> PatternResult {
+        self.patternizer.match_pattern(handler_type, tokens)
+    }
+
+    /// Check if tokens should be rejected by any handler
+    pub fn should_reject_tokens(&mut self, handler_type: &str, tokens: &[crate::Token]) -> bool {
+        self.patternizer.should_reject_tokens(handler_type, tokens)
+    }
+
+    /// Get pattern statistics
+    pub fn get_pattern_stats(&self) -> std::collections::HashMap<String, usize> {
+        self.patternizer.get_stats()
+    }
+
+    /// Save pattern cache to JSON file
+    pub fn save_pattern_cache(&self, file_path: &str) -> crate::error::Result<()> {
+        self.patternizer.save_cache_to_json(file_path)
+    }
+
+    /// Load pattern cache from JSON file
+    pub fn load_pattern_cache(&mut self, file_path: &str) -> crate::error::Result<()> {
+        self.patternizer.load_cache_from_json(file_path)
+    }
+
+    /// Get a string value from the registry
+    pub fn get_string(&self, name: &str) -> Option<String> {
+        self.registry.get_string(name)
+    }
+
+    /// Get a boolean value from the registry
+    pub fn get_bool(&self, name: &str) -> Option<bool> {
+        self.registry.get_bool(name)
+    }
+
+    /// Get a u64 value from the registry
+    pub fn get_u64(&self, name: &str) -> Option<u64> {
+        self.registry.get_u64(name)
+    }
+
+    /// Set a value in the registry
+    pub fn set_value(&mut self, name: &str, value: Entry) {
+        let id = Id::get(name);
+        self.registry.insert(id, value);
+    }
+
+    /// Get include directories
+    pub fn get_include_dirs(&self) -> Vec<PathBuf> {
+        self.registry
+            .entries
+            .get(&Id::get("include_directories"))
+            .and_then(|entry| match entry {
+                Entry::List(paths) => Some(
+                    paths
+                        .iter()
+                        .filter_map(|e| match e {
+                            Entry::Path(p) => Some(p.clone()),
+                            _ => None,
+                        })
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .unwrap_or_else(Vec::new)
+    }
+
+    /// Set include directories
+    pub fn set_include_dirs(&mut self, paths: Vec<PathBuf>) {
+        self.registry.insert(
+            Id::get("include_directories"),
+            Entry::List(paths.into_iter().map(Entry::Path).collect()),
+        );
+    }
+
+    /// Configure system includes
+    pub fn with_system_includes(&mut self, enabled: bool) {
+        self.registry
+            .insert(Id::get("system_includes"), Entry::Bool(enabled));
+    }
+
+    /// Register a handler with the context
+    pub fn register_handler(&mut self, handler: Box<dyn Handler>) {
+        let id = handler.id();
+        self.registry.insert(id, Entry::Handler(handler));
+    }
+
+    // ===== SAMPLIZER DELEGATION FUNCTIONS =====
+
+    /// Get validation results from the global Samplizer
+    pub fn get_validation_results(self) -> HashMap<String, crate::ValidationResult> {
+        self.samplizer.validation_results.clone()
+    }
+
+    /// Collect tokens from TokenBox for processing
+    pub fn collect_tokens(&self, max_tokens: Option<usize>) -> Result<Vec<Token>> {
+        self.tokenbox.collect_tokens(max_tokens)
+    }
+
+    /// Check TokenBox status
+    pub fn tokenbox_status(&self) -> crate::TokenBoxStatus {
+        self.tokenbox.status()
+    }
+
+    // ===== ADAPTIVE ANALYSIS DELEGATION FUNCTIONS =====
+    // Analysis functionality now integrated into Handlizer
+
+    /// Record successful pattern matching for learning
+    pub fn record_pattern_success(
+        &mut self,
+        handler_id: &Id,
+        tokens_consumed: usize,
+        confidence: f64,
+    ) {
+        self.handlizer
+            .record_success(handler_id, tokens_consumed, confidence);
+    }
+
+    /// Record failed pattern matching for learning  
+    pub fn record_pattern_failure(
+        &mut self,
+        handler_id: &Id,
+        tokens_attempted: usize,
+        reason: String,
+    ) {
+        self.handlizer
+            .record_failure(handler_id, tokens_attempted, reason);
+    }
+
+    /// Store a Pattern directly in the registry
+    pub fn insert_pattern(&mut self, pattern_name: &str, pattern: Pattern) {
+        self.registry.insert_pattern(pattern_name, pattern);
+    }
+
+    /// Retrieve a Pattern directly from the registry
+    pub fn get_pattern(&self, pattern_name: &str) -> Option<Pattern> {
+        self.registry.get_pattern(pattern_name)
+    }
+
     /// Add a handler report to the centralized reporting system
     pub fn add_report(&mut self, report: HandlerReport) {
-        // Use nanosecond timestamp for unique report IDs to avoid conflicts
-        let timestamp = time();
-        let report_id = Id::get(&format!("report_{}", timestamp));
-        self.registry
-            .insert(report_id, Entry::HandlerReport(report));
+        self.registry.add_report(report);
+    }
+
+    /// Create and add a report
+    pub fn report(
+        &mut self,
+        handler_name: &str,
+        function_name: &str,
+        level: ReportLevel,
+        phase: HandlerPhase,
+        message: &str,
+        success: bool,
+    ) {
+        let report_id = Id::get(&Id::gen_name(&format!(
+            "report_{}_{}",
+            handler_name, function_name
+        )));
+        let handler_id = Id::get(handler_name);
+
+        let report = HandlerReport {
+            report_id: std::sync::Arc::new(report_id),
+            handler_id: std::sync::Arc::new(handler_id),
+            handler_name: handler_name.to_string(),
+            function_name: function_name.to_string(),
+            message: message.to_string(),
+            details: None,
+            level,
+            tokens_processed: 0,
+            tokens_consumed: 0,
+            phase,
+            success,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        self.add_report(report);
+    }
+
+    /// Create and add a report with token counts
+    pub fn report_with_tokens(
+        &mut self,
+        handler_name: &str,
+        function_name: &str,
+        level: ReportLevel,
+        phase: HandlerPhase,
+        message: &str,
+        success: bool,
+        tokens_processed: usize,
+        tokens_consumed: usize,
+    ) {
+        let report_id = Id::get(&Id::gen_name(&format!(
+            "report_{}_{}",
+            handler_name, function_name
+        )));
+        let handler_id = Id::get(handler_name);
+
+        let report = HandlerReport {
+            report_id: std::sync::Arc::new(report_id),
+            handler_id: std::sync::Arc::new(handler_id),
+            handler_name: handler_name.to_string(),
+            function_name: function_name.to_string(),
+            message: message.to_string(),
+            details: None,
+            level,
+            tokens_processed,
+            tokens_consumed,
+            phase,
+            success,
+            metadata: std::collections::HashMap::new(),
+        };
+
+        self.registry.add_report(report);
     }
 
     /// Get all handler reports from the registry
-    pub fn get_reports(&self) -> Vec<&HandlerReport> {
-        let mut reports = Vec::new();
-        // Iterate through all registry entries and filter for HandlerReport entries
-        for (_id, entry) in &self.registry.entries {
-            if let Entry::HandlerReport(report) = entry {
-                reports.push(report);
-            }
-        }
-        // Sort by timestamp for chronological order
-        reports.sort_by(|a: &&HandlerReport, b: &&HandlerReport| {
-            a.report_id.name.cmp(&b.report_id.name)
-        });
-        reports
+    pub fn get_reports(&self) -> Vec<HandlerReport> {
+        self.registry.get_reports()
     }
 
     /// Get reports filtered by handler name
-    pub fn get_reports_by_handler(&self, handler_name: &str) -> Vec<&HandlerReport> {
-        self.get_reports()
-            .into_iter()
-            .filter(|report: &&HandlerReport| report.handler_name == handler_name)
-            .collect()
+    pub fn get_reports_by_handler(&self, handler_name: &str) -> Vec<HandlerReport> {
+        self.registry.get_reports_by_handler(handler_name)
     }
 
     /// Get reports filtered by report level
-    pub fn get_reports_by_level(&self, level: &ReportLevel) -> Vec<&HandlerReport> {
-        self.get_reports()
-            .into_iter()
-            .filter(|report: &&HandlerReport| &report.level == level)
-            .collect()
+    pub fn get_reports_by_level(&self, level: &ReportLevel) -> Vec<HandlerReport> {
+        self.registry.get_reports_by_level(level)
     }
 
     /// Get reports filtered by handler phase
-    pub fn get_reports_by_phase(&self, phase: &HandlerPhase) -> Vec<&HandlerReport> {
-        self.get_reports()
-            .into_iter()
-            .filter(|report: &&HandlerReport| &report.phase == phase)
-            .collect()
+    pub fn get_reports_by_phase(&self, phase: &HandlerPhase) -> Vec<HandlerReport> {
+        self.registry.get_reports_by_phase(phase)
     }
 
-    /// Display all reports in a formatted way
+    /// Display all reports using the sophisticated Range-based table system
     pub fn display_reports(&self) {
-        let reports = self.get_reports();
+        let reports = self.registry.get_reports();
+        self.display_reports_with_table(&reports);
+    }
+
+    /// Display reports using the new Range-based table system
+    fn display_reports_with_table(&self, reports: &[HandlerReport]) {
         if reports.is_empty() {
-            println!("No handler reports available.");
+            println!("No reports to display");
             return;
         }
 
-        println!("\n=== HANDLER REPORTS ===");
-        for report in reports.clone() {
-            self.display_single_report(report);
-        }
-        println!("=== END REPORTS ({} total) ===\n", reports.len());
-    }
+        // Create table using the new Range-based coordinate system
+        let mut table = crate::Table::new_registry_table("Handler System Reports");
 
-    /// Display reports filtered by level
-    pub fn display_reports_by_level(&self, level: &ReportLevel) {
-        let reports = self.get_reports_by_level(level);
-        if reports.is_empty() {
-            println!("No {} level reports available.", level);
-            return;
+        // Add headers with better spacing
+        table.add_header(vec![
+            "Handler", "Status", "Function", "Phase", "Tokens", "Message",
+        ]);
+
+        // Add report data (limit to 20 for readability)
+        for report in reports.iter().take(20) {
+            let handler_name = truncate_string(&report.handler_name, 19);
+            let status = if report.success { "✅" } else { "❌" };
+            let function_name = truncate_string(&report.function_name, 15);
+            let phase = format!("{}", report.phase);
+            let message = truncate_string(&report.message, 25);
+
+            table.add_row(vec![
+                Entry::Str(handler_name),
+                Entry::Str(status.to_string()),
+                Entry::Str(function_name),
+                Entry::Str(phase),
+                Entry::Val(report.tokens_processed as u64),
+                Entry::Str(message),
+            ]);
         }
 
-        println!("\n=== {} LEVEL REPORTS ===", level);
-        for report in reports.clone() {
-            self.display_single_report(report);
-        }
-        println!("=== END {} REPORTS ({} total) ===\n", level, reports.len());
-    }
+        // Display the formatted table
+        println!("{}", table.display_formatted());
 
-    /// Display a single report in formatted way
-    fn display_single_report(&self, report: &HandlerReport) {
+        // Show additional info
+        if reports.len() > 20 {
+            println!("📝 Showing first 20 of {} reports", reports.len());
+        }
+
+        let success_count = reports.iter().filter(|r| r.success).count();
+        let success_rate = (success_count as f64 / reports.len() as f64) * 100.0;
         println!(
-            "[{}] {} | {} | {}",
-            report.timestamp(),
-            report.level(),
-            report.handler_name(),
-            report.phase()
+            "📈 Success Rate: {:.1}% ({}/{} successful)\n",
+            success_rate,
+            success_count,
+            reports.len()
         );
-        println!("  Message: {}", report.message());
-        if report.tokens_processed > 0 || report.tokens_consumed > 0 {
-            println!(
-                "  Tokens: processed={}, consumed={}",
-                report.tokens_processed, report.tokens_consumed
-            );
+    }
+
+    /// Simple report display that doesn't require Context access
+    fn display_reports_simple(&self, reports: &[HandlerReport]) {
+        if reports.is_empty() {
+            println!("📚 No reports available");
+            return;
         }
-        if !report.metadata.is_empty() {
-            print!("  Metadata: ");
-            for (i, (key, value)) in report.metadata.iter().enumerate() {
-                if i > 0 {
-                    print!(", ");
+
+        println!("\n=== 🔧 HANDLER SYSTEM REPORTS ===");
+        println!("📊 Total Reports: {}", reports.len());
+
+        let success_count = reports.iter().filter(|r| r.success).count();
+        let success_rate = (success_count as f64 / reports.len() as f64) * 100.0;
+        println!("✅ Success Rate: {:.1}%\n", success_rate);
+
+        // Group by handler for cleaner display
+        let mut handler_groups: std::collections::HashMap<String, Vec<&HandlerReport>> =
+            std::collections::HashMap::new();
+        for report in reports {
+            handler_groups
+                .entry(report.handler_name.clone())
+                .or_default()
+                .push(report);
+        }
+
+        for (handler_name, handler_reports) in handler_groups {
+            println!("🔨 {}: {} reports", handler_name, handler_reports.len());
+            for report in handler_reports.iter().take(3) {
+                // Show max 3 per handler
+                let status = if report.success { "✅" } else { "❌" };
+                println!("   {} {}: {}", status, report.function_name, report.message);
+                if report.tokens_processed > 0 {
+                    println!(
+                        "      📊 Tokens: {} processed, {} consumed",
+                        report.tokens_processed, report.tokens_consumed
+                    );
                 }
-                print!("{}={}", key, value);
+            }
+            if handler_reports.len() > 3 {
+                println!("   ... and {} more reports", handler_reports.len() - 3);
             }
             println!();
         }
-        println!("  Success: {}\n", report.success);
+
+        println!("=== END REPORTS ===\n");
     }
 
-    /// Clear all reports from the registry
-    pub fn clear_reports(&mut self) {
-        // Use proper Registry API to remove report entries
-        let mut report_keys = Vec::new();
-        let registry_len = self.registry.len();
-        for i in 0..registry_len {
-            let report_id = Id::get(&format!("report_{}", i));
-            if let Some(Entry::HandlerReport(_)) = self.registry.root(&report_id) {
-                report_keys.push(report_id);
-            }
+    /// Display reports filtered by level (delegates to Registry)
+    pub fn display_reports_by_level(&self, level: &ReportLevel) {
+        let reports = self.get_reports_by_level(level);
+        self.display_reports_simple(&reports);
+    }
+
+    /// Display reports in table format - NEW FUNCTION for better formatting
+    pub fn display_reports_table(&self) {
+        // Get reports in one atomic operation
+        let reports = self.get_reports();
+
+        // Process reports without holding any Context locks
+        self.display_reports_table_format(&reports);
+    }
+
+    /// Create and display a formatted table from reports using Range-based coordinates
+    fn display_reports_table_format(&self, reports: &[HandlerReport]) {
+        if reports.is_empty() {
+            println!("📋 No reports available for table display\n");
+            return;
         }
 
-        for key in report_keys {
-            self.registry.remove(&key);
-        }
+        // Use the sophisticated Range-based table system
+        self.display_reports_with_table(reports);
+    }
+
+    /// Clear all reports from the registry (delegates to Registry)
+    pub fn clear_reports(&mut self) {
+        self.registry.clear_reports();
     }
 
     /// Display the entire registry in a database-like format for debugging
     pub fn display_registry_database(&self) {
         println!("🗃️  Context Registry Database View:");
-        self.registry.display_database();
+        let reports = self.registry.get_reports();
+        self.display_reports_table_format(&reports);
     }
 
     /// Display registry statistics for debugging
     pub fn display_registry_stats(&self) {
         println!("📊 Context Registry Statistics:");
-        self.registry.display_stats();
+        let reports = self.registry.get_reports();
+
+        if reports.is_empty() {
+            println!("No reports available for statistics\n");
+            return;
+        }
+
+        let mut handler_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut phase_counts: std::collections::HashMap<HandlerPhase, usize> =
+            std::collections::HashMap::new();
+        let mut level_counts: std::collections::HashMap<ReportLevel, usize> =
+            std::collections::HashMap::new();
+
+        for report in &reports {
+            *handler_counts
+                .entry(report.handler_name.clone())
+                .or_insert(0) += 1;
+            *phase_counts.entry(report.phase.clone()).or_insert(0) += 1;
+            *level_counts.entry(report.level.clone()).or_insert(0) += 1;
+        }
+
+        println!("By Handler:");
+        for (handler, count) in handler_counts {
+            println!("  - {}: {}", handler, count);
+        }
+
+        println!("By Phase:");
+        for (phase, count) in phase_counts {
+            println!("  - {}: {}", phase, count);
+        }
+
+        println!("By Level:");
+        for (level, count) in level_counts {
+            println!("  - {}: {}", level, count);
+        }
+        println!();
     }
 
     /// Display all context information including registry and reports
     pub fn display_full_context(&self) {
-        let handlers_count = self.handlers.handlers.len();
-        let pending_redirects_count = self.pending_redirects.len();
-        let registry_entries_count = self.registry.entries.len();
-        let reports_count = self.get_reports().len();
-        println!("🌐 FULL CONTEXT DISPLAY");
-        println!(
-            "═══════════════════════════════════════════════════════════════════════════════════════"
-        );
+        println!("FULL CONTEXT DISPLAY");
+        println!("===============================================================");
+
         // Display basic context info
-        println!("📋 Context Overview:");
-        println!("  - Handlers: {} registered", handlers_count);
-        println!("  - Pending Redirects: {}", pending_redirects_count);
-        println!("  - Registry Entries: {}", registry_entries_count);
-        println!("  - Reports: {}", reports_count);
+        let reports = self.registry.get_reports();
+        println!("Context Overview:");
+        println!("  - Reports: {}", reports.len());
         println!();
 
         // Display registry database view
@@ -682,12 +972,11 @@ impl Context {
         println!();
 
         // Display reports summary
-        let reports = self.get_reports();
         if !reports.is_empty() {
-            println!("📝 Reports Summary:");
-            let mut level_counts: HashMap<&ReportLevel, i32> = std::collections::HashMap::new();
-            for report in &reports {
-                *level_counts.entry(&report.level()).or_insert(0) += 1;
+            println!("Reports Summary:");
+            let mut level_counts: HashMap<ReportLevel, i32> = HashMap::new();
+            for report in reports {
+                *level_counts.entry(report.level.clone()).or_insert(0) += 1;
             }
             for (level, count) in level_counts {
                 println!("  - {}: {}", level, count);
@@ -695,24 +984,32 @@ impl Context {
             println!();
         }
 
-        println!(
-            "═══════════════════════════════════════════════════════════════════════════════════════"
-        );
+        println!("===============================================================");
     }
 }
-impl Default for Context {
-    fn default() -> Self {
-        Context::new("default")
+
+/// Helper function to truncate strings for table display
+fn truncate_string(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        format!("{:<width$}", s, width = max_len)
+    } else {
+        format!(
+            "{:<width$}",
+            format!("{}...", &s[..max_len - 3]),
+            width = max_len
+        )
     }
 }
+
 /// Comprehensive handler reporting structure for centralized debugging and statistics
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerReport {
-    pub report_id: Box<Id>,
-    pub handler_id: Box<Id>,
+    pub report_id: std::sync::Arc<Id>,
+    pub handler_id: std::sync::Arc<Id>,
     pub handler_name: String,
     pub function_name: String,
     pub message: String,
+    pub details: Option<String>,
     pub level: ReportLevel,
     pub tokens_processed: usize,
     pub tokens_consumed: usize,
@@ -720,59 +1017,74 @@ pub struct HandlerReport {
     pub success: bool,
     pub metadata: HashMap<String, String>,
 }
+
 impl HandlerReport {
     pub fn timestamp(&self) -> u128 {
         self.handler_id.timestamp()
     }
+
     pub fn report_id(&self) -> &Id {
         &self.report_id
     }
+
     pub fn handler_id(&self) -> &Id {
         &self.handler_id
     }
+
     pub fn handler_name(&self) -> &str {
         &self.handler_name
     }
+
     pub fn function_name(&self) -> &str {
         &self.function_name
     }
+
     pub fn message(&self) -> &str {
         &self.message
     }
+
     pub fn level(&self) -> &ReportLevel {
         &self.level
     }
+
     pub fn tokens_processed(&self) -> usize {
         self.tokens_processed
     }
+
     pub fn tokens_consumed(&self) -> usize {
         self.tokens_consumed
     }
+
     pub fn phase(&self) -> &HandlerPhase {
         &self.phase
     }
+
     pub fn success(&self) -> bool {
         self.success
     }
+
     pub fn metadata(&self) -> &HashMap<String, String> {
         &self.metadata
     }
 }
+
 impl PartialOrd for HandlerReport {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
+
 impl Ord for HandlerReport {
     fn cmp(&self, other: &Self) -> Ordering {
         self.handler_id
             .cmp(&other.handler_id)
             .then_with(|| self.phase.cmp(&other.phase))
-            .then_with(|| self.tokens_processed.cmp(&self.tokens_processed))
+            .then_with(|| self.tokens_processed.cmp(&other.tokens_processed))
             .then_with(|| self.level.cmp(&other.level))
             .then_with(|| self.handler_name.cmp(&other.handler_name))
     }
 }
+
 impl Hash for HandlerReport {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.handler_id.hash(state);
@@ -784,11 +1096,12 @@ impl Hash for HandlerReport {
         self.tokens_consumed.hash(state);
         self.phase.hash(state);
         self.success.hash(state);
-        self.metadata.iter().for_each(|(k, v)| k.hash(state));
-        self.metadata.iter().for_each(|(k, v)| v.hash(state));
+        for (k, v) in &self.metadata {
+            k.hash(state);
+            v.hash(state);
+        }
     }
 }
-
 impl std::fmt::Display for HandlerReport {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -802,11 +1115,11 @@ impl std::fmt::Display for HandlerReport {
         )
     }
 }
-/// Reporting levels for handler messages
 
 /// Handler processing phases
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum HandlerPhase {
+    Initialize,
     Process,
     Handle,
     Extract,
@@ -819,6 +1132,7 @@ pub enum HandlerPhase {
 impl std::fmt::Display for HandlerPhase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HandlerPhase::Initialize => write!(f, "INITIALIZE"),
             HandlerPhase::Process => write!(f, "PROCESS"),
             HandlerPhase::Handle => write!(f, "HANDLE"),
             HandlerPhase::Extract => write!(f, "EXTRACT"),
@@ -890,7 +1204,7 @@ impl std::fmt::Display for HandlerRedirect {
             self.source_handler(),
             self.target_handler(),
             self.directive_type(),
-            self.tokens().len()
+            self.tokens().len().to_string()
         )
     }
 }
@@ -898,7 +1212,7 @@ impl std::fmt::Display for HandlerRedirect {
 impl HandlerReport {
     pub fn new(
         report_name: &str,
-        handler_id: Box<Id>,
+        handler_id: std::sync::Arc<Id>,
         handler_name: String,
         function_name: String,
         message: String,
@@ -911,11 +1225,12 @@ impl HandlerReport {
             .as_millis() as u64;
 
         HandlerReport {
-            report_id: Box::new(Id::get(report_name)),
+            report_id: std::sync::Arc::new(Id::get(report_name)),
             handler_id,
             handler_name,
             function_name,
             message,
+            details: None,
             level,
             tokens_processed: 0,
             tokens_consumed: 0,
@@ -924,7 +1239,6 @@ impl HandlerReport {
             metadata: HashMap::new(),
         }
     }
-
     /// Set token statistics
     pub fn with_tokens(mut self, processed: usize, consumed: usize) -> Self {
         self.tokens_processed = processed;
@@ -943,53 +1257,4 @@ impl HandlerReport {
         self.metadata.insert(key, value);
         self
     }
-}
-
-/// Sets the global verbosity level
-pub fn set_verbosity(level: u8) {
-    VERBOSITY_LEVEL.store(level, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Gets the current verbosity level
-pub fn get_verbosity() -> u8 {
-    VERBOSITY_LEVEL.load(std::sync::atomic::Ordering::SeqCst)
-}
-
-/// Determines if messages at the given level should be displayed
-pub fn should_log(level: u8) -> bool {
-    get_verbosity() >= level
-}
-
-/// Macro for logging messages with verbosity control
-#[macro_export]
-macro_rules! log {
-    // Error messages (level 1)
-    (error, $($arg:tt)*) => {
-        if $crate::config::should_log($crate::config::VERBOSITY_ERROR) {
-            eprintln!("[ERROR] {}", format!($($arg)*));
-        }
-    };
-    (warn, $($arg:tt)*) => {
-        if $crate::config::should_log($crate::config::VERBOSITY_WARN) {
-            eprintln!("[WARN] {}", format!($($arg)*));
-        }
-    };
-    // Debug messages (level 2)
-    (debug, $($arg:tt)*) => {
-        if $crate::config::should_log($crate::config::VERBOSITY_DEBUG) {
-            println!("[DEBUG] {}", format!($($arg)*));
-        }
-    };
-
-    // Info messages (level 3)
-    (info, $($arg:tt)*) => {
-        if $crate::config::should_log($crate::config::VERBOSITY_INFO) {
-            println!("[INFO] {}", format!($($arg)*));
-        }
-    };
-
-    // Default to debug level
-    ($($arg:tt)*) => {
-        $crate::debug!($($arg)*);
-    };
 }

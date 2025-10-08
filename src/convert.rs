@@ -1,7 +1,9 @@
-use crate::Token;
+use crate::{Context, SegmentType, Token};
 use std::cell::LazyCell;
 use std::collections::HashMap;
 use std::fmt;
+use std::ops::Range;
+use crate::error::Result;
 /// Represents different types of converted Rust elements
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ConvertedElement {
@@ -73,6 +75,7 @@ pub struct ConvertedTypedef {
     pub target_type: String,
     pub code: String,
     pub is_public: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedTypedef {
@@ -90,6 +93,7 @@ pub struct ConvertedGlobal {
     pub is_const: bool,
     pub is_static: bool,
     pub is_public: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedGlobal {
@@ -105,6 +109,7 @@ pub struct ConvertedMacro {
     pub body: String,
     pub code: String,
     pub is_function_like: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedMacro {
@@ -119,6 +124,7 @@ pub struct ConvertedInclude {
     pub path: String,
     pub code: String,
     pub is_external_crate: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedInclude {
@@ -134,6 +140,7 @@ pub struct ConvertedArray {
     pub size: String,
     pub code: String,
     pub is_declaration: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedArray {
@@ -148,6 +155,7 @@ pub struct ConvertedComment {
     pub code: String,
     pub is_block: bool,
     pub is_doc_comment: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedComment {
@@ -165,6 +173,7 @@ pub struct ConvertedExpression {
     pub right_operand: String,
     pub code: String,
     pub result_type: Option<String>,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedExpression {
@@ -181,6 +190,7 @@ pub struct ConvertedControlFlow {
     pub body: String,
     pub code: String,
     pub has_else: bool,
+    pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ConvertedControlFlow {
@@ -204,7 +214,7 @@ pub fn convert_type_token(c_token: &Token) -> Option<String> {
 }
 
 pub fn convert_type_tokens(c_type: Vec<Token>) -> Option<Token> {
-    let mut c_type_str = String::new();
+    let mut c_type_str: String = String::new();
     for t in c_type.iter() {
         let s = t.to_string();
         if s.trim() != "**"
@@ -383,4 +393,701 @@ pub fn create_map() -> HashMap<String, String> {
     }
     // Implementation logic for type conversion
     hm2
+}
+
+impl fmt::Display for ConvertedElement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConvertedElement::Function(func) => write!(f, "{}", func),
+            ConvertedElement::Struct(s) => write!(f, "{}", s),
+            ConvertedElement::Enum(e) => write!(f, "{}", e),
+            ConvertedElement::Typedef(t) => write!(f, "{}", t),
+            ConvertedElement::Global(g) => write!(f, "{}", g),
+            ConvertedElement::Macro(m) => write!(f, "{}", m.code),
+            ConvertedElement::Include(i) => write!(f, "{}", i.code),
+            ConvertedElement::Array(a) => write!(f, "{}", a.code),
+            ConvertedElement::Comment(c) => write!(f, "{}", c.code),
+            ConvertedElement::Expression(e) => write!(f, "{}", e.code),
+            ConvertedElement::ControlFlow(cf) => write!(f, "{}", cf.code),
+        }
+    }
+}
+    /// Convert using pattern analysis from Patternizer, Analyzer, and Samplizer
+    fn convert_with_pattern_analysis(
+        handler_type: &str,
+        _pattern_result: &crate::PatternResult,
+        tokens: &[Token],
+        analysis: Option<Result<crate::AnalysisResult>>,
+        samplizer_result: Option<Result<crate::ConfidenceResult>>
+    ) -> String {
+        let mut rust_code = String::new();
+
+        match handler_type {
+            "function" => {
+                rust_code.push_str("// Function identified by Patternizer\n");
+                if let Some(analysis) = analysis {
+                    rust_code.push_str(&format!("// Analysis: {:?}\n", analysis));
+                }
+                // Use samplizer result for conversion if available
+                if let Some(Ok(confidence_result)) = samplizer_result {
+                    rust_code.push_str(&format!("// Samplizer confidence: {:.2}\n", confidence_result.overall_confidence));
+                    rust_code.push_str(&convert_function_tokens(tokens));
+                } else {
+                    rust_code.push_str(&convert_function_tokens(tokens));
+                }
+            }
+            "struct" => {
+                rust_code.push_str("// Struct identified by Patternizer\n");
+                rust_code.push_str(&convert_struct_tokens(tokens));
+            }
+            "enum" => {
+                rust_code.push_str("// Enum identified by Patternizer\n");
+                rust_code.push_str(&convert_enum_tokens(tokens));
+            }
+            "array" => {
+                rust_code.push_str("// Array identified by Patternizer\n");
+                rust_code.push_str(&convert_array_tokens(tokens));
+            }
+            "typedef" => {
+                rust_code.push_str("// Typedef identified by Patternizer\n");
+                rust_code.push_str(&convert_typedef_tokens(tokens));
+            }
+            "global" => {
+                rust_code.push_str("// Global variable identified by Patternizer\n");
+                rust_code.push_str(&convert_global_tokens(tokens));
+            }
+            "expression" => {
+                rust_code.push_str("// Expression identified by Patternizer\n");
+                rust_code.push_str(&convert_expression_tokens(tokens));
+            }
+            _ => {
+                rust_code.push_str(&format!("// Unknown pattern type: {}\n", handler_type));
+                rust_code.push_str(&convert_generic_with_context(tokens));
+            }
+        }
+
+        rust_code
+    }
+        /// Apply Samplizer patterns for conversion
+        fn convert_with_samplizer_patterns(tokens: &[Token], patterns: &Vec<crate::SamplizerPattern>) -> String {
+            let mut rust_code = String::new();
+            
+            // Apply high-confidence patterns first
+            for pattern in patterns {
+                if pattern.confidence_score > 0.7 {
+                    rust_code.push_str(&format!("// High-confidence pattern: {} ({:.2})\n", 
+                                              pattern.pattern_name, pattern.confidence_score));
+                    // Use pattern-specific conversion based on type
+                    match pattern.pattern_type {
+                        SegmentType::Function => {
+                            rust_code.push_str(&convert_function_tokens(tokens));
+                        }
+                        SegmentType::Struct => {
+                            rust_code.push_str(&convert_struct_tokens(tokens));
+                        }
+                        SegmentType::Enum => {
+                            rust_code.push_str(&convert_enum_tokens(tokens));
+                        }
+                        SegmentType::Array => {
+                            rust_code.push_str(&convert_array_tokens(tokens));
+                        }
+                        SegmentType::TypeDef => {
+                            rust_code.push_str(&convert_typedef_tokens(tokens));
+                        }
+                        SegmentType::Variable => {
+                            rust_code.push_str(&convert_global_tokens(tokens));
+                        }
+                        SegmentType::Expression => {
+                            rust_code.push_str(&convert_expression_tokens(tokens));
+                        }
+                        _ => {
+                            rust_code.push_str(&convert_generic_with_context(tokens));
+                        }
+                    }
+                    break; // Use first high-confidence pattern
+                }
+            }
+            
+            if rust_code.is_empty() {
+                rust_code.push_str("// No high-confidence samplizer patterns found\n");
+                rust_code.push_str(&convert_generic_with_context(tokens));
+            }
+            
+            rust_code
+        }
+    /// Convert using adaptive system result
+    fn convert_with_adaptive_result(tokens: &[Token], adaptive_result: &crate::AdaptivePatternResult) -> String {
+        let mut rust_code = String::new();
+        rust_code.push_str(&format!("// Adaptive match (confidence: {:.2})\n", adaptive_result.confidence));
+        
+        // Use the base_result from adaptive system
+        match &adaptive_result.base_result {
+            crate::PatternResult::Match { consumed_tokens } => {
+                rust_code.push_str(&format!("// Consumed {} tokens\n", consumed_tokens));
+            }
+            _ => {}
+        }
+        
+        // Apply adaptive conversion logic
+        rust_code.push_str(&convert_generic_with_context(tokens));
+        rust_code
+    }
+fn convert_tokens_to_rust(context: &mut Context, tokens: &[Token], range: Range<usize>) -> Result<String> {
+    // Use Patternizer to identify the code construct
+    let mut pattern_result = None;
+    let mut matched_handler_type = None;
+
+    // Try different handler patterns to identify the construct
+    for handler_type in ["function", "struct", "enum", "typedef", "array", "global", "expression"].into_iter() {
+        let result = context.patternizer.match_pattern(handler_type, tokens);
+        if !matches!(result, crate::PatternResult::NoMatch { .. }) {
+            pattern_result = Some(result);
+            matched_handler_type = Some(handler_type);
+            break;
+        }
+    }
+
+    let rust_code = if let (Some(pattern_match), Some(handler_type)) = (pattern_result, matched_handler_type) {
+        // Use Analyzer to get semantic information
+        let analysis = context.samplizer.analyze_with_captures(tokens, &handler_type);
+
+        // Use Samplizer to get conversion patterns
+        let samplizer_result = context.samplizer.analyze_tokens(tokens);
+
+        // Convert based on identified pattern and analysis
+        convert_with_pattern_analysis(&handler_type, &pattern_match, tokens, Some(analysis), Some(samplizer_result))
+    } else {
+        // Fallback: Use adaptive system for unknown patterns
+        let handler_pattern = crate::HandlerPattern::new("adaptive".to_string(), "adaptive conversion pattern".to_string());
+        let adaptive_result = context.handlizer.adaptive_match(&handler_pattern, tokens);
+
+        match adaptive_result {
+            crate::AdaptivePatternResult { matched, confidence, tokens_consumed, match_data, base_result } if tokens_consumed > 0 => {
+                // Convert using adaptive result with high confidence
+                let adaptive_pattern_result = crate::AdaptivePatternResult {
+                    matched,
+                    confidence,
+                    base_result,
+                    tokens_consumed,
+                    match_data,
+                };
+                convert_with_adaptive_result(tokens, &adaptive_pattern_result)
+            },
+            _ => {
+                // Final fallback to generic conversion
+                convert_generic_with_context(tokens)
+            }
+        }
+    };
+
+    Ok(rust_code)
+}
+fn convert_function_tokens(tokens: &[Token]) -> String {
+    let mut rust_code = String::new();
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    
+    // Use existing convert.rs type mapping system
+    if let Some(converted) = convert_type_tokens(token_strings.iter().map(|s| crate::Token::s(s.clone())).collect()) {
+        rust_code.push_str(&format!("// Type converted: {}\n", converted.to_string()));
+    }
+    
+    // Apply function conversion logic
+    rust_code.push_str(&convert_function_pattern(&token_strings).unwrap_or_else(|| {
+        format!("// Function conversion failed for: {}\n", token_strings.join(" "))
+    }));
+    
+    rust_code
+}
+
+/// Convert struct tokens
+fn convert_struct_tokens(tokens: &[Token]) -> String {
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    convert_struct_pattern(&token_strings).unwrap_or_else(|| {
+        format!("// Struct conversion failed for: {}\n", token_strings.join(" "))
+    })
+}
+
+/// Convert enum tokens  
+fn convert_enum_tokens(tokens: &[Token]) -> String {
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    convert_enum_pattern(&token_strings).unwrap_or_else(|| {
+        format!("// Enum conversion failed for: {}\n", token_strings.join(" "))
+    })
+}
+
+/// Convert array tokens
+fn convert_array_tokens(tokens: &[Token]) -> String {
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    convert_array_pattern(&token_strings).unwrap_or_else(|| {
+        format!("// Array conversion failed for: {}\n", token_strings.join(" "))
+    })
+}
+
+/// Convert typedef tokens
+fn convert_typedef_tokens(tokens: &[Token]) -> String {
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    convert_typedef_pattern(&token_strings).unwrap_or_else(|| {
+        format!("// Typedef conversion failed for: {}\n", token_strings.join(" "))
+    })
+}
+
+/// Convert global variable tokens
+fn convert_global_tokens(tokens: &[Token]) -> String {
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    convert_variable_pattern(&token_strings).unwrap_or_else(|| {
+        format!("// Global variable conversion failed for: {}\n", token_strings.join(" "))
+    })
+}
+
+/// Convert expression tokens
+fn convert_expression_tokens(tokens: &[Token]) -> String {
+    let mut rust_code = String::new();
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    
+    // Check for common C expressions and convert them
+    if token_strings.contains(&"=".to_string()) {
+        rust_code.push_str(&convert_assignment_expression(&token_strings));
+    } else if token_strings.contains(&"++".to_string()) || token_strings.contains(&"--".to_string()) {
+        rust_code.push_str(&convert_increment_expression(&token_strings));
+    } else {
+        rust_code.push_str(&format!("// Expression: {}\n", token_strings.join(" ")));
+    }
+    
+    rust_code
+}
+
+/// Convert assignment expressions
+fn convert_assignment_expression(   tokens: &[String]) -> String {
+    if let Some(eq_pos) = tokens.iter().position(|t| t == "=") {
+        if eq_pos > 0 && eq_pos + 1 < tokens.len() {
+            let var_name = &tokens[eq_pos - 1];
+            let value = &tokens[eq_pos + 1];
+            return format!("{} = {};\n", var_name, value);
+        }
+    }
+    format!("// Assignment: {}\n", tokens.join(" "))
+}
+
+/// Convert increment/decrement expressions
+fn convert_increment_expression(tokens: &[String]) -> String {
+    let tokens_str = tokens.join(" ");
+    if tokens_str.contains("++") {
+        format!("// Increment: {} // TODO: Convert C++ to Rust += 1\n", tokens_str)
+    } else if tokens_str.contains("--") {
+        format!("// Decrement: {} // TODO: Convert C-- to Rust -= 1\n", tokens_str)
+    } else {
+        format!("// Increment/Decrement: {}\n", tokens_str)
+    }
+}
+
+/// Convert with contextual information
+fn convert_generic_with_context(tokens: &[Token]) -> String {
+    let mut rust_code = String::new();
+    let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    
+    // Use C keyword detection from convert.rs
+    let c_keywords: Vec<String> = token_strings.iter()
+        .filter(|s| is_c_keyword(crate::Token::s(s.to_string())))
+        .cloned()
+        .collect();
+    
+    if !c_keywords.is_empty() {
+        rust_code.push_str(&format!("// C keywords detected: {}\n", c_keywords.join(", ")));
+    }
+    
+    // Use type detection
+    let type_tokens: Vec<String> = tokens.iter()
+        .filter(|t| crate::convert::is_type_token(t))
+        .map(|t| t.to_string())
+        .collect();
+        
+    if !type_tokens.is_empty() {
+        rust_code.push_str(&format!("// Type tokens detected: {}\n", type_tokens.join(", ")));
+    }
+    
+    // Apply generic conversion
+    rust_code.push_str(&convert_generic_pattern(&token_strings));
+    
+    rust_code
+}
+
+/// Convert function declarations and definitions
+fn convert_function_pattern(tokens: &[String]) -> Option<String> {
+    if tokens.len() < 4 { return None; }
+    
+    // Pattern: return_type function_name ( params ) { ... }
+    // Handle main function specially
+    if tokens.len() >= 4 && tokens[0] == "int" && tokens[1] == "main" {
+        let mut result = String::from("fn main() -> i32 {\n");
+        
+        // Find opening and closing braces
+        let open_brace = tokens.iter().position(|t| t == "{")?;
+        let close_brace = tokens.iter().rposition(|t| t == "}")?;
+        
+        if open_brace < close_brace {
+            let body: Vec<String> = tokens[(open_brace + 1)..close_brace].to_vec();
+            result.push_str(&convert_function_body(&body));
+        }
+        
+        result.push_str("}\n");
+        return Some(result);
+    }
+    
+    // Generic function pattern: type name ( ... )
+    if let Some(open_paren) = tokens.iter().position(|t| t == "(") {
+        if open_paren >= 2 {
+            let return_type =   convert_c_type(&tokens[0]);
+            let function_name = &tokens[1];
+            
+            let mut result = String::new();
+            result.push_str(&format!("fn {}(", function_name));
+            
+            // Find closing parenthesis and extract parameters
+            if let Some(close_paren) = tokens.iter().position(|t| t == ")") {
+                if close_paren > open_paren + 1 {
+                    let params: Vec<String> = tokens[(open_paren + 1)..close_paren].to_vec();
+                    result.push_str(&convert_parameters(&params));
+                }
+            }
+            
+            result.push_str(&format!(") -> {} {{\n", return_type));
+            
+            // Add function body if present
+            if let Some(open_brace) = tokens.iter().position(|t| t == "{") {
+                if let Some(close_brace) = tokens.iter().rposition(|t| t == "}") {
+                    if open_brace < close_brace {
+                        let body: Vec<String> = tokens[(open_brace + 1)..close_brace].to_vec();
+                        result.push_str(&convert_function_body(&body));
+                    }
+                }
+            }
+            
+            result.push_str("}\n");
+            return Some(result);
+        }
+    }
+    
+    None
+}
+
+/// Convert struct definitions
+fn convert_struct_pattern(tokens: &[String]) -> Option<String> {
+    // Pattern: struct name { ... } or typedef struct { ... } name
+    if tokens.is_empty() || tokens[0] != "struct" { return None; }
+    
+    let mut result = String::new();
+    
+    if tokens.len() > 1 {
+        let struct_name = &tokens[1];
+        result.push_str(&format!("#[derive(Debug, Clone)]\npub struct {} {{\n", struct_name));
+        
+        // Find struct body
+        if let Some(open_brace) = tokens.iter().position(|t| t == "{") {
+            if let Some(close_brace) = tokens.iter().rposition(|t| t == "}") {
+                if open_brace < close_brace {
+                    let fields: Vec<String> = tokens[(open_brace + 1)..close_brace].to_vec();
+                    result.push_str(&convert_struct_fields(&fields));
+                }
+            }
+        }
+        
+        result.push_str("}\n");
+        return Some(result);
+    }
+    
+    None
+}
+
+/// Convert enum definitions
+fn convert_enum_pattern(tokens: &[String]) -> Option<String> {
+    // Pattern: enum name { ... }
+    if tokens.is_empty() || tokens[0] != "enum" { return None; }
+    
+    if tokens.len() > 1 {
+        let enum_name = &tokens[1];
+        let mut result = format!("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum {} {{\n", enum_name);
+        
+        // Find enum body
+        if let Some(open_brace) = tokens.iter().position(|t| t == "{") {
+            if let Some(close_brace) = tokens.iter().rposition(|t| t == "}") {
+                if open_brace < close_brace {
+                    let variants: Vec<String> = tokens[(open_brace + 1)..close_brace].to_vec();
+                    result.push_str(&convert_enum_variants(&variants));
+                }
+            }
+        }
+        
+        result.push_str("}\n");
+        return Some(result);
+    }
+    
+    None
+}
+
+/// Convert typedef statements
+fn convert_typedef_pattern(tokens: &[String]) -> Option<String> {
+    // Pattern: typedef existing_type new_type;
+    if tokens.is_empty() || tokens[0] != "typedef" { return None; }
+    
+    if tokens.len() >= 3 {
+        let existing_type = convert_c_type(&tokens[1]);
+        let new_type = &tokens[2];
+        return Some(format!("pub type {} = {};\n", new_type, existing_type));
+    }
+    
+    None
+}
+
+/// Convert variable declarations
+fn convert_variable_pattern(tokens: &[String]) -> Option<String> {
+    if tokens.len() < 2 { return None; }
+    
+    // Simple pattern: type name; or type name = value;
+    let rust_type = convert_c_type(&tokens[0]);
+    let var_name = &tokens[1];
+    
+    if tokens.len() >= 4 && tokens[2] == "=" {
+        let value = &tokens[3];
+        Some(format!("let {}: {} = {};\n", var_name, rust_type, value))
+    } else {
+        Some(format!("let {}: {};\n", var_name, rust_type))
+    }
+}
+
+/// Convert array declarations
+fn convert_array_pattern(tokens: &[String]) -> Option<String> {
+    if tokens.len() < 4 { return None; }
+    
+    // Pattern: type name[size] or type name[]
+    if let Some(bracket_pos) = tokens.iter().position(|t| t.contains('[')) {
+        if bracket_pos >= 2 {
+            let element_type = convert_c_type(&tokens[0]);
+            let array_name = &tokens[1];
+            
+            if tokens[bracket_pos].contains(']') {
+                // Extract size if present
+                let size_part = &tokens[bracket_pos];
+                if let Some(start) = size_part.find('[') {
+                    if let Some(end) = size_part.find(']') {
+                        let size_str = &size_part[start+1..end];
+                        if size_str.is_empty() {
+                            return Some(format!("let {}: Vec<{}> = Vec::new();\n", array_name, element_type));
+                        } else {
+                            return Some(format!("let {}: [{}; {}] = [Default::default(); {}];\n", 
+                                array_name, element_type, size_str, size_str));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    None
+}
+
+/// Convert include statements  
+fn convert_include_pattern(tokens: &[String]) -> Option<String> {
+    if tokens.is_empty() || tokens[0] != "#include" { return None; }
+    
+    if tokens.len() > 1 {
+        let header = &tokens[1];
+        if header.starts_with('<') && header.ends_with('>') {
+            let header_name = &header[1..header.len()-1];
+            return Some(convert_include_to_use(header_name));
+        } else if header.starts_with('"') && header.ends_with('"') {
+            let header_name = &header[1..header.len()-1];
+            return Some(format!("mod {};\n", header_name.replace(".h", "")));
+        }
+    }
+    
+    None
+}
+
+/// Generic pattern conversion with improved formatting
+fn convert_generic_pattern(tokens: &[String]) -> String {
+    if tokens.is_empty() {
+        return String::from("// Empty token sequence\n");
+    }
+    
+    let mut result = String::new();
+    result.push_str(&format!("// Original C code ({} tokens):\n", tokens.len()));
+    result.push_str("// ");
+    result.push_str(&tokens.join(" "));
+    result.push_str("\n// TODO: Implement proper conversion for this pattern\n");
+    
+    result
+}
+
+/// Convert C types to Rust types
+fn convert_c_type(c_type: &str) -> String {
+    match c_type {
+        "int" => "i32".to_string(),
+        "char" => "i8".to_string(),
+        "unsigned char" => "u8".to_string(),
+        "short" => "i16".to_string(),
+        "unsigned short" => "u16".to_string(),
+        "long" => "i64".to_string(),
+        "unsigned long" => "u64".to_string(),
+        "float" => "f32".to_string(),
+        "double" => "f64".to_string(),
+        "void" => "()".to_string(),
+        "char*" | "char *" => "String".to_string(),
+        "const char*" | "const char *" => "&str".to_string(),
+        _ => {
+            if c_type.ends_with('*') {
+                format!("*mut {}", convert_c_type(&c_type[..c_type.len()-1].trim()))
+            } else {
+                c_type.to_string()
+            }
+        }
+    }
+}
+
+/// Convert function body statements
+fn convert_function_body(body_tokens: &[String]) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    
+    while i < body_tokens.len() {
+        if body_tokens[i] == "return" {
+            if i + 1 < body_tokens.len() {
+                let return_value = &body_tokens[i + 1];
+                result.push_str(&format!("    {}\n", return_value));
+                i += 2;
+            } else {
+                result.push_str("    return;\n");
+                i += 1;
+            }
+        } else if body_tokens[i] == "printf" {
+            // Convert printf to println!
+            result.push_str("    println!(");
+            i += 1;
+            // Skip opening parenthesis if present
+            if i < body_tokens.len() && body_tokens[i] == "(" {
+                i += 1;
+            }
+            // Collect arguments until closing parenthesis or semicolon
+            while i < body_tokens.len() && body_tokens[i] != ")" && body_tokens[i] != ";" {
+                result.push_str(&body_tokens[i]);
+                i += 1;
+                if i < body_tokens.len() && body_tokens[i] != ")" && body_tokens[i] != ";" {
+                    result.push_str(", ");
+                }
+            }
+            result.push_str(");\n");
+            i += 1;
+        } else {
+            // Generic statement conversion
+            result.push_str("    ");
+            result.push_str(&body_tokens[i]);
+            if i + 1 < body_tokens.len() && body_tokens[i + 1] != ";" {
+                result.push(' ');
+            }
+            i += 1;
+        }
+    }
+    
+    if result.is_empty() {
+        result.push_str("    // TODO: Convert function body\n");
+    }
+    
+    result
+}
+
+/// Convert function parameters
+fn convert_parameters(param_tokens: &[String]) -> String {
+    if param_tokens.is_empty() || (param_tokens.len() == 1 && param_tokens[0] == "void") {
+        return String::new();
+    }
+    
+    let mut result = String::new();
+    let mut i = 0;
+    let mut param_count = 0;
+    
+    while i < param_tokens.len() {
+        if i + 1 < param_tokens.len() {
+            let param_type = convert_c_type(&param_tokens[i]);
+            let param_name = &param_tokens[i + 1];
+            
+            if param_count > 0 {
+                result.push_str(", ");
+            }
+            result.push_str(&format!("{}: {}", param_name, param_type));
+            param_count += 1;
+            i += 2;
+            
+            // Skip comma if present
+            if i < param_tokens.len() && param_tokens[i] == "," {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    
+    result
+}
+
+/// Convert struct fields
+fn convert_struct_fields(field_tokens: &[String]) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    
+    while i < field_tokens.len() {
+        if i + 1 < field_tokens.len() {
+            let field_type = convert_c_type(&field_tokens[i]);
+            let field_name = &field_tokens[i + 1];
+            
+            result.push_str(&format!("    pub {}: {},\n", field_name, field_type));
+            i += 2;
+            
+            // Skip semicolon if present
+            if i < field_tokens.len() && field_tokens[i] == ";" {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    
+    if result.is_empty() {
+        result.push_str("    // TODO: Convert struct fields\n");
+    }
+    
+    result
+}
+
+/// Convert enum variants
+fn convert_enum_variants(variant_tokens: &[String]) -> String {
+    let mut result = String::new();
+    let mut i = 0;
+    
+    while i < variant_tokens.len() {
+        let variant_name = &variant_tokens[i];
+        
+        // Skip commas and values for now, just extract names
+        if variant_name != "," && variant_name != "=" && !variant_name.chars().all(|c| c.is_ascii_digit()) {
+            result.push_str(&format!("    {},\n", variant_name));
+        }
+        i += 1;
+    }
+    
+    if result.is_empty() {
+        result.push_str("    // TODO: Convert enum variants\n");
+    }
+    
+    result
+}
+
+/// Convert include statements to Rust use statements
+fn convert_include_to_use(header_name: &str) -> String {
+    match header_name {
+        "stdio.h" => "use std::io::*;\n".to_string(),
+        "stdlib.h" => "use std::process;\nuse std::mem;\n".to_string(),
+        "string.h" => "use std::ffi::CString;\n".to_string(),
+        "math.h" => "use std::f64::consts::*;\n".to_string(),
+        "time.h" => "use std::time::*;\n".to_string(),
+        "unistd.h" => "use std::os::unix::*;\n".to_string(),
+        _ => format!("// TODO: Convert #include <{}>\n", header_name)
+    }
 }

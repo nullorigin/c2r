@@ -1,24 +1,21 @@
 #![allow(
     unused_variables,
     unused_assignments,
-    non_camel_case_types,
-    non_snake_case,
-    non_upper_case_globals
 )]
 
-use crate::{Entry, Pending};
+use crate::{handler::Pending, Entry};
 use core::cell::UnsafeCell;
-use core::clone::Clone;
-use core::fmt;
+use core::{clone::Clone, default::Default};
 use core::marker::{Send, Sync};
-use core::ops::{Deref, DerefMut, FnOnce};
+use core::ops::FnOnce;
+use core::option::Option::{self, None, Some};
 use std::borrow::ToOwned;
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
-
+use std::sync::Arc;
 pub const TIME_START: LazyLock<SystemTime> = LazyLock::new(|| SystemTime::now());
 pub fn time() -> u128 {
     SystemTime::now()
@@ -47,7 +44,7 @@ pub struct Id {
     priority: u64,
     timestamp: u128,
 }
-
+pub type IdRef = Arc<Id>;
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key {
     pub public: u32,
@@ -318,326 +315,264 @@ static mut ENCRYPTED_IDS: LazyLock<Vec<PadLock>> = LazyLock::new(|| Vec::with_ca
 #[allow(unused)]
 static mut OBSOLETE_IDS: LazyLock<Vec<Id>> = LazyLock::new(|| Vec::with_capacity(8192));
 
-use std::sync::{Mutex, Once, RwLock};
+use std::sync::RwLock;
 
 pub struct Lock<T> {
-    once: Once,
     data: UnsafeCell<Option<T>>,
-    mutex: Mutex<()>,
-    rwlock: RwLock<()>,
-}
-
-pub struct LockGuard<'a, T> {
-    data: &'a T,
-    _guard: std::sync::MutexGuard<'a, ()>,
-}
-
-pub struct LockGuardMut<'a, T> {
-    data: &'a mut T,
-    _guard: std::sync::MutexGuard<'a, ()>,
-}
-
-pub struct ReadGuard<'a, T> {
-    data: &'a T,
-    _guard: std::sync::RwLockReadGuard<'a, ()>,
-}
-
-pub struct WriteGuard<'a, T> {
-    data: &'a mut T,
-    _guard: std::sync::RwLockWriteGuard<'a, ()>,
+    lock: RwLock<()>,
 }
 
 unsafe impl<T: Send> Send for Lock<T> {}
 unsafe impl<T: Send + Sync> Sync for Lock<T> {}
 
 impl<T> Lock<T> {
-    pub const fn new() -> Self {
+    pub const fn new_empty() -> Self {
         Lock {
-            once: Once::new(),
             data: UnsafeCell::new(None),
-            mutex: Mutex::new(()),
-            rwlock: RwLock::new(()),
+            lock: RwLock::new(()),
         }
     }
 
-    pub fn new_with_value(value: T) -> Self {
-        let lock = Self::new();
-        lock.force(value);
-        lock
-    }
-
-    pub fn get_or_init<F>(&self, f: F) -> &T
-    where
-        F: FnOnce() -> T,
-    {
-        self.once.call_once(|| unsafe {
-            *self.data.get() = Some(f());
-        });
-        unsafe { (*self.data.get()).as_ref().unwrap() }
-    }
-
-    pub fn lock(&self) -> LockGuard<'_, T>
-    where
-        T: Default,
-    {
-        self.ensure_initialized();
-        let guard = self.mutex.lock().unwrap();
-        LockGuard {
-            data: unsafe { (*self.data.get()).as_ref().unwrap() },
-            _guard: guard,
+    pub fn new(value: T) -> Self {
+        Lock {
+            data: UnsafeCell::new(Some(value)),
+            lock: RwLock::new(()),
         }
     }
 
-    pub fn lock_mut(&self) -> LockGuardMut<'_, T>
-    where
-        T: Default,
-    {
-        self.ensure_initialized();
-        let guard = self.mutex.lock().unwrap();
-        LockGuardMut {
-            data: unsafe { (*self.data.get()).as_mut().unwrap() },
-            _guard: guard,
-        }
-    }
-
-    pub fn read(&self) -> ReadGuard<'_, T>
-    where
-        T: Default,
-    {
-        self.ensure_initialized();
-        let guard = self.rwlock.read().unwrap();
-        ReadGuard {
-            data: unsafe { (*self.data.get()).as_ref().unwrap() },
-            _guard: guard,
-        }
-    }
-
-    pub fn write(&self) -> WriteGuard<'_, T>
-    where
-        T: Default,
-    {
-        self.ensure_initialized();
-        let guard = self.rwlock.write().unwrap();
-        WriteGuard {
-            data: unsafe { (*self.data.get()).as_mut().unwrap() },
-            _guard: guard,
-        }
-    }
-
-    pub fn get(&self) -> &T
-    where
-        T: Default,
-    {
-        self.ensure_initialized();
-        unsafe { (*self.data.get()).as_ref().unwrap() }
-    }
-
-    pub fn force(&self, value: T) -> &T {
-        self.once.call_once(|| unsafe {
-            *self.data.get() = Some(value);
-        });
-        unsafe { (*self.data.get()).as_ref().unwrap() }
-    }
-
-    pub fn insert(&self, value: T) -> bool {
-        if self.is_initialized() {
-            false
-        } else {
-            self.force(value);
-            true
-        }
-    }
-
+    #[inline]
     pub fn is_initialized(&self) -> bool {
-        self.once.is_completed()
-    }
-
-    pub fn into_inner(self) -> Option<T> {
-        self.data.into_inner()
-    }
-
-    pub fn try_lock(&self) -> Option<LockGuard<'_, T>> {
-        if self.is_initialized() {
-            self.mutex.try_lock().ok().map(|guard| LockGuard {
-                data: unsafe { (*self.data.get()).as_ref().unwrap() },
-                _guard: guard,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn try_lock_mut(&self) -> Option<LockGuardMut<'_, T>> {
-        if self.is_initialized() {
-            self.mutex.try_lock().ok().map(|guard| LockGuardMut {
-                data: unsafe { (*self.data.get()).as_mut().unwrap() },
-                _guard: guard,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn try_read(&self) -> Option<ReadGuard<'_, T>> {
-        if self.is_initialized() {
-            self.rwlock.try_read().ok().map(|guard| ReadGuard {
-                data: unsafe { (*self.data.get()).as_ref().unwrap() },
-                _guard: guard,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn try_write(&self) -> Option<WriteGuard<'_, T>> {
-        if self.is_initialized() {
-            self.rwlock.try_write().ok().map(|guard| WriteGuard {
-                data: unsafe { (*self.data.get()).as_mut().unwrap() },
-                _guard: guard,
-            })
-        } else {
-            None
-        }
-    }
-
-    pub fn get_or_try_init<F>(&self, f: F) -> Option<&T>
-    where
-        F: FnOnce() -> Option<T>,
-    {
-        let mut initialized = false;
-        self.once.call_once(|| {
-            if let Some(value) = f() {
-                unsafe {
-                    *self.data.get() = Some(value);
-                }
-                initialized = true;
-            }
-        });
-        if initialized || self.is_initialized() {
-            unsafe { (*self.data.get()).as_ref() }
-        } else {
-            None
-        }
-    }
-
-    pub fn with<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&T) -> R,
-        T: Default,
-    {
-        f(&*self.lock())
-    }
-
-    pub fn with_mut<F, R>(&self, f: F) -> R
-    where
-        F: FnOnce(&mut T) -> R,
-        T: Default,
-    {
-        f(&mut *self.lock_mut())
-    }
-
-    pub fn map<F, U>(&self, f: F) -> U
-    where
-        F: FnOnce(&T) -> U,
-        T: Default,
-    {
-        f(self.get())
-    }
-
-    pub fn replace(&self, value: T) -> Option<T>
-    where
-        T: Clone,
-    {
-        if self.is_initialized() {
-            let old_value = unsafe { (*self.data.get()).as_ref().cloned() };
-            unsafe {
-                *self.data.get() = Some(value);
-            }
-            old_value
-        } else {
-            self.force(value);
-            None
-        }
+        let _guard = self.lock.read().unwrap();
+        unsafe { (*self.data.get()).is_some() }
     }
 
     fn ensure_initialized(&self)
     where
         T: Default,
     {
-        self.once.call_once(|| unsafe {
-            *self.data.get() = Some(T::default());
-        });
+        let _guard = self.lock.write().unwrap();
+        unsafe {
+            if (*self.data.get()).is_none() {
+                *self.data.get() = Some(T::default());
+            }
+        }
+    }
+
+    pub fn get_or_init<F>(&self, f: F) -> RwLockReadGuard<()>
+    where
+        F: FnOnce() -> T,
+    {
+        {
+            let _guard = self.lock.write().unwrap();
+            unsafe {
+                if (*self.data.get()).is_none() {
+                    *self.data.get() = Some(f());
+                }
+            }
+        }
+        self.lock.read().unwrap()
+    }
+
+    pub fn lock(&self) -> RwLockReadGuard<()>
+    where
+        T: Default,
+    {
+        self.ensure_initialized();
+        self.lock.read().unwrap()
+    }
+
+    pub fn lock_mut(&self) -> RwLockWriteGuard<()>
+    where
+        T: Default,
+    {
+        self.ensure_initialized();
+        self.lock.write().unwrap()
+    }
+
+    pub fn read(&self) -> Option<T>
+    where
+        T: Clone,
+    {
+        let _guard = self.lock.read().unwrap();
+        unsafe { (*self.data.get()).clone() }
+    }
+
+    pub fn write<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+        T: Default,
+    {
+        let _guard = self.lock.write().unwrap();
+        unsafe {
+            if (*self.data.get()).is_none() {
+                *self.data.get() = Some(T::default());
+            }
+            (*self.data.get()).as_mut().map(f)
+        }
+    }
+
+    pub fn get(&self) -> Option<T>
+    where
+        T: Clone,
+    {
+        self.read()
+    }
+
+    pub fn force(&self, value: T) {
+        let _guard = self.lock.write().unwrap();
+        unsafe {
+            *self.data.get() = Some(value);
+        }
+    }
+
+    pub fn insert(&self, value: T) -> bool {
+        let _guard = self.lock.write().unwrap();
+        unsafe {
+            if (*self.data.get()).is_none() {
+                *self.data.get() = Some(value);
+                true
+            } else {
+                false
+            }
+        }
+    }
+
+    pub fn remove(&self) -> Option<T> {
+        let _guard = self.lock.write().unwrap();
+        unsafe { (*self.data.get()).take() }
+    }
+
+    pub fn clear(&self) {
+        let _guard = self.lock.write().unwrap();
+        unsafe {
+            *self.data.get() = None;
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        let _guard = self.lock.read().unwrap();
+        unsafe { 
+            if (*self.data.get()).is_some() { 1 } else { 0 }
+        }
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        let _guard = self.lock.read().unwrap();
+        unsafe { (*self.data.get()).is_none() }
+    }
+
+    pub fn into_inner(self) -> Option<T> {
+        self.data.into_inner()
+    }
+
+    pub fn try_lock(&self) -> Option<RwLockReadGuard<()>> {
+        self.lock.try_read().ok()
+    }
+
+    pub fn try_lock_mut(&self) -> Option<RwLockWriteGuard<()>> {
+        self.lock.try_write().ok()
+    }
+
+    pub fn try_read(&self) -> Option<T>
+    where
+        T: Clone,
+    {
+        let _guard = self.lock.try_read().ok()?;
+        unsafe { (*self.data.get()).clone() }
+    }
+
+    pub fn try_write<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let _guard = self.lock.try_write().ok()?;
+        unsafe { (*self.data.get()).as_mut().map(f) }
+    }
+
+    pub fn get_or_try_init<F>(&self, f: F) -> Option<T>
+    where
+        F: FnOnce() -> Option<T>,
+        T: Clone,
+    {
+        let _guard = self.lock.try_write().ok()?;
+        unsafe {
+            if (*self.data.get()).is_none() {
+                *self.data.get() = f();
+            }
+            (*self.data.get()).clone()
+        }
+    }
+
+    #[inline]
+    pub fn with<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&T) -> R,
+    {
+        let _guard = match self.lock.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                eprintln!("OptionLock read lock poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        unsafe { (*self.data.get()).as_ref().map(f) }
+    }
+
+    #[inline]
+    pub fn with_mut<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut T) -> R,
+    {
+        let _guard = match self.lock.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                eprintln!("OptionLock write lock poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        unsafe { (*self.data.get()).as_mut().map(f) }
+    }
+
+    #[inline]
+    pub fn map<F, U>(&self, f: F) -> Option<U>
+    where
+        F: FnOnce(&T) -> U,
+    {
+        self.with(f)
+    }
+
+    pub fn replace(&self, value: T) -> Option<T> {
+        let _guard = self.lock.try_write().ok()?;
+        unsafe { (*self.data.get()).replace(value) }
+    }
+
+    pub fn swap(&self, other: &Self) {
+        let (first, second) = if std::ptr::addr_of!(*self) < std::ptr::addr_of!(*other) {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        
+        let _guard1 = first.lock.try_write().unwrap();
+        let _guard2 = second.lock.try_write().unwrap();
+        
+        unsafe {
+            std::ptr::swap(first.data.get(), second.data.get());
+        }
+    }
+
+    pub fn clone_inner(&self) -> Option<T>
+    where
+        T: Clone,
+    {
+        let _guard = self.lock.try_read().ok()?;
+        unsafe { (*self.data.get()).clone() }
     }
 }
 
 impl<T: Default> Default for Lock<T> {
     fn default() -> Self {
-        let lock = Self::new();
-        lock.ensure_initialized();
-        lock
-    }
-}
-
-impl<T: Default> Deref for Lock<T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.get()
-    }
-}
-
-impl<T: fmt::Debug> fmt::Debug for Lock<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match unsafe { (*self.data.get()).as_ref() } {
-            Some(data) => f.debug_struct("Lock").field("data", data).finish(),
-            None => f
-                .debug_struct("Lock")
-                .field("data", &"<uninitialized>")
-                .finish(),
-        }
-    }
-}
-
-impl<'a, T> Deref for LockGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.data
-    }
-}
-
-impl<'a, T> Deref for LockGuardMut<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.data
-    }
-}
-
-impl<'a, T> DerefMut for LockGuardMut<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.data
-    }
-}
-
-impl<'a, T> Deref for ReadGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.data
-    }
-}
-
-impl<'a, T> Deref for WriteGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &T {
-        self.data
-    }
-}
-
-impl<'a, T> DerefMut for WriteGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        self.data
+        Self::new(T::default())
     }
 }

@@ -1,15 +1,18 @@
-pub mod analysis;
+#![allow(unused, static_mut_refs, unsafe_code)]
 pub mod config;
 pub mod convert;
-pub mod document;
 pub mod entry;
 pub mod error;
 pub mod extract;
 pub mod file_utils;
 pub mod handler;
 pub mod handlers;
+pub mod info;
+pub mod json;
 pub mod lock;
 pub mod logging;
+pub mod maybe;
+pub mod option_lock;
 pub mod pattern;
 pub mod registry;
 pub mod sample;
@@ -17,50 +20,59 @@ pub mod table;
 pub mod tests;
 pub mod thread;
 pub mod token;
-pub use crate::analysis::*;
-pub use crate::config::Context;
+pub mod util;
 pub use crate::config::*;
 pub use crate::convert::*;
-pub use crate::document::*;
 pub use crate::entry::*;
 pub use crate::error::*;
 pub use crate::extract::*;
 pub use crate::handler::*;
 pub use crate::handlers::*;
+pub use crate::info::*;
 pub use crate::lock::*;
 pub use crate::logging::*;
+pub use crate::maybe::*;
+pub use crate::option_lock::*;
 pub use crate::pattern::*;
 pub use crate::registry::*;
 pub use crate::sample::*;
 pub use crate::table::*;
 pub use crate::token::*;
-
-use core::clone::Clone;
+pub use core::clone::Clone;
+pub use core::option::Option::Some;
+pub use core::result::Result::Err;
+pub use core::result::Result::Ok;
+// HashMap import removed - no longer needed for handler management
 // Import logging macros
 use std::env;
 use std::fs;
 use std::io::Write;
 use std::path::Path;
-#[allow(unused)]
+use std::path::PathBuf;
+use std::ptr::swap;
+pub const TOKEN_MAX: usize = 8192;
+
+#[allow(unused, static_mut_refs, unsafe_code)]
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let mut args_iter = args.iter();
-    let program_name = args_iter.next().unwrap_or(&"c2r".to_string()).clone();
+    let mut args_iter = args.iter().skip(1);
+    let program_name = args[0].clone();
 
     // Parse arguments
     let mut input_file = String::new();
     let mut output_file = String::new();
-    let mut output_to_stdout = true;
-    let mut command = "convert".to_string();
-    #[allow(unused)]
+    let mut verbosity = 1;
     let mut run_tests = false;
-
-    // Default verbosity level is errors only (1)
-    let mut verbosity = VERBOSITY_ERROR;
-    let mut verbose_count = 1; // For the new logging system
-
-    // Create a configuration object with defaults
-    let mut context = Context::new("main");
+    let mut command = String::new();
+    let mut use_cache = true; // Default to using cache
+    let mut explicit_cache_setting = false;
+    let mut verbose_count = 1; // For the new logging sys
+    let mut output_to_stdout = true;
+    let mut base_dir = PathBuf::new();
+    let mut context = Context::new();
+    
+    logging::initialize(verbose_count);
+    
     // Parse command line arguments
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -72,6 +84,26 @@ fn main() {
             }
             "--analyze-patterns" => {
                 command = "analyze-patterns".to_string();
+            }
+            "--clear-cache" => {
+                command = "clear-cache".to_string();
+            }
+            "--show-cache" => {
+                command = "show-cache".to_string();
+            }
+            "--create-demo-cache" => {
+                command = "create-demo-cache".to_string();
+            }
+            "--clear-analysis-cache" => {
+                command = "clear-analysis-cache".to_string();
+            }
+            "--cache" => {
+                use_cache = true;
+                explicit_cache_setting = true;
+            }
+            "--no-cache" => {
+                use_cache = false;
+                explicit_cache_setting = true;
             }
             "-v" | "--verbose" => {
                 // Look for a numeric value after -v
@@ -87,29 +119,7 @@ fn main() {
                     verbosity = VERBOSITY_DEBUG;
                     verbose_count = 3; // Debug level
                 }
-            }
-            "-I" | "--include" => {
-                // Add an include directory
-                if let Some(include_dir) = args_iter.next() {
-                    context.add_include_dir(include_dir);
-                    debug!("Added include directory: {}", include_dir);
-                } else {
-                    debug!("Missing directory path after {}", arg);
-                }
-            }
-            "--base-dir" => {
-                // Set the base directory
-                if let Some(base_dir) = args_iter.next() {
-                    context.with_base_dir(base_dir);
-                    debug!("Set base directory: {}", base_dir);
-                } else {
-                    debug!("Missing directory path after {}", arg);
-                }
-            }
-            "--system-includes" => {
-                // Enable processing of system includes
-                context.with_system_includes(true);
-                debug!("System include processing enabled");
+                logging::initialize(verbose_count);
             }
             "--output-file" | "-o" => {
                 // Set output file
@@ -118,7 +128,16 @@ fn main() {
                     output_to_stdout = false;
                     debug!("Output file set to: {}", output_file);
                 } else {
-                    debug!("Missing file path after {}", arg);
+                    error!("Missing file path after {}", arg);
+                }
+            }
+            "--base-dir" => {
+                // Set base directory
+                if let Some(dir_path) = args_iter.next() {
+                    base_dir = PathBuf::from(dir_path);
+                    debug!("Base directory set to: {}", base_dir.display());
+                } else {
+                    error!("Missing directory path after {}", arg);
                 }
             }
             "--stdout" => {
@@ -135,8 +154,8 @@ fn main() {
 
                     // Automatically set the base directory to the input file's directory
                     if let Some(parent) = Path::new(&file_path).parent() {
-                        if parent.to_string_lossy() != "" {
-                            context.with_base_dir(parent.to_string_lossy().to_string());
+                        if !parent.to_string_lossy().is_empty() {
+                            context.set_base_dir(parent.to_path_buf());
                             debug!("Base directory set to input file's parent: {:?}", parent);
                         }
                     }
@@ -152,8 +171,8 @@ fn main() {
 
                     // Automatically set the base directory to the input file's directory
                     if let Some(parent) = Path::new(&file_path).parent() {
-                        if parent.to_string_lossy() != "" {
-                            context.with_base_dir(parent.to_string_lossy().to_string());
+                        if !parent.to_string_lossy().is_empty() {
+                            context.set_base_dir(parent.to_path_buf());
                             debug!("Auto-set base directory: {:?}", parent);
                         }
                     }
@@ -170,8 +189,8 @@ fn main() {
 
                     // Automatically set the base directory to the input file's directory
                     if let Some(parent) = Path::new(&arg).parent() {
-                        if parent.to_string_lossy() != "" {
-                            context.with_base_dir(parent.to_string_lossy().to_string());
+                        if !parent.to_string_lossy().is_empty() {
+                            context.set_base_dir(parent.to_path_buf());
                             debug!("Auto-set base directory: {:?}", parent);
                         }
                     }
@@ -180,33 +199,41 @@ fn main() {
         }
     }
 
-    // Initialize the logging system with the verbosity level
-    logging::initialize(verbose_count);
-
-    // Set verbosity in the context and apply it globally
-    context.set_verbosity(verbosity);
-
-    context.push();
-
+    // CRITICAL: Initialize the Context and all global components
+    context.initialize();
+    
     // Print the current verbosity level
     match verbosity {
         VERBOSITY_WARN => warn!("Verbosity: Warnings and Errors"),
         VERBOSITY_ERROR => error!("Verbosity: Errors only"),
-        VERBOSITY_DEBUG => debug!("Verbosity: Debug messages Warnings and Errors"),
+        VERBOSITY_DEBUG => debug!("Verbosity: Debug messages, Warnings and Errors"),
         VERBOSITY_INFO => info!("Verbosity: All messages"),
         _ => info!("Verbosity: Custom level {}", verbosity),
     }
-
-    // Check if we should run handler tests
+    
+    // Set base directory in the context
+    if !base_dir.as_os_str().is_empty() {
+        context.set_base_dir(base_dir);
+    }
 
     // Handle pattern analysis command (doesn't require input file)
-    if command == "analyze-patterns" {
+    if command.contains("analyze-patterns") {
         println!("🔍 Running Samplizer Pattern Analysis");
+        if explicit_cache_setting {
+            println!(
+                "🗂️  Cache mode: {}",
+                if use_cache { "Enabled" } else { "Disabled" }
+            );
+        } else {
+            println!("🗂️  Cache mode: Enabled (default)");
+        }
         println!(
             "═══════════════════════════════════════════════════════════════════════════════════════"
         );
-        let mut analyzer = Analyzer::new();
-        match analyzer.analyze_patterns_with_samplizer() {
+        match context
+            .handlizer
+            .analyze_patterns_with_samplizer_cached(use_cache)
+        {
             Ok(()) => {
                 println!("✅ Pattern analysis completed successfully");
             }
@@ -217,270 +244,220 @@ fn main() {
         return; // Exit after analysis
     }
 
-    // Handle registry display command (doesn't require input file)
-    if command == "display-registry" {
-        println!("🗃️  Displaying Registry Database View");
-        println!(
-            "═══════════════════════════════════════════════════════════════════════════════════════"
-        );
-
-        // Initialize handlers and patterns to populate the registry with meaningful data
-        println!("🔄 Initializing handlers and patterns for display...");
-
-        // Register all available handlers
-        context
-            .handlers
-            .register_all_shared(create_all_handlers(), Id::get("display_registry_handlers"));
-
-        // Register common patterns
-        pattern::register_common_multi_token_patterns();
-
-        // Manually populate registry with sample entries for meaningful display
-        let sample_handlers = create_all_handlers();
-        for (i, handler) in sample_handlers.iter().enumerate() {
-            let handler_id = Id::get(&format!("sample_handler_{}", i));
-            context.set_entry(handler_id.name(), Entry::Handler(handler.clone()));
-        }
-
-        // Add some sample patterns to registry
-        let mut sample_pattern = pattern::Pattern::default();
-        sample_pattern.name = "sample_c_function".to_string();
-        sample_pattern.description = "C Function Pattern".to_string();
-        sample_pattern.id = Id::get("sample_c_function");
-        let pattern_id = Id::get("sample_pattern_c_function");
-        context.set_entry(pattern_id.name(), Entry::Patternizer(sample_pattern));
-
-        // Add some sample reports
-        let sample_report = HandlerReport {
-            report_id: Box::new(Id::get("sample_report_1")),
-            handler_id: Box::new(Id::get("sample_handler")),
-            handler_name: "sample_handler".to_string(),
-            function_name: "sample_function".to_string(),
-            message: "Sample conversion report".to_string(),
-            level: ReportLevel::Info,
-            tokens_processed: 10,
-            tokens_consumed: 8,
-            phase: HandlerPhase::Convert,
-            success: true,
-            metadata: std::collections::HashMap::new(),
-        };
-        let report_id = Id::get("sample_report_1");
-        context.set_entry(report_id.name(), Entry::HandlerReport(sample_report));
-
-        // Add some sample string entries
-        context.set_entry("sample_string", Entry::Str("Sample C code".to_string()));
-        context.set_entry("sample_bool", Entry::Bool(true));
-        context.set_entry("sample_val", Entry::Val(42));
-
-        println!(
-            "✅ Initialization completed - {} handlers registered, {} registry entries populated",
-            context.handlers.handlers.len(),
-            context.registry.entries.len()
-        );
-        println!();
-
-        // Display the full context including registry
-        context.display_full_context();
-
-        println!("✅ Registry display completed successfully");
-        return; // Exit after displaying registry
+    // Handle cache management commands
+    if command.contains("clear-cache") {
+        clear_cache();
+        return;
     }
 
-    context.push();
-    // Check if we have an input file
+    if command.contains("show-cache") {
+        show_cache();
+        return;
+    }
+
+    if command == "clear-analysis-cache" {
+        clear_analysis_cache();
+        return;
+    }
+
+    if command == "create-demo-cache" {
+        create_demo_cache();
+        return;
+    }
+
+    // Handle test command
+    if run_tests {
+        println!("🧪 Running handler tests...");
+        // Add test execution logic here
+        return;
+    }
+
+    // Handle display registry command
+    if command == "display-registry" {
+        println!("📊 Displaying registry database...");
+        context.display_registry_stats();
+        return;
+    }
+
+    // Check if we have an input file for conversion
     if !input_file.is_empty() {
         // Process based on command
         match command.as_str() {
-            "convert" => {
-                println!("{}", "Converting...");
-                match process_file(input_file.as_str()) {
-                    Ok(results) => {
-                        let converted_code = extract_converted_code_from_results(&results);
-                        if !converted_code.is_empty() {
-                            if output_to_stdout || output_file.is_empty() {
-                                println!("\n// === Converted Rust Code ===");
-                                println!("{}", converted_code);
-                            } else {
-                                match write_output_file(&output_file, &converted_code) {
-                                    Ok(()) => {
-                                        println!(
-                                            "Successfully wrote converted code to: {}",
-                                            output_file
-                                        );
-                                        println!(
-                                            "Generated {} lines of Rust code",
-                                            converted_code.lines().count()
-                                        );
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "Failed to write output file {}: {}",
-                                            output_file, e
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            println!("No convertible code found in input file");
-                        }
-                    }
-                    Err(e) => {
-                        error!("Conversion failed: {}", e);
-                    }
-                }
+            "convert" | "" => {
+                convert(&mut context, &input_file, &output_file, output_to_stdout);
             }
             _ => {
                 error!("Unknown command: {}", command);
-                error!("Usage: {} [options] convert <input.c>", program_name);
+                print_usage(&program_name);
             }
         }
-    } else {
-        error!("Usage: {} [options] convert <input.c>", program_name);
-        info!("Options:");
-        info!("  -v, --verbose [level]  Set verbosity level (0-3, default: 1)");
-        info!("    0: No output");
-        info!("    1: Errors only");
-        info!("    2: Debug messages");
-        info!("    3: All information");
-        info!("  -I, --include <dir>    Add an include directory for header files");
-        info!("  --base-dir <dir>       Set the base directory for resolving paths");
-        info!("  --system-includes      Enable processing of system includes");
-        info!("  --test-handlers        Run handler tests");
-        info!(
-            "  --display-registry     Display the registry database view with all entries and statistics"
-        );
-        info!("  -o, --output-file <file> Write converted code to file instead of stdout");
-        info!("  --stdout               Force output to stdout (default)");
+    } else if command.is_empty() {
+        error!("No command or input file specified");
+        print_usage(&program_name);
     }
 }
-#[allow(unused)]
-fn process_file(input_path: &str) -> Result<ProcessedResults> {
-    info!("Processing file {}", input_path);
 
-    match fs::read_to_string(input_path) {
+fn print_usage(program_name: &str) {
+    error!("Usage: {} [options] convert <input.c>", program_name);
+    info!("Options:");
+    info!("  -v, --verbose [level]  Set verbosity level (0-3, default: 1)");
+    info!("    0: No output");
+    info!("    1: Errors only");
+    info!("    2: Debug messages");
+    info!("    3: All information");
+    info!("  -I, --include <dir>    Add an include directory for header files");
+    info!("  --base-dir <dir>       Set the base directory for resolving paths");
+    info!("  --system-includes      Enable processing of system includes");
+    info!("  --test-handlers        Run handler tests");
+    info!("  --display-registry     Display the registry database view with all entries and statistics");
+    info!("  --analyze-patterns     Run pattern analysis with samplizer");
+    info!("  --cache                Enable analysis result caching (default)");
+    info!("  --no-cache             Disable analysis result caching, force fresh analysis");
+    info!("  --clear-cache          Clear pattern cache to force fresh analysis");
+    info!("  --clear-analysis-cache Clear analysis result cache files");
+    info!("  --show-cache           Display information about pattern cache");
+    info!("  --create-demo-cache    Create a demo pattern cache for testing");
+    info!("  -o, --output-file <file> Write converted code to file instead of stdout");
+    info!("  --stdout               Force output to stdout (default)");
+    info!("");
+    info!("Environment Variables:");
+    info!("  C2R_CACHE_DIR          Directory for pattern cache (default: ~/.c2r/cache)");
+}
+pub fn convert(context: &mut Context, input_file: &str, output_file: &str, output_to_stdout: bool) {
+    println!("Converting... {}", input_file);
+    
+    // Read input file
+    let content = match fs::read_to_string(&input_file) {
         Ok(content) => {
-            let mut context: Context = context!();
-            context
-                .handlers
-                .register_all_shared(create_all_handlers(), Id::get("all_handlers_shared"));
-            let tokens = &context.tokenizer.tokenize(content.as_bytes().to_vec())?;
-            context.original_tokens = tokens.clone();
-            context.tokens = tokens.clone();
-            context.initialize_patterns();
-            // Push tokens and patterns to Global context - essential for handler processing
-            context.push(); // Push context to Global to initialize patterns in Global patternizer
-
-            let results = context.handlers.process_all(&tokens)?;
-
-            context.pull();
-
-            context.display_full_context();
-
-            Ok(results)
+            info!("File read successfully: {} chars", content.len());
+            debug!(
+                "First 50 chars: {}",
+                &content[..std::cmp::min(50, content.len())]
+            );
+            content
         }
         Err(e) => {
-            eprintln!("File read error: {}", e);
-            Err(C2RError::new(
-                Kind::Io,
-                Reason::Failed("to read file"),
-                Some(e.to_string()),
-            ))
+            error!("Failed to read input file {}: {}", input_file, e);
+            return;
         }
-    }
-}
+    };
 
-/// Extract all converted Rust code from a ProcessedResults collection
-fn extract_converted_code_from_results(results: &ProcessedResults) -> String {
-    debug!(
-        "DEBUG: Processing {} results from ProcessedResults collection",
-        results.len()
-    );
-
-    // Use the built-in extract_all_code method from ProcessedResults
-    let code_sections = results.extract_all_code();
-
-    // Debug: Log each result and what code was extracted
-    for (i, result) in results.results.iter().enumerate() {
-        match &result.result {
-            HandlerResult::Handled(_, _, id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::Handled from handler {}",
-                    i,
-                    id.name()
-                );
+    // Tokenize content
+    debug!("Starting tokenization...");
+    let tokens = match context.tokenizer.tokenize(content.as_bytes().to_vec()) {
+        Ok(tokens) => {
+            info!("Tokenization succeeded: {} tokens generated", tokens.len());
+            if tokens.is_empty() {
+                error!("No tokens generated from input file");
+                return;
             }
-            HandlerResult::Processed(_, _, code, id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::Processed from handler {} with code: '{}'",
-                    i,
-                    id.name(),
-                    code
-                );
-            }
-            HandlerResult::Completed(_, _, code, id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::Completed from handler {} with code: '{}'",
-                    i,
-                    id.name(),
-                    code
-                );
-            }
-            HandlerResult::NotHandled(_, _, id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::NotHandled from handler {}",
-                    i,
-                    id.name()
-                );
-            }
-            HandlerResult::Redirected(_, _, target, from_id, to_id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::Redirected from {} to {} (target: {})",
-                    i,
-                    from_id.name(),
-                    to_id.name(),
-                    target
-                );
-            }
-            HandlerResult::Extracted(_element, _, code, id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::Extracted from handler {} with code: '{}'",
-                    i,
-                    id.name(),
-                    code
-                );
-            }
-            HandlerResult::Converted(_element, _, code, id) => {
-                debug!(
-                    "DEBUG: Result {}: HandlerResult::Converted from handler {} with code: '{}'",
-                    i,
-                    id.name(),
-                    code
-                );
-            }
+            tokens
         }
-    }
+        Err(e) => {
+            error!("Tokenization failed: {}", e);
+            return;
+        }
+    };
 
-    debug!(
-        "DEBUG: Extracted {} code sections from {} results",
-        code_sections.len(),
-        results.len()
-    );
+    // Setup cache directory
+    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+        format!(
+            "{}/.c2r/cache",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+        )
+    });
 
-    // Join all code sections with proper spacing
-    if !code_sections.is_empty() {
-        let joined_code = code_sections.join("\n\n");
-        debug!(
-            "DEBUG: Final joined code sections: {} sections",
-            code_sections.len()
-        );
-        format_final_output(&joined_code)
+    info!("Using cache directory: {}", cache_dir);
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        warn!("Failed to create cache directory: {}", e);
     } else {
-        debug!(
-            "DEBUG: No code sections to output from {} results",
-            results.len()
-        );
-        String::new()
+        debug!("Cache directory ready: {}", cache_dir);
     }
+
+    // Prepare token processing
+    let token_count = tokens.len();
+    let token_range = 0..token_count;
+    let token_slot = {
+        context.tokenizer.current_slot().clear();
+        context.tokenizer.current_slot().append(tokens.clone());
+        context.tokenizer.active_slot()
+    };
+
+    // Store tokens in registry and tokenbox
+    context
+        .registry
+        .insert(Id::get("current_tokens"), Entry::TokenList(tokens.clone()));
+
+    if let Ok(deposited_count) = context
+        .tokenbox
+        .deposit_from_slot(tokens.clone(), &Id::get("main_processing"))
+    {
+        debug!(
+            "Deposited {} tokens into TokenBox for processing",
+            deposited_count
+        );
+    }
+
+    // Process tokens
+    match context.process(token_slot, token_range) {
+        Ok(results) => {
+            // Extract converted code from results
+            let mut converted_code = String::new();
+            for result in &results {
+                match result {
+                    HandlerResult::Processed(_, _, code, _)
+                    | HandlerResult::Completed(_, _, code, _)
+                    | HandlerResult::Converted(_, _, code, _)
+                    | HandlerResult::Extracted(_, _, code, _) => {
+                        converted_code.push_str(&code);
+                        converted_code.push('\n');
+                    }
+                    _ => {} // Other variants don't contain code
+                }
+            }
+
+            // Format the final output
+            let formatted_code = if !converted_code.trim().is_empty() {
+                format_final_output(&converted_code)
+            } else {
+                "// No convertible code found\n".to_string()
+            };
+
+            // Output results
+            if output_to_stdout || output_file.is_empty() {
+                println!("\n// === Converted Rust Code ===");
+                println!("{}", formatted_code);
+            } else {
+                match write_output_file(output_file, &formatted_code) {
+                    Ok(()) => {
+                        println!("Successfully wrote converted code to: {}", output_file);
+                        println!(
+                            "Generated {} lines of Rust code",
+                            formatted_code.lines().count()
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to write output file {}: {}", output_file, e);
+                    }
+                }
+            }
+
+            // Display processing reports
+            let report_count = context.registry.get_reports().len();
+            info!("Processing completed with {} reports", report_count);
+            context.display_full_context();
+            
+            if get_verbosity_level() >= VERBOSITY_DEBUG {
+                context.display_reports();
+            }
+        }
+        Err(e) => {
+            error!("Processing failed: {}", e);
+        }
+    }
+
+    // Cleanup
+    context.shutdown();
 }
 
 /// Format the final output with proper structure and comments
@@ -522,4 +499,249 @@ fn write_output_file(file_path: &str, code: &str) -> Result<()> {
     file.flush()?;
 
     Ok(())
+}
+pub fn show_cache() {
+    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+        format!(
+            "{}/.c2r/cache",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+        )
+    });
+
+    let cache_file = std::path::Path::new(&cache_dir).join("pattern_cache.json");
+
+    println!("📊 Pattern Cache Information");
+    println!(
+        "═══════════════════════════════════════════════════════════════════════════════════════"
+    );
+    println!("Expected cache directory: {}", cache_dir);
+    println!("Expected cache file: {}", cache_file.display());
+
+    // Check if cache directory exists
+    if !Path::new(&cache_dir).exists() {
+        println!("❌ Cache directory does not exist");
+    } else {
+        println!("✅ Cache directory exists");
+    }
+
+    if cache_file.exists() {
+        match std::fs::read_to_string(&cache_file) {
+            Ok(content) => {
+                match crate::json::parse(&content) {
+                    Ok(json_data) => {
+                        println!("✅ Cache file found and parsed successfully");
+
+                        if let Some(metadata) = json_data["metadata"].as_object() {
+                            if let Some(version) = metadata.get("version") {
+                                println!("Version: {}", version);
+                            }
+                            if let Some(patternizer_name) = metadata.get("patternizer_name") {
+                                println!("Patternizer: {}", patternizer_name);
+                            }
+                            if let Some(timestamp) = metadata.get("timestamp") {
+                                println!("Created: {}", timestamp);
+                            }
+                            if let Some(cache_size) = metadata.get("cache_size") {
+                                println!("Cache entries: {}", cache_size);
+                            }
+                            if let Some(pattern_count) = metadata.get("pattern_count") {
+                                println!("Registered patterns: {}", pattern_count);
+                            }
+                        }
+
+                        // Show cache content summary
+                        if let Some(cache_obj) = json_data["cache"].as_object() {
+                            println!(
+                                "─────────────────────────────────────────────────────────────────────────────────────"
+                            );
+                            println!("Cache Content Summary:");
+                            let mut cache_types: std::collections::HashMap<String, usize> =
+                                std::collections::HashMap::new();
+
+                            for node in cache_obj.iter() {
+                                let key = node.key.as_str();
+                                if let Some(result_type) = node.value["type"].as_str() {
+                                    *cache_types.entry(result_type.to_string()).or_insert(0) += 1;
+                                }
+
+                                // Show first few cache entries as examples
+                                if cache_types.values().sum::<usize>() <= 5 {
+                                    println!(
+                                        "  {} -> {}",
+                                        key,
+                                        node.value["type"].as_str().unwrap_or("Unknown")
+                                    );
+                                }
+                            }
+
+                            if cache_obj.len() > 5 {
+                                println!("  ... and {} more entries", cache_obj.len() - 5);
+                            }
+
+                            println!(
+                                "─────────────────────────────────────────────────────────────────────────────────────"
+                            );
+                            println!("Result Type Distribution:");
+                            for (result_type, count) in cache_types {
+                                println!("  {}: {} entries", result_type, count);
+                            }
+                        }
+
+                        println!("File size: {} bytes", content.len());
+                    }
+                    Err(e) => {
+                        println!("❌ Failed to parse cache file: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("❌ Failed to read cache file: {}", e);
+            }
+        }
+    } else {
+        println!("❌ No cache file found");
+        println!("💡 To create a cache, run: c2r convert <some_file.c>");
+        println!("   The cache will be automatically generated during conversion.");
+    }
+}
+pub fn clear_cache() {
+    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+        format!(
+            "{}/.c2r/cache",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+        )
+    });
+
+    match std::fs::remove_dir_all(&cache_dir) {
+        Ok(()) => {
+            println!("🗑️  Pattern cache cleared successfully");
+            println!("Cache directory removed: {}", cache_dir);
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                println!("ℹ️  No cache found to clear at: {}", cache_dir);
+            } else {
+                error!("Failed to clear cache: {}", e);
+            }
+        }
+    }
+    return;
+}
+pub fn clear_analysis_cache() {
+    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+        format!(
+            "{}/.c2r/cache",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+        )
+    });
+
+    match std::fs::read_dir(&cache_dir) {
+        Ok(entries) => {
+            let mut cleared_count = 0;
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    let path = entry.path();
+                    if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                        if file_name.starts_with("analysis_") && file_name.ends_with(".json") {
+                            match std::fs::remove_file(&path) {
+                                Ok(()) => {
+                                    cleared_count += 1;
+                                    println!("🗑️  Removed analysis cache: {}", file_name);
+                                }
+                                Err(e) => {
+                                    error!("Failed to remove {}: {}", file_name, e);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if cleared_count > 0 {
+                println!("✅ Cleared {} analysis cache files", cleared_count);
+            } else {
+                println!("ℹ️  No analysis cache files found to clear");
+            }
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                println!("ℹ️  No cache directory found at: {}", cache_dir);
+            } else {
+                error!("Failed to read cache directory: {}", e);
+            }
+        }
+    }
+    return;
+}
+pub fn create_demo_cache() {
+    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+        format!(
+            "{}/.c2r/cache",
+            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+        )
+    });
+
+    println!("🔧 Creating demo pattern cache...");
+
+    // Ensure cache directory exists
+    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+        error!("Failed to create cache directory: {}", e);
+        return;
+    }
+
+    // Create a Patternizer with some demo patterns and cache entries
+    let mut patternizer = crate::pattern::Patternizer::new();
+
+    // Add some realistic cache entries that would be created during conversion
+    patternizer.match_cache.insert(
+        "function_handler:int|main|(|)|{".to_string(),
+        crate::pattern::PatternResult::Match { consumed_tokens: 8 },
+    );
+
+    patternizer.match_cache.insert(
+        "function_handler:void|printf|(|const|char*|)|;".to_string(),
+        crate::pattern::PatternResult::NoMatch {
+            reason: "Function call, not declaration".to_string(),
+        },
+    );
+
+    patternizer.match_cache.insert(
+        "struct_handler:struct|Point|{|int|x|;|int|y|;|}|;".to_string(),
+        crate::pattern::PatternResult::Match {
+            consumed_tokens: 11,
+        },
+    );
+
+    patternizer.match_cache.insert(
+        "array_handler:int|arr|[|10|]|;".to_string(),
+        crate::pattern::PatternResult::CountOf {
+            offsets: vec![0..2, 4..6],
+        },
+    );
+
+    patternizer.match_cache.insert(
+        "typedef_handler:typedef|struct|Node|{|...|}|Node|;".to_string(),
+        crate::pattern::PatternResult::Sequence { range: 0..7 },
+    );
+    let cache_file = std::path::Path::new(&cache_dir).join("pattern_cache.json");
+
+    match patternizer.save_cache_to_json(&cache_file.to_string_lossy()) {
+        Ok(()) => {
+            println!("✅ Demo cache created successfully!");
+            println!("Cache file: {}", cache_file.display());
+            println!("Cache entries: {}", patternizer.match_cache.len());
+            println!("");
+            println!("Now try: c2r --show-cache");
+        }
+        Err(e) => {
+            error!("Failed to create demo cache: {}", e);
+        }
+    }
+}
+pub fn display_registry(context: &mut Context) {
+    println!("🗂️  Handler Registry Display");
+    println!(
+        "═══════════════════════════════════════════════════════════════════════════════════════"
+    );
+    context.display_full_context();
 }
