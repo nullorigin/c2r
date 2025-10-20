@@ -1,10 +1,27 @@
-use core::{cmp::{Eq, Ord, PartialOrd}, iter::DoubleEndedIterator, marker::{Send, Sync}, option::Option::None};
-use std::{
-    alloc::Layout, cmp::Ordering, fmt::{Debug, Display, Formatter}, fs::File, io::{BufRead, Error as IoError, ErrorKind as IoErrorKind, Read, Seek, SeekFrom, Write}, mem, ops::{self, Add, AddAssign, Bound, Deref, DerefMut, Index, IndexMut, RangeBounds, Sub, SubAssign}, path::PathBuf, ptr::{self}, slice, str::FromStr
-};
 use crate::{
     error::{C2RError, Kind, Reason},
     Result,
+};
+use core::{
+    cmp::{Eq, Ord},
+    iter::DoubleEndedIterator,
+    marker::{Send, Sync},
+    option::Option::None,
+};
+use std::{
+    alloc::Layout,
+    cmp::Ordering,
+    fmt::{Debug, Display, Formatter},
+    fs::File,
+    io::BufRead,
+    io::Read,
+    io::Write,
+    mem,
+    ops::{self, Add, Deref, DerefMut, Index, IndexMut, RangeBounds, Sub},
+    path::PathBuf,
+    ptr::{self},
+    slice,
+    str::FromStr,
 };
 
 // Alias for backwards compatibility
@@ -15,990 +32,6 @@ pub struct Paths {
     max_depth: usize,
     min_depth: usize,
 }
-
-#[derive(Debug)]
-pub struct Set<T: Eq + Ord> {
-    pointer: *mut T,
-    size: usize,
-    capacity: usize,
-}
-
-impl<T: Ord + Eq> Set<T> {
-    #[inline]
-    pub fn new() -> Self {
-        Self {
-            pointer: ptr::null_mut(),
-            size: 0,
-            capacity: 0,
-        }
-    }
-    #[inline]
-    pub fn alloc(size: usize, capacity: usize, zeroed: bool) -> Self {
-        let capacity = if capacity > size { capacity } else { size };
-        if capacity == 0 {
-            return Self { pointer: ptr::null_mut(), size: 0, capacity: 0, };
-        }
-        let layout = Layout::array::<T>(capacity).unwrap();
-        let pointer = match zeroed { true => unsafe { std::alloc::alloc_zeroed(layout) }, false => unsafe { std::alloc::alloc(layout) } };
-        Self {
-            pointer: pointer as *mut T,
-            size,
-            capacity,
-        }
-    }
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self::alloc(capacity, capacity, false)
-    }
-    pub fn resize(&mut self, size: usize) {
-        if size > self.capacity {
-            let capacity = std::cmp::max(self.capacity * 2, size);
-            let layout = Layout::array::<T>(capacity).unwrap();
-            let pointer = unsafe { std::alloc::realloc(self.pointer as *mut u8, layout, capacity * size_of::<T>()) };
-            match pointer.is_null() {
-                true => panic!("Failed allocation of: {} elements each with size: {}", capacity, size_of::<T>()),
-                false => {
-                    self.pointer = pointer as *mut T;
-                }
-            }
-            self.capacity = capacity;
-        } else if size == 0 {
-            self.dealloc();
-            return;
-        }
-        self.size = size;
-    }
-
-    #[inline]
-    pub fn dealloc(&mut self) {
-        if !self.pointer.is_null() {
-            let layout = Layout::array::<T>(self.capacity).unwrap();
-            unsafe {
-                std::alloc::dealloc(self.pointer as *mut u8, layout);
-            }
-            self.pointer = ptr::null_mut();
-            self.size = 0;
-            self.capacity = 0;
-        }
-    }
-
-    #[inline]
-    pub fn default() -> Self {
-        Self {
-            pointer: ptr::null_mut(),
-            size: 0,
-            capacity: 0,
-        }
-    }
-    #[inline]
-    pub fn copy_from(&mut self, other: Set<T>) {
-        if other.pointer.is_null() {
-            self.dealloc();
-            self.pointer = other.pointer;
-            return;
-        }
-        if self.capacity < other.size || self.pointer.is_null() {
-            self.pointer = unsafe { std::alloc::realloc(self.pointer as *mut u8, Layout::array::<T>(other.size).unwrap(), other.size * size_of::<T>()) } as *mut T;
-            self.capacity = other.size;
-        } 
-        unsafe { ptr::copy_nonoverlapping(other.pointer, self.pointer, other.size) };
-        self.size = other.size;
-    }
-    pub fn copy_from_slice(&mut self, slice: &[T]) {
-        if slice.is_empty() {
-            self.dealloc();
-            return;
-        }
-        if self.capacity < slice.len() {
-            self.pointer = unsafe { std::alloc::realloc(self.pointer as *mut u8, Layout::array::<T>(slice.len()).unwrap(), slice.len() * size_of::<T>()) } as *mut T;
-            self.capacity = slice.len();
-        }
-        unsafe { ptr::copy_nonoverlapping(slice.as_ptr(), self.pointer, slice.len()) };
-        self.size = slice.len();
-    }
-    #[inline]
-    pub fn as_ptr(&self) -> *const T {
-        self.pointer as *const T
-    }
-    #[inline]
-    pub fn as_mut_ptr(&mut self) -> *mut T {
-        self.pointer
-    }
-    #[inline]
-    pub fn deref(&self) -> Self {
-        self.clone()
-    }
-    #[inline]
-    pub fn size(&self) -> usize {
-        self.size
-    }
-    
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.size
-    }
-
-    #[inline]
-    pub fn capacity(&self) -> usize {
-        self.capacity
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.size == 0
-    }
-
-    pub fn clone_from(&mut self, other: &Set<T>) {
-        if self.capacity < other.size {
-            self.dealloc();
-            self.pointer = unsafe { std::alloc::alloc(Layout::array::<T>(other.size).unwrap()) } as *mut T;
-            self.capacity = other.size;
-        }
-        unsafe { ptr::copy_nonoverlapping(other.pointer, self.pointer, other.size) };
-        self.size = other.size;
-    }
-    #[inline]
-    pub fn from_raw_parts(pointer: *mut T, size: usize) -> Self {
-        Self {
-            pointer,
-            size,
-            capacity: size,
-        }
-    }
-    pub fn clone_from_slice(slice: &[T]) -> Self {
-        let mut set = Set::from_raw_parts(ptr::null_mut(), slice.len());
-        set.pointer = unsafe { std::alloc::alloc(Layout::array::<T>(slice.len()).unwrap()) } as *mut T;
-        set.capacity = slice.len();
-        unsafe { ptr::copy_nonoverlapping(slice.as_ptr(), set.pointer, slice.len()) };
-        set
-    }
-    #[inline]
-    pub fn as_slice(&self) -> &[T] {
-        if self.size == 0 || self.capacity == 0 || self.pointer.is_null() {
-            &[]
-        } else {
-            unsafe { slice::from_raw_parts(self.pointer, self.size) }
-        }
-    }
-
-    #[inline]
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        if self.size == 0 || self.capacity == 0 || self.pointer.is_null() {
-            &mut []
-        } else {
-            unsafe { slice::from_raw_parts_mut(self.pointer, self.size) }
-        }
-    }
-    #[inline]
-    pub fn split_at(&self, i: usize) -> (Set<T>, Set<T>) {
-        (Set {
-            pointer: self.pointer,
-            size: i,
-            capacity: i,
-        },
-        Set {
-            pointer: unsafe { self.pointer.add(i) },
-            size: self.size - i,
-            capacity: self.capacity - i,
-        })
-    }
-    #[inline]
-    pub fn split_at_mut(&mut self, i: usize) -> (&mut Set<T>, &mut Set<T>) {
-        ( unsafe { &mut * (self as *const Self as *mut Set<T>).add(0) },
-          unsafe { &mut * (self as *const Self as *mut Set<T>).add(i) } )
-    }
-    #[inline]
-    pub fn split_off(&mut self, i: usize) ->Self {
-        let right_size = self.size - i;
-        self.size = i;
-        let right = Self {
-            pointer: unsafe { self.pointer.add(i) },
-            size: right_size,
-            capacity: right_size,
-        };
-        right
-    }
-    
-    #[inline]
-    pub fn push(&mut self, v: T) {
-        if self.contains(&v) {
-            return;
-        }
-
-        if self.size == self.capacity {
-            let new_capacity = if self.capacity == 0 {
-                1
-            } else {
-                self.capacity * 2
-            };
-            self.reserve(new_capacity - self.capacity);
-        }
-
-        unsafe {
-            *self.pointer.add(self.size) = v;
-        }
-        self.size += 1;
-    }
-
-    #[inline]
-    pub fn pop(&mut self) -> Option<T> {
-        self.size -= 1;
-        unsafe { Some(ptr::read(self.pointer.add(self.size))) }
-    }
-
-    #[inline]
-    pub fn pop_at(&mut self, i: usize) -> Option<T> {
-        if i >= self.size {
-            None
-        } else {
-            self.size -= 1;
-            unsafe {
-                let ret = ptr::read(self.pointer.add(i));
-                if i < self.size {
-                    ptr::copy(
-                        self.pointer.add(i + 1),
-                        self.pointer.add(i),
-                        self.size - i,
-                    );
-                }
-                Some(ret)
-            }
-        }
-    }
-
-    #[inline]
-    pub fn clear(&mut self) {
-        self.size = 0;
-    }
-
-    #[inline]
-    pub fn index(&self, i: usize) -> Option<&T> {
-        unsafe { self.pointer.add(i).as_ref() }
-    }
-
-    #[inline]
-    pub fn index_mut(&mut self, i: usize) -> Option<&mut T> {
-        unsafe { self.pointer.add(i).as_mut() }
-    }
-
-
-    #[inline]
-    pub fn from_vec(vec: &Vec<T>) -> Self {
-        if vec.is_empty() {
-            return Set::new();
-        }
-        Set::from_raw_parts(vec.as_ptr() as *mut T, vec.len())
-    }
-    pub fn to_vec(&self) -> Vec<T> {
-        if self.size == 0 || self.capacity == 0 || self.pointer.is_null() {
-            return Vec::new();
-        }
-         unsafe { Vec::from_raw_parts(self.pointer, self.size, self.capacity) }
-    }
-    #[inline]
-    pub fn extend(&mut self, set: &Set<T>) {
-        if set.is_empty() {
-            return;
-        }
-
-        self.reserve(set.size);
-
-        let mut i = 0;
-        while i < set.size {
-            let item = unsafe { set.pointer.add(i).read() };
-            if !self.contains(&item) {
-                self.push(item);
-            }
-            i += 1;
-        }
-    }
-    #[inline]
-    pub fn extend_as_slice(&mut self, set: &[T]) {
-        if set.is_empty() {
-            return;
-        }
-
-        // Only add items that aren't already in the set
-        let mut i = 0;
-        let pointer = set.as_ptr();
-        while i < set.len() {
-            let item = unsafe { pointer.add(i).read() };
-            if !self.contains(&item) {
-                self.push(item);
-            }
-            i += 1;
-        }
-    }
-
-    #[inline]
-    pub fn reserve(&mut self, additional: usize) {
-        if additional == 0 {
-            return;
-        }
-        if self.capacity == 0 || self.pointer.is_null() {
-            self.pointer = unsafe {
-                std::alloc::alloc(Layout::array::<T>(additional).unwrap())
-            } as *mut T;
-            self.capacity = additional;
-            return;
-        }
-        let capacity = self.capacity + additional;
-        self.pointer = unsafe { 
-            std::alloc::realloc(self.pointer as *mut u8, Layout::array::<T>(self.capacity).unwrap(), capacity * mem::size_of::<T>(),) as *mut T
-        };
-        self.capacity = capacity;
-    }
-    #[inline]
-    pub fn sort(&mut self) {
-        if self.size <= 1 {
-            return;
-        }
-        
-        // Use insertion sort for smaller lists
-        if self.size <= 16 {
-            self.insertion_sort();
-        } else {
-            // Use quicksort for larger lists
-            self.quicksort(0, self.size - 1);
-        }
-        
-        // Use insertion sort to sort the last 16 elements
-        self.insertion_sort();
-    }
-    
-    #[inline]
-    pub fn insertion_sort(&mut self) {
-        for i in 1..self.size {
-            let mut j = i;
-            let key = unsafe { self.pointer.add(i).read() };
-            while j > 0 && unsafe { self.pointer.add(j - 1).read() < key } {
-                unsafe { self.pointer.add(j).write(self.pointer.add(j - 1).read()) };
-                j -= 1;
-            }
-            unsafe { self.pointer.add(j).write(key) };
-        }
-    }
-    
-    #[inline]
-    pub fn quicksort(&mut self, low: usize, high: usize) {
-        if low < high {
-            let pivot = self.partition(low, high);
-            let left_size = pivot - low;
-            let right_size = high - pivot;
-            if left_size < right_size {
-                self.quicksort(low, pivot - 1);
-                self.quicksort(pivot + 1, high);
-            } else {
-                self.quicksort(pivot + 1, high);
-                self.quicksort(low, pivot - 1);
-            }
-        }
-    }
-    
-    #[inline]
-    pub fn partition(&mut self, low: usize, high: usize) -> usize {
-        let pivot = unsafe { self.pointer.add(high) };
-        let mut i = low;
-        for j in low..high {
-            if unsafe { (*self.pointer.add(j)) <= *pivot } {
-                unsafe { ptr::swap(self.pointer.add(i), self.pointer.add(j)) };
-                i += 1;
-            }
-        }
-        unsafe { ptr::swap(self.pointer.add(i), self.pointer.add(high)) };
-        i
-    }
-    #[inline]
-    pub fn sort_by<F: FnMut(&T, &T) -> Ordering>(&mut self, f: F) {
-        self.as_mut_slice().sort_by(f);
-    }
-    #[inline]
-    pub fn sort_by_key<F: FnMut(&T) -> K, K: Ord>(&mut self, f: F) {
-        self.as_mut_slice().sort_by_key(f);
-    }
-    #[inline]
-    pub fn dedup(&mut self) {
-        if self.size <= 1 {
-            return;
-        }
-        
-        let mut write_idx = 1;
-        for read_idx in 1..self.size {
-            let mut is_unique = true;
-            
-            // Check if current element already exists in the processed portion
-            for i in 0..write_idx {
-                if unsafe { *self.pointer.add(read_idx) == *self.pointer.add(i) } {
-                    is_unique = false;
-                    break;
-                }
-            }
-            
-            // If unique, keep it
-            if is_unique {
-                unsafe {
-                    if write_idx != read_idx {
-                        ptr::copy_nonoverlapping(
-                            self.pointer.add(read_idx),
-                            self.pointer.add(write_idx),
-                            1
-                        );
-                    }
-                }
-                write_idx += 1;
-            }
-        }
-        
-        self.size = write_idx;
-    }
-    #[inline]
-    pub fn shrink_to_fit(&mut self) {
-        if self.size < self.capacity / 2 {
-            self.reserve(0);
-        }
-    }
-    #[inline]
-    pub fn size_of(&self) -> usize {
-        size_of::<Self>()
-    }
-    #[inline]
-    pub fn align_of(&self) -> usize {
-        align_of::<Self>()
-    }
-    #[inline]
-    pub fn drop(&mut self) {
-        if self.size > 0 {
-            unsafe {
-                ptr::drop_in_place(self.pointer);
-                self.size = 0;
-            }
-        }
-    }
-    #[inline]
-    pub fn swap(&mut self, i: usize, j: usize) {
-        if i < self.size && j < self.size && i != j {
-            unsafe {
-                ptr::swap(self.pointer.add(i), self.pointer.add(j));
-            }
-        }
-    }
-    #[inline]
-    pub fn swap_remove(&mut self, i: usize) -> T {
-        debug_assert!(i < self.size);
-        
-        let ret = unsafe { ptr::replace(self.pointer.add(i), ptr::read(self.pointer.add(self.size - 1))) };
-        self.size -= 1;
-        ret
-    }
-
-    #[inline]
-    pub fn retain<F: FnMut(&T) -> bool>(&mut self, mut f: F) {
-        let mut i = 0;
-        while i < self.size {
-            if !f(unsafe { &*self.pointer.add(i) }) {
-                let last = self.swap_remove(self.size - 1);
-                if i != self.size - 1 {
-                    unsafe { ptr::write(self.pointer.add(i), last) };
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
-    #[inline]
-    pub fn remove<F: FnMut(&T) -> bool>(&mut self, mut f: F) -> Option<T> {
-        let mut i = 0;
-        while i < self.size {
-            if f(unsafe { &*self.pointer.add(i) }) {
-                return Some(self.swap_remove(i));
-            } else {
-                i += 1;
-            }
-        }
-        None
-    }
-    pub fn replace(&mut self, i: usize, v: T) -> T {
-        unsafe { ptr::replace(self.pointer.add(i), v) }
-    }
-    #[inline]
-    pub fn truncate(&mut self, len: usize) {
-        if len < self.size {
-            unsafe {
-                let tail = self.size - len;
-                let ptr = self.pointer.add(len);
-                let mut i = 0;
-                while i < tail {
-                    ptr::drop_in_place(ptr.add(i));
-                    i += 1;
-                }
-                self.size = len;
-            }
-        }
-    }
-
-    #[inline]
-    pub fn insert(&mut self, i: usize, v: T) {
-        if i <= self.size && !self.contains(&v) {
-            self.reserve(1);
-            unsafe {
-                if i < self.size {
-                    ptr::copy(self.pointer.add(i), self.pointer.add(i + 1), self.size - i);
-                }
-                ptr::write(self.pointer.add(i), v);
-                self.size += 1;
-            }
-        }
-    }
-
-    #[inline]
-    pub fn iter(&self) -> slice::Iter<'_, T> {
-        unsafe { slice::from_raw_parts(self.pointer, self.size) }.iter()
-    }
-    
-    #[inline]
-    pub fn iter_mut(&mut self) -> slice::IterMut<'_, T> {
-        unsafe { slice::from_raw_parts_mut(self.pointer, self.size) }.iter_mut()
-    }
-
-    #[inline]
-    pub fn position<F: FnMut(&T) -> bool>(&self, mut f: F) -> Option<usize> {
-        for i in 0..self.size {
-            if f(unsafe { &*self.pointer.add(i) }) {
-                return Some(i);
-            }
-        }
-        None
-    }
-    #[inline]
-    pub fn contains(&self, value: &T) -> bool {
-        self.iter().any(|v| v == value)
-    }
-    #[inline]
-    pub fn map<F: FnMut(&T) -> T>(&self, mut f: F) -> Self {
-        let mut result = self.clone();
-        unsafe {
-            self.iter().for_each(|v| {
-                *result.pointer.add(result.size) = f(v);
-                result.size += 1;
-            });
-        }
-        result
-    }
-    #[inline]
-    pub fn find<F: FnMut(&T) -> bool>(&self, mut f: F) -> Option<&T> {
-        for i in 0..self.size {
-            unsafe {
-                let item = &*self.pointer.add(i);
-                if f(item) {
-                    return Some(item);
-                }
-            }
-        }
-        None
-    }
-    #[inline]
-    pub fn find_range<F: Fn(&T) -> bool>(&self, f: F) -> Option<(usize, usize)> {
-        if self.size == 0 {
-            return None;
-        }
-
-        let start = (0..self.size).find(|&i| f(unsafe { &*self.pointer.add(i) }))?;
-        let end = (start + 1..self.size)
-            .find(|&i| !f(unsafe { &*self.pointer.add(i) }))
-            .unwrap_or(self.size);
-
-        Some((start, end))
-    }
-    #[inline]
-    pub fn find_range_mut<F: FnMut(&T) -> bool>(&mut self, mut f: F) -> Option<(usize, usize)> {
-        if self.size == 0 {
-            return None;
-        }
-
-        let start = (0..self.size).find(|&i| f(unsafe { &*self.pointer.add(i) }))?;
-        let end = (start + 1..self.size)
-            .find(|&i| !f(unsafe { &*self.pointer.add(i) }))
-            .unwrap_or(self.size);
-
-        Some((start, end))
-    }
-    #[inline]
-    pub fn range_partition(&self, ranges: Set<(usize, usize)>) -> Set<Self> {
-        let mut subsets: Set<Self> = Set::new();
-        for (start, end) in ranges.iter() {
-            subsets.push(self.subset(*start, *end));
-        }
-        subsets
-    }
-    #[inline]
-    pub fn subdivide(&self, count: usize) -> Set<Self> {
-        if count == 0 || self.is_empty() {
-            return Set::new();
-        }
-
-        let mut subsets = Set::with_capacity(count);
-        let base_size = self.size / count;
-        let remainder = self.size % count;
-
-        let mut start = 0;
-        for i in 0..count {
-            let subset_size = base_size
-                + match i == count - 1 {
-                    true => remainder,
-                    false => 0,
-                };
-            let end = start + subset_size;
-            subsets.push(self.subset(start, end));
-            start = end;
-        }
-
-        subsets
-    }
-    #[inline]
-    pub fn subset(&self, start: usize, end: usize) -> Self {
-        match start >= self.size || end <= start || end > self.size {
-            true => Self::new(),
-            false => {
-                let len = end - start;
-                let mut data = Self::with_capacity(len);
-                unsafe {
-                    ptr::copy_nonoverlapping(self.pointer.add(start), data.pointer, len);
-                    data.size = len;
-                }
-                data
-            }
-        }
-    }
-    pub fn reverse(&self) -> Self {
-        let pointer = self.pointer;
-        let mut i = 0;
-        let mut j = self.size - 1;
-        while i < j {
-            unsafe { pointer.add(i).swap(pointer.add(j)); };
-            i += 1;
-            j -= 1;
-        }
-        Self { pointer, size: self.size, capacity: self.capacity, }
-    }
-    #[inline]
-    pub fn rotate(&self, start: usize, end: usize) -> Self {
-        if start <= self.size && end > start && end <= self.size {
-            let pointer = unsafe { self.pointer.add(start) };
-            let size = end - start;
-            let capacity = self.capacity - start;
-            Self {
-                pointer,
-                size,
-                capacity,
-            }
-        } else if start <= self.size && start > end && end <= self.size {
-            let pointer = unsafe { self.pointer.add(end) };
-            let mut i = 0;
-            let mut j = start - end;
-            while i < j {
-                unsafe { pointer.add(i).swap(pointer.add(j)); };
-                i += 1;
-                j -= 1;
-            }
-            Self {
-                pointer,
-                size: self.size - end,
-                capacity: self.capacity - end,
-            }
-        } else {
-            Self::new()
-        }
-    }
-}
-
-impl<T: Eq + Ord> Drop for Set<T> {
-    fn drop(&mut self) {
-        if self.capacity > 0 {
-            self.dealloc();
-        } else {
-            self.pointer = ptr::null_mut();
-        }
-    }
-}
-impl<T: Ord> Default for Set<T> {
-    fn default() -> Self {
-        Self {
-            pointer: ptr::null_mut(),
-            size: 0,
-            capacity: 0,
-        }
-    }
-}
-impl<T: Eq + Ord> Clone for Set<T> {
-    fn clone(&self) -> Self {
-        let result = Self::alloc(self.size, self.capacity, true);
-        unsafe {
-            result.pointer.copy_from_nonoverlapping(self.pointer, self.size);
-        }
-        result
-    }
-}
-impl<T: Ord> AsMut<Set<T>> for Set<T> {
-    fn as_mut(&mut self) -> &mut Set<T> {
-        self
-    }
-}
-impl<T: Ord> AsRef<Set<T>> for Set<T> {
-    fn as_ref(&self) -> &Set<T> {
-        self
-    }
-}
-impl<T:Eq + Ord> AddAssign for Set<T> {
-    fn add_assign(&mut self, other: Self) {
-        self.extend(&other);
-    }
-}
-impl<T:Eq + Ord> Add for Set<T> {
-    type Output = Set<T>;
-    fn add(self, other: Self) -> Self::Output {
-        let mut set = self;
-        set.extend(&other);
-        set
-    }
-}
-impl<T:Eq + Ord> SubAssign for Set<T> {
-    fn sub_assign(&mut self, other: Self) {
-        self.retain(|x| !other.contains(x));
-    }
-}
-impl<T:Eq + Ord> Sub for Set<T> {
-    type Output = Set<T>;
-    fn sub(self, other: Self) -> Self::Output {
-        let mut set = self;
-        set.retain(|x| !other.contains(x));
-        set
-    }
-}
-impl<T:Eq + Ord> Index<usize> for Set<T> {
-    type Output = T;
-    fn index(&self, i: usize) -> &Self::Output {
-        match i < self.size {
-            true => unsafe { &*self.pointer.add(i) },
-            false => panic!("index out of bounds"),
-        }
-    }
-}
-impl<T:Eq + Ord> IndexMut<usize> for Set<T> {
-    fn index_mut(&mut self, i: usize) -> &mut Self::Output {
-        match i < self.size {
-            true => unsafe { &mut *self.pointer.add(i) },
-            false => panic!("index out of bounds"),
-        }
-    }
-}
-impl<T:Eq + Ord> RangeBounds<T> for Set<T> {
-    fn start_bound(&self) -> Bound<&T> {
-        match self.size == 0 {
-            true => Bound::Unbounded,
-            false => Bound::Included(&self[0]),
-        }
-    }
-    fn end_bound(&self) -> Bound<&T> {
-        match self.size == 0 {
-            true => Bound::Unbounded,
-            false => Bound::Included(&self[self.size - 1]),
-        }
-    }
-}
-impl<T:Eq + Ord> From<Vec<T>> for Set<T> {
-    fn from(vec: Vec<T>) -> Self {
-        match vec.is_empty() {
-            true => Set::new(),
-            false => {
-                let size = vec.len();
-                let result = Self::alloc(size, size,false);
-                unsafe {
-                    result.pointer.copy_from_nonoverlapping(vec.as_ptr(), size);
-                }
-                result
-            }
-        }
-    }
-}
-impl<T: Ord> FromIterator<T> for Set<T> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let mut set = Set::new();
-        for item in iter {
-            set.push(item);
-        }
-        set
-    }
-}
-impl<T: Clone + Ord> Iterator for Set<T> {
-    type Item = T;
-    fn next(&mut self) -> Option<Self::Item> {
-        match self.size == 0 {
-            true => None,
-            false => {
-                let item = unsafe { (*self.pointer).clone() };
-                self.pop_at(0);
-                Some(item)
-            }
-        }
-    }
-}
-impl<T: Clone + Ord> DoubleEndedIterator for Set<T> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        match self.size == 0 {
-            true => None,
-            false => {
-                let index = self.size - 1;
-                let item = unsafe { (*self.pointer.add(index)).clone() };
-                self.pop_at(index);
-                Some(item)
-            }
-        }
-    }
-}
-impl<T: Clone + Ord> Extend<T> for Set<T> {
-    fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        for item in iter {
-            if !self.contains(&item) {
-                self.push(item);
-            }
-        }
-    }
-}
-impl<T:                             Eq + Ord> PartialOrd for Set<T> {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-impl<T: Eq + Ord> Ord for Set<T> {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Compare lengths first for quick inequality check
-        match self.size.cmp(&other.size) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // If equal lengths, compare elements
-        for i in 0..self.size {
-            match unsafe { (*self.pointer.add(i)).cmp(&*other.pointer.add(i)) } {
-                Ordering::Equal => continue,
-                ord => return ord,
-            }
-        }
-
-        Ordering::Equal
-    }
-}
-impl<T: Eq + Ord + AsRef<[u8]>> BufRead for Set<T> {
-    fn fill_buf(&mut self) -> std::result::Result<&[u8], IoError> {
-        match self.is_empty() {
-            true => Ok(&[]),
-            false => Ok(self[0].as_ref()),
-        }
-    }
-
-    fn consume(&mut self, amt: usize) {
-        self.size = self.size.saturating_sub(amt);
-        unsafe {
-            self.pointer = self.pointer.add(amt.min(self.size));
-        }
-    }
-
-    fn read_until(&mut self, byte: u8, buf: &mut Vec<u8>) -> std::result::Result<usize, IoError> {
-        let initial_len = buf.len();
-
-        for item in self.iter() {
-            let data = item.as_ref();
-            if let Some(pos) = data.iter().position(|&b| b == byte) {
-                buf.extend_from_slice(&data[..=pos]);
-                return Ok(buf.len() - initial_len);
-            }
-            buf.extend_from_slice(data);
-        }
-
-        Ok(buf.len() - initial_len)
-    }
-
-    fn read_line(&mut self, buf: &mut String) -> std::result::Result<usize, IoError> {
-        let _initial_len = buf.len();
-        let mut bytes = Vec::new();
-        let n = self.read_until(b'\n', &mut bytes)?;
-
-        buf.push_str(
-            std::str::from_utf8(&bytes)
-                .map_err(|_| IoError::new(IoErrorKind::InvalidData, "Invalid UTF-8"))?,
-        );
-
-        Ok(n)
-    }
-}
-
-impl<T: Clone + Ord + AsRef<[u8]> + From<Vec<u8>>> Write for Set<T> {
-    fn write(&mut self, buf: &[u8]) -> std::result::Result<usize, IoError> {
-        if !buf.is_empty() {
-            self.push(T::from(buf.to_vec()));
-        }
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::result::Result<(), IoError> {
-        Ok(())
-    }
-}
-
-impl<T: Ord + Eq + AsRef<[u8]>> Read for Set<T> {
-    fn read(&mut self, buf: &mut [u8]) -> std::result::Result<usize, IoError> {
-        if buf.is_empty() || self.is_empty() {
-            return Ok(0);
-        }
-
-        let mut total = 0;
-        for item in self.iter() {
-            let data = item.as_ref();
-            let n = std::cmp::min(data.len(), buf.len() - total);
-            if n > 0 {
-                buf[total..total + n].copy_from_slice(&data[..n]);
-                total += n;
-                if total == buf.len() {
-                    break;
-                }
-            }
-        }
-        Ok(total)
-    }
-}
-
-impl<T: Ord> Seek for Set<T> {
-    fn seek(&mut self, pos: SeekFrom) -> std::result::Result<u64, std::io::Error> {
-        match pos {
-            SeekFrom::Start(n) => match n <= self.size as u64 {
-                true => Ok(n),
-                false => Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "Invalid seek position",
-                )),
-            },
-            SeekFrom::End(n) => {
-                let new_pos = self.size as i64 + n;
-                match new_pos >= 0 && new_pos <= self.size as i64 {
-                    true => Ok(new_pos as u64),
-                    false => Err(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        "Invalid seek position",
-                    )),
-                }
-            }
-            SeekFrom::Current(_) => Err(std::io::Error::new(
-                std::io::ErrorKind::Unsupported,
-                "SeekFrom::Current not supported",
-            )),
-        }
-    }
-}
-impl<T: Eq + Ord> PartialEq for Set<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.size == other.size && self.iter().zip(other.iter()).all(|(a, b)| a == b)
-    }
-}
-
-
 
 #[derive(Debug)]
 pub struct List<K: Eq, V> {
@@ -1019,7 +52,7 @@ impl<K: Eq + Clone, V: Clone> Clone for List<K, V> {
     fn clone(&self) -> Self {
         let mut list = List::with_capacity(self.capacity);
         list.cursor = self.cursor;
-        
+
         // Properly clone the actual data, not just the pointers
         for i in 0..self.size {
             unsafe {
@@ -1028,7 +61,7 @@ impl<K: Eq + Clone, V: Clone> Clone for List<K, V> {
                 list.push(key, value);
             }
         }
-        
+
         list
     }
 }
@@ -1053,18 +86,21 @@ impl<K: Eq, V> List<K, V> {
         if capacity == 0 {
             return Self::new();
         }
-        
+
         let keys_layout = Layout::array::<K>(capacity).unwrap();
         let values_layout = Layout::array::<V>(capacity).unwrap();
-        
+
         let keys = unsafe { std::alloc::alloc(keys_layout) as *mut K };
         let values = unsafe { std::alloc::alloc(values_layout) as *mut V };
-        
+
         // Check if allocation succeeded
         if keys.is_null() || values.is_null() {
-            panic!("Failed to allocate memory for List with capacity {}", capacity);
+            panic!(
+                "Failed to allocate memory for List with capacity {}",
+                capacity
+            );
         }
-        
+
         Self {
             keys,
             values,
@@ -1079,33 +115,41 @@ impl<K: Eq, V> List<K, V> {
         if new_size <= self.capacity {
             return;
         }
-        
+
         // Ensure minimum capacity and proper growth
         let new_capacity = new_size.max(self.capacity * 2).max(4);
-        
+
         if self.keys.is_null() {
             *self = Self::with_capacity(new_capacity);
             return;
         }
-        
+
         let old_keys_layout = Layout::array::<K>(self.capacity).unwrap();
         let old_values_layout = Layout::array::<V>(self.capacity).unwrap();
-        
+
         let new_keys_layout = Layout::array::<K>(new_capacity).unwrap();
         let new_values_layout = Layout::array::<V>(new_capacity).unwrap();
-        
-        let new_keys = unsafe { 
-            std::alloc::realloc(self.keys as *mut u8, old_keys_layout, new_keys_layout.size()) as *mut K
+
+        let new_keys = unsafe {
+            std::alloc::realloc(
+                self.keys as *mut u8,
+                old_keys_layout,
+                new_keys_layout.size(),
+            ) as *mut K
         };
-        let new_values = unsafe { 
-            std::alloc::realloc(self.values as *mut u8, old_values_layout, new_values_layout.size()) as *mut V
+        let new_values = unsafe {
+            std::alloc::realloc(
+                self.values as *mut u8,
+                old_values_layout,
+                new_values_layout.size(),
+            ) as *mut V
         };
-        
+
         // Check if allocation succeeded
         if new_keys.is_null() || new_values.is_null() {
             panic!("Failed to allocate memory for List resize");
         }
-        
+
         self.keys = new_keys;
         self.values = new_values;
         self.capacity = new_capacity;
@@ -1113,26 +157,25 @@ impl<K: Eq, V> List<K, V> {
 
     #[inline]
     pub fn get(&self, key: &K) -> Option<&V> {
-        self.find_key_index(key).map(|index| unsafe { &*self.values.add(index) })
+        self.find_key_index(key)
+            .map(|index| unsafe { &*self.values.add(index) })
     }
 
     #[inline]
     pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
-        self.find_key_index(key).map(|index| unsafe { &mut *self.values.add(index) })
+        self.find_key_index(key)
+            .map(|index| unsafe { &mut *self.values.add(index) })
     }
 
     #[inline]
     pub fn get_at(&self, index: usize) -> Option<(&K, &V)> {
-        (index < self.size).then(|| unsafe { 
-            (&*self.keys.add(index), &*self.values.add(index)) 
-        })
+        (index < self.size).then(|| unsafe { (&*self.keys.add(index), &*self.values.add(index)) })
     }
 
     #[inline]
     pub fn get_at_mut(&mut self, index: usize) -> Option<(&K, &mut V)> {
-        (index < self.size).then(|| unsafe { 
-            (&*self.keys.add(index), &mut *self.values.add(index)) 
-        })
+        (index < self.size)
+            .then(|| unsafe { (&*self.keys.add(index), &mut *self.values.add(index)) })
     }
 
     #[inline]
@@ -1159,33 +202,33 @@ impl<K: Eq, V> List<K, V> {
     pub fn contains_key(&self, key: &K) -> bool {
         self.find_key_index(key).is_some()
     }
-    pub fn keys(&self) -> impl Iterator<Item = &K> {
+    pub fn keys(&self) -> impl Iterator<Item=&K> {
         (0..self.size).map(|i| unsafe { &*self.keys.add(i) })
     }
-    pub fn values(&self) -> impl Iterator<Item = &V> {
+    pub fn values(&self) -> impl Iterator<Item=&V> {
         (0..self.size).map(|i| unsafe { &*self.values.add(i) })
     }
-    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+    pub fn iter(&self) -> impl Iterator<Item=(&K, &V)> {
         (0..self.size).map(|i| unsafe { (&*self.keys.add(i), &*self.values.add(i)) })
-    }  
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = (&K, &mut V)> {
+    }
+    pub fn iter_mut(&mut self) -> impl Iterator<Item=(&K, &mut V)> {
         (0..self.size).map(|i| unsafe { (&*self.keys.add(i), &mut *self.values.add(i)) })
     }
     #[inline]
     pub fn cursor(&self) -> usize {
         self.cursor
     }
-    
+
     #[inline]
     pub fn capacity(&self) -> usize {
         self.capacity
     }
-    
+
     #[inline]
     pub fn size(&self) -> usize {
         self.size
     }
-    
+
     #[inline]
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         if let Some(index) = self.find_key_index(&key) {
@@ -1196,12 +239,12 @@ impl<K: Eq, V> List<K, V> {
             Some(old_value)
         } else {
             self.resize(self.size + 1);
-            
+
             // Safety check: ensure pointers are valid after resize
             if self.keys.is_null() || self.values.is_null() {
                 panic!("Invalid pointers after List resize - memory allocation failed");
             }
-            
+
             unsafe {
                 ptr::write(self.keys.add(self.size), key);
                 ptr::write(self.values.add(self.size), value);
@@ -1213,26 +256,30 @@ impl<K: Eq, V> List<K, V> {
 
     pub fn remove(&mut self, key: &K) -> Option<V> {
         let index = self.find_key_index(key)?;
-        
+
         let value = unsafe { ptr::read(self.values.add(index)) };
         unsafe { ptr::drop_in_place(self.keys.add(index)) };
-        
+
         let move_count = self.size - index - 1;
         if move_count > 0 {
             unsafe {
                 ptr::copy(self.keys.add(index + 1), self.keys.add(index), move_count);
-                ptr::copy(self.values.add(index + 1), self.values.add(index), move_count);
+                ptr::copy(
+                    self.values.add(index + 1),
+                    self.values.add(index),
+                    move_count,
+                );
             }
         }
-        
+
         self.size -= 1;
-        
+
         if self.cursor > index {
             self.cursor -= 1;
         } else if self.cursor == index && self.cursor >= self.size && self.size > 0 {
             self.cursor = self.size - 1;
         }
-        
+
         Some(value)
     }
 
@@ -1240,26 +287,30 @@ impl<K: Eq, V> List<K, V> {
         if index >= self.size {
             return None;
         }
-        
+
         let key = unsafe { ptr::read(self.keys.add(index)) };
         let value = unsafe { ptr::read(self.values.add(index)) };
-        
+
         let move_count = self.size - index - 1;
         if move_count > 0 {
             unsafe {
                 ptr::copy(self.keys.add(index + 1), self.keys.add(index), move_count);
-                ptr::copy(self.values.add(index + 1), self.values.add(index), move_count);
+                ptr::copy(
+                    self.values.add(index + 1),
+                    self.values.add(index),
+                    move_count,
+                );
             }
         }
-        
+
         self.size -= 1;
-        
+
         if self.cursor > index {
             self.cursor -= 1;
         } else if self.cursor == index && self.cursor >= self.size && self.size > 0 {
             self.cursor = self.size - 1;
         }
-        
+
         Some((key, value))
     }
 
@@ -1284,17 +335,17 @@ impl<K: Eq, V> List<K, V> {
         self.cursor = 0;
     }
     pub fn as_slice(&self) -> &[V] {
-        unsafe { std::slice::from_raw_parts(self.values, self.size) }
+        unsafe { slice::from_raw_parts(self.values, self.size) }
     }
     pub fn as_mut_slice(&mut self) -> &mut [V] {
-        unsafe { std::slice::from_raw_parts_mut(self.values, self.size) }
+        unsafe { slice::from_raw_parts_mut(self.values, self.size) }
     }
 
     pub fn as_key_slice(&self) -> &[K] {
-        unsafe { std::slice::from_raw_parts(self.keys, self.size) }
+        unsafe { slice::from_raw_parts(self.keys, self.size) }
     }
     pub fn as_mut_key_slice(&mut self) -> &mut [K] {
-        unsafe { std::slice::from_raw_parts_mut(self.keys, self.size) }
+        unsafe { slice::from_raw_parts_mut(self.keys, self.size) }
     }
     pub fn to_vec(&self) -> Vec<(K, V)> {
         (0..self.size)
@@ -1331,8 +382,10 @@ impl<K: Eq, V> List<K, V> {
     }
     pub fn sort_by_key(self, compare: fn(&K, &K) -> Ordering) -> List<K, V> {
         for i in 0..self.size {
-            for j in i+1..self.size {
-                if compare(unsafe { &*self.keys.add(i) }, unsafe { &*self.keys.add(j) }) > Ordering::Equal {
+            for j in i + 1..self.size {
+                if compare(unsafe { &*self.keys.add(i) }, unsafe { &*self.keys.add(j) })
+                    > Ordering::Equal
+                {
                     unsafe { self.keys.add(i).swap(self.keys.add(j)) };
                     unsafe { self.values.add(i).swap(self.values.add(j)) };
                 }
@@ -1342,8 +395,11 @@ impl<K: Eq, V> List<K, V> {
     }
     pub fn sort_by_value(self, compare: fn(&V, &V) -> Ordering) -> List<K, V> {
         for i in 0..self.size {
-            for j in i+1..self.size {
-                if compare(unsafe { &*self.values.add(i) }, unsafe { &*self.values.add(j) }) > Ordering::Equal {
+            for j in i + 1..self.size {
+                if compare(unsafe { &*self.values.add(i) }, unsafe {
+                    &*self.values.add(j)
+                }) > Ordering::Equal
+                {
                     unsafe { self.values.add(i).swap(self.values.add(j)) };
                     unsafe { self.keys.add(i).swap(self.keys.add(j)) };
                 }
@@ -1353,20 +409,22 @@ impl<K: Eq, V> List<K, V> {
     }
     #[inline]
     pub fn current(&self) -> Option<(&K, &V)> {
-        (self.cursor < self.size).then(|| unsafe { 
-            (&*self.keys.add(self.cursor), &*self.values.add(self.cursor))
-        })
+        (self.cursor < self.size)
+            .then(|| unsafe { (&*self.keys.add(self.cursor), &*self.values.add(self.cursor)) })
     }
 
     #[inline]
     pub fn current_mut(&mut self) -> Option<(&K, &mut V)> {
         (self.cursor < self.size).then(|| unsafe {
-            (&*self.keys.add(self.cursor), &mut *self.values.add(self.cursor))
+            (
+                &*self.keys.add(self.cursor),
+                &mut *self.values.add(self.cursor),
+            )
         })
     }
 
     // Additional methods adapted from Set implementation
-    
+
     /// Properly deallocate the List memory
     #[inline]
     pub fn dealloc(&mut self) {
@@ -1374,7 +432,7 @@ impl<K: Eq, V> List<K, V> {
         if self.keys.is_null() || self.values.is_null() {
             return;
         }
-        
+
         // Drop all elements first
         if self.size > 0 {
             for i in 0..self.size {
@@ -1387,7 +445,7 @@ impl<K: Eq, V> List<K, V> {
                 }
             }
         }
-        
+
         // Deallocate memory
         if self.capacity > 0 {
             if let Ok(keys_layout) = Layout::array::<K>(self.capacity) {
@@ -1399,7 +457,7 @@ impl<K: Eq, V> List<K, V> {
                 }
             }
         }
-        
+
         // Reset all fields to prevent double-free
         self.keys = ptr::null_mut();
         self.values = ptr::null_mut();
@@ -1407,9 +465,9 @@ impl<K: Eq, V> List<K, V> {
         self.capacity = 0;
         self.cursor = 0;
     }
-    
+
     /// Copy data from another List
-    pub fn copy_from(&mut self, other: &List<K, V>) 
+    pub fn copy_from(&mut self, other: &List<K, V>)
     where
         K: Clone,
         V: Clone,
@@ -1418,12 +476,12 @@ impl<K: Eq, V> List<K, V> {
             self.clear();
             return;
         }
-        
+
         // Ensure sufficient capacity
         if self.capacity < other.size {
             self.resize(other.size);
         }
-        
+
         // Copy elements
         for i in 0..other.size {
             unsafe {
@@ -1433,7 +491,7 @@ impl<K: Eq, V> List<K, V> {
                 ptr::write(self.values.add(i), value);
             }
         }
-        
+
         self.size = other.size;
         self.cursor = other.cursor.min(self.size.saturating_sub(1));
     }
@@ -1444,18 +502,22 @@ impl<K: Eq, V> List<K, V> {
         K: Clone,
         V: Clone,
     {
-        assert_eq!(keys.len(), values.len(), "Keys and values must have same length");
-        
+        assert_eq!(
+            keys.len(),
+            values.len(),
+            "Keys and values must have same length"
+        );
+
         if keys.is_empty() {
             self.clear();
             return;
         }
-        
+
         // Ensure sufficient capacity
         if self.capacity < keys.len() {
             self.resize(keys.len());
         }
-        
+
         // Copy elements
         for i in 0..keys.len() {
             unsafe {
@@ -1463,7 +525,7 @@ impl<K: Eq, V> List<K, V> {
                 ptr::write(self.values.add(i), values[i].clone());
             }
         }
-        
+
         self.size = keys.len();
         self.cursor = 0;
     }
@@ -1487,7 +549,7 @@ impl<K: Eq, V> List<K, V> {
     }
 
     /// Get mutable raw pointer to values
-    #[inline]  
+    #[inline]
     pub fn as_mut_value_ptr(&mut self) -> *mut V {
         self.values
     }
@@ -1497,7 +559,7 @@ impl<K: Eq, V> List<K, V> {
         if additional == 0 {
             return;
         }
-        
+
         let new_capacity = self.capacity + additional;
         self.resize(new_capacity);
     }
@@ -1508,15 +570,20 @@ impl<K: Eq, V> List<K, V> {
         K: Clone,
         V: Clone,
     {
-        assert!(at <= self.size, "Split index {} out of bounds for List of size {}", at, self.size);
-        
+        assert!(
+            at <= self.size,
+            "Split index {} out of bounds for List of size {}",
+            at,
+            self.size
+        );
+
         if at == self.size {
             return Self::new();
         }
-        
+
         let right_size = self.size - at;
         let mut right = Self::with_capacity(right_size);
-        
+
         // Copy elements to new List
         for i in 0..right_size {
             unsafe {
@@ -1526,25 +593,29 @@ impl<K: Eq, V> List<K, V> {
                 ptr::write(right.values.add(i), value);
             }
         }
-        
+
         right.size = right_size;
-        
+
         // Truncate this List
         self.size = at;
         if self.cursor >= at {
             self.cursor = at.saturating_sub(1);
         }
-        
+
         right
     }
 
     /// Push a key-value pair to the end of the List
     pub fn push(&mut self, key: K, value: V) {
         if self.size >= self.capacity {
-            let new_capacity = if self.capacity == 0 { 4 } else { self.capacity * 2 };
+            let new_capacity = if self.capacity == 0 {
+                4
+            } else {
+                self.capacity * 2
+            };
             self.resize(new_capacity);
         }
-        
+
         unsafe {
             ptr::write(self.keys.add(self.size), key);
             ptr::write(self.values.add(self.size), value);
@@ -1557,17 +628,17 @@ impl<K: Eq, V> List<K, V> {
         if self.size == 0 {
             return None;
         }
-        
+
         self.size -= 1;
         let key = unsafe { ptr::read(self.keys.add(self.size)) };
         let value = unsafe { ptr::read(self.values.add(self.size)) };
-        
+
         if self.cursor >= self.size && self.size > 0 {
             self.cursor = self.size - 1;
         } else if self.size == 0 {
             self.cursor = 0;
         }
-        
+
         Some((key, value))
     }
 
@@ -1576,28 +647,32 @@ impl<K: Eq, V> List<K, V> {
         if index >= self.size {
             return None;
         }
-        
+
         let key = unsafe { ptr::read(self.keys.add(index)) };
         let value = unsafe { ptr::read(self.values.add(index)) };
-        
+
         // Shift elements down
         let move_count = self.size - index - 1;
         if move_count > 0 {
             unsafe {
                 ptr::copy(self.keys.add(index + 1), self.keys.add(index), move_count);
-                ptr::copy(self.values.add(index + 1), self.values.add(index), move_count);
+                ptr::copy(
+                    self.values.add(index + 1),
+                    self.values.add(index),
+                    move_count,
+                );
             }
         }
-        
+
         self.size -= 1;
-        
+
         // Update cursor
         if self.cursor > index {
             self.cursor -= 1;
         } else if self.cursor == index && self.cursor >= self.size && self.size > 0 {
             self.cursor = self.size - 1;
         }
-        
+
         Some((key, value))
     }
 
@@ -1610,9 +685,9 @@ impl<K: Eq, V> List<K, V> {
         if other.is_empty() {
             return;
         }
-        
+
         self.reserve(other.size);
-        
+
         for i in 0..other.size {
             unsafe {
                 let key = (*other.keys.add(i)).clone();
@@ -1624,7 +699,12 @@ impl<K: Eq, V> List<K, V> {
 
     /// Create a List from raw parts (unsafe)
     #[inline]
-    pub unsafe fn from_raw_parts(keys: *mut K, values: *mut V, size: usize, capacity: usize) -> Self {
+    pub unsafe fn from_raw_parts(
+        keys: *mut K,
+        values: *mut V,
+        size: usize,
+        capacity: usize,
+    ) -> Self {
         Self {
             keys,
             values,
@@ -1635,13 +715,13 @@ impl<K: Eq, V> List<K, V> {
     }
 
     /// Consume the List and return raw parts
-    #[inline] 
+    #[inline]
     pub fn into_raw_parts(self) -> (*mut K, *mut V, usize, usize) {
         let keys = self.keys;
         let values = self.values;
         let size = self.size;
         let capacity = self.capacity;
-        std::mem::forget(self); // Prevent Drop from running
+        mem::forget(self); // Prevent Drop from running
         (keys, values, size, capacity)
     }
 
@@ -1661,7 +741,7 @@ impl<K: Eq, V> List<K, V> {
         if vec.is_empty() {
             return Self::new();
         }
-        
+
         let mut list = Self::with_capacity(vec.len());
         for (key, value) in vec {
             list.push(key, value);
@@ -1676,9 +756,7 @@ impl<K: Eq, V> List<K, V> {
         V: Clone,
     {
         (0..self.size)
-            .map(|i| unsafe {
-                ((*self.keys.add(i)).clone(), (*self.values.add(i)).clone())
-            })
+            .map(|i| unsafe { ((*self.keys.add(i)).clone(), (*self.values.add(i)).clone()) })
             .collect()
     }
 
@@ -1688,12 +766,12 @@ impl<K: Eq, V> List<K, V> {
         F: FnMut(&K, &V) -> bool,
     {
         let mut write_idx = 0;
-        
+
         for read_idx in 0..self.size {
             unsafe {
                 let key_ref = &*self.keys.add(read_idx);
                 let value_ref = &*self.values.add(read_idx);
-                
+
                 if f(key_ref, value_ref) {
                     if write_idx != read_idx {
                         let key = ptr::read(self.keys.add(read_idx));
@@ -1709,7 +787,7 @@ impl<K: Eq, V> List<K, V> {
                 }
             }
         }
-        
+
         self.size = write_idx;
         if self.cursor >= self.size && self.size > 0 {
             self.cursor = self.size - 1;
@@ -1784,7 +862,7 @@ impl<K: Eq, V> List<K, V> {
         K: Eq,
     {
         let mut new_list = List::with_capacity(self.size);
-        
+
         for i in 0..self.size {
             unsafe {
                 let key = ptr::read(self.keys.add(i));
@@ -1793,20 +871,23 @@ impl<K: Eq, V> List<K, V> {
                 new_list.push(new_key, new_value);
             }
         }
-        
+
         // Prevent drop of original list since we consumed it
-        std::mem::forget(self);
+        mem::forget(self);
         new_list
     }
 }
 
 impl<K: Eq, V: Eq> Index<usize> for List<K, V> {
     type Output = V;
-    
+
     #[inline]
     fn index(&self, index: usize) -> &Self::Output {
         if index >= self.size {
-            panic!("index out of bounds: the len is {} but the index is {}", self.size, index);
+            panic!(
+                "index out of bounds: the len is {} but the index is {}",
+                self.size, index
+            );
         }
         unsafe { &*self.values.add(index) }
     }
@@ -1815,15 +896,18 @@ impl<K: Eq, V: Eq> IndexMut<usize> for List<K, V> {
     #[inline]
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         if index >= self.size {
-            panic!("index out of bounds: the len is {} but the index is {}", self.size, index);
+            panic!(
+                "index out of bounds: the len is {} but the index is {}",
+                self.size, index
+            );
         }
         unsafe { &mut *self.values.add(index) }
     }
 }
 
-impl<K: Eq, V>  Iterator for List<K, V> {
+impl<K: Eq, V> Iterator for List<K, V> {
     type Item = V;
-    
+
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor >= self.size {
@@ -1836,7 +920,7 @@ impl<K: Eq, V>  Iterator for List<K, V> {
     }
 }
 
-impl<K: Eq, V>  DoubleEndedIterator for List<K, V> {
+impl<K: Eq, V> DoubleEndedIterator for List<K, V> {
     #[inline]
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.cursor >= self.size {
@@ -1869,7 +953,7 @@ impl<K: Eq, V> AsMut<List<K, V>> for List<K, V> {
 }
 
 impl<K: Eq, V> Extend<(K, V)> for List<K, V> {
-    fn extend<T: IntoIterator<Item = (K, V)>>(&mut self, iter: T) {
+    fn extend<T: IntoIterator<Item=(K, V)>>(&mut self, iter: T) {
         for (key, value) in iter {
             self.insert(key, value);
         }
@@ -1897,8 +981,6 @@ impl<K: Eq + Clone, V: Clone> From<Vec<(&K, &V)>> for List<K, V> {
 unsafe impl<K: Eq + Send + Sync, V: Send + Sync> Send for List<K, V> {}
 unsafe impl<K: Eq + Send + Sync, V: Send + Sync> Sync for List<K, V> {}
 
-
-impl<T: Eq + Ord> Eq for Set<T> {}
 impl Paths {
     pub fn new() -> Self {
         Self {
@@ -1909,18 +991,28 @@ impl Paths {
     }
 
     pub fn get_at(&self, index: usize) -> Result<&PathBuf> {
-        self.paths
-            .get(index)
-            .ok_or(C2RError::new(Kind::Io, Reason::Not("found"), Some("Path not found".to_string())))
+        self.paths.get(index).ok_or(C2RError::new(
+            Kind::Io,
+            Reason::Not("found"),
+            Some("Path not found".to_string()),
+        ))
     }
 
     pub fn set_at(&mut self, path: PathBuf, index: usize) -> Result<()> {
         if !path.exists() {
-            return Err(C2RError::new(Kind::Io, Reason::Not("found"), Some("Path not found".to_string())));
+            return Err(C2RError::new(
+                Kind::Io,
+                Reason::Not("found"),
+                Some("Path not found".to_string()),
+            ));
         }
         let count = path.components().count();
         if count < self.min_depth || count > self.max_depth {
-            return Err(C2RError::new(Kind::Io, Reason::Depth("invalid"), Some("Path depth is out of range".to_string())));
+            return Err(C2RError::new(
+                Kind::Io,
+                Reason::Invalid("depth"),
+                Some("Path depth is out of range".to_string()),
+            ));
         }
         if index >= self.paths.len() {
             self.paths.resize_with(index + 1, PathBuf::new);
@@ -1933,11 +1025,19 @@ impl Paths {
         self.paths.clear();
         for path in paths {
             if !path.exists() {
-                return Err(C2RError::new(Kind::Io, Reason::Not("found"), Some("Path not found".to_string())));
+                return Err(C2RError::new(
+                    Kind::Io,
+                    Reason::Not("found"),
+                    Some("Path not found".to_string()),
+                ));
             }
             let count = path.components().count();
             if count < self.min_depth || count > self.max_depth {
-                return Err(C2RError::new(Kind::Io, Reason::Depth("invalid"), Some("Path depth is out of range".to_string())));
+                return Err(C2RError::new(
+                    Kind::Io,
+                    Reason::Invalid("depth"),
+                    Some("Path depth is out of range".to_string()),
+                ));
             }
             self.paths.push(path);
         }
@@ -1971,7 +1071,11 @@ impl Paths {
             .collect();
 
         if filtered.is_empty() {
-            return Err(C2RError::new(Kind::Io, Reason::Invalid("paths"), Some("No valid paths found".to_string())));
+            return Err(C2RError::new(
+                Kind::Io,
+                Reason::Invalid("paths"),
+                Some("No valid paths found".to_string()),
+            ));
         }
         self.paths = filtered;
         self.paths.sort_unstable();
@@ -1982,7 +1086,11 @@ impl Paths {
     pub fn read(&self, index: usize) -> Result<String> {
         let path = self.get_at(index)?;
         if !path.exists() || !path.is_file() {
-            return Err(C2RError::new(Kind::Io, Reason::Not("found"), Some("Path is not a file".to_string())));
+            return Err(C2RError::new(
+                Kind::Io,
+                Reason::Not("found"),
+                Some("Path is not a file".to_string()),
+            ));
         }
         let mut buf = String::new();
         File::open(path)?.read_to_string(&mut buf)?;
@@ -1992,7 +1100,11 @@ impl Paths {
     pub fn write(&self, index: usize, contents: &str) -> Result<()> {
         let path = self.get_at(index)?;
         if !path.exists() || !path.is_file() {
-            return Err(C2RError::new(Kind::Io, Reason::Invalid("path"), Some("Path is not a file".to_string())));
+            return Err(C2RError::new(
+                Kind::Io,
+                Reason::Invalid("path"),
+                Some("Path is not a file".to_string()),
+            ));
         }
         File::create(path)?.write_all(contents.as_bytes())?;
         Ok(())
@@ -2007,7 +1119,11 @@ impl Paths {
 
     pub fn write_all(&self, contents: &[String]) -> Result<()> {
         if contents.len() != self.paths.len() {
-            return Err(C2RError::new(Kind::Io, Reason::Length("invalid"), Some("Contents length does not match paths length".to_string())));
+            return Err(C2RError::new(
+                Kind::Io,
+                Reason::Length("invalid"),
+                Some("Contents length does not match paths length".to_string()),
+            ));
         }
         for (i, content) in contents.iter().enumerate() {
             self.write(i, content)?;
@@ -2096,7 +1212,11 @@ impl FromStr for Paths {
             .collect();
         match !paths.is_empty() {
             true => Ok(Self::from(paths)),
-            false => Err(C2RError::new(Kind::Io, Reason::Invalid("input"), Some("No valid paths".to_string()))),
+            false => Err(C2RError::new(
+                Kind::Io,
+                Reason::Invalid("input"),
+                Some("No valid paths".to_string()),
+            )),
         }
     }
 }
@@ -2340,7 +1460,7 @@ unsafe fn grisu_round(buffer: &mut u64, delta: u64, mut rest: u64, ten_kappa: u6
     while rest < wp_w
         && delta - rest >= ten_kappa
         && (rest + ten_kappa < wp_w || // closer
-            wp_w - rest > rest + ten_kappa - wp_w)
+        wp_w - rest > rest + ten_kappa - wp_w)
     {
         *buffer -= 1;
         rest += ten_kappa;
@@ -2440,9 +1560,9 @@ unsafe fn digit_gen(w: FramePointer, mp: FramePointer, mut delta: u64, mut k: i1
                     one.f,
                     wp_w.f
                         * match index < 9 {
-                            true => POW10[-(kappa as isize) as usize] as u64,
-                            false => 0,
-                        },
+                        true => POW10[-(kappa as isize) as usize] as u64,
+                        false => 0,
+                    },
                 )
             };
             return (buffer, k);
@@ -2508,12 +1628,7 @@ unsafe fn write_num(n: &mut u64, curr: &mut isize, buf_ptr: *mut u8, lut_ptr: *c
     }
 }
 
-pub fn write<W: Write>(
-    wr: &mut W,
-    positive: bool,
-    mut n: u64,
-    exponent: i16,
-) -> Result<()> {
+pub fn write<W: Write>(wr: &mut W, positive: bool, mut n: u64, exponent: i16) -> Result<()> {
     if !positive {
         wr.write_all(b"-")?;
     }
@@ -2535,7 +1650,8 @@ pub fn write<W: Write>(
             wr.write_all(slice::from_raw_parts(
                 buf_ptr.offset(curr),
                 BUF_LEN - curr as usize,
-            )).map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
+            ))
+                .map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
         };
     } else if exponent < 0 {
         let mut e = safe_abs(exponent);
@@ -2581,7 +1697,8 @@ pub fn write<W: Write>(
                 wr.write_all(slice::from_raw_parts(
                     buf_ptr.offset(curr),
                     BUF_LEN - curr as usize,
-                )).map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
+                ))
+                    .map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
             };
         }
 
@@ -2693,7 +1810,9 @@ pub fn write<W: Write>(
             ))
         }?;
 
-        return wr.write_all(&ZEROFILL[..exponent as usize]).map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())));
+        return wr
+            .write_all(&ZEROFILL[..exponent as usize])
+            .map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())));
     }
 
     let mut e = exponent as u64;

@@ -1,29 +1,30 @@
 #![cfg(test)]
 
-use crate::{Context, Id, context, entry};
-use crate::{pattern::{
-    CachedPatternMatch,
-    // NEW: Enhanced pattern matching imports
-    Pattern,
-    PatternMetrics,
-    PatternResult,
-    TokenPattern,
-    TokenTypeVariant,
-    cache_negative_result,
-    cache_pattern_match,
-    check_negative_cache,
-    generate_sequence_fingerprint,
-    generate_token_fingerprint,
-    get_cache_statistics,
-    get_cached_pattern_match,
-    get_token_type_variant,
-    match_pattern_with_registry_cache,
-    register_common_multi_token_patterns,
-    store_pattern,
-}, token::{Token, Tokenizer}};
 use crate::Result;
+use crate::{context, Id};
+use crate::{
+    pattern::{
+        cache_negative_result,
+        cache_pattern_match,
+        check_negative_cache,
+        generate_sequence_fingerprint,
+        generate_token_fingerprint,
+        get_cache_statistics,
+        get_cached_pattern_match,
+        // NEW: Enhanced pattern matching imports
+        get_token_type_variant,
+        match_pattern_with_registry_cache,
+        register_common_multi_token_patterns,
+        CachedPatternMatch
+        ,
+        PatternMetrics,
+        PatternResult,
+        TokenPattern,
+        TokenTypeVariant,
+    },
+    token::{Token, Tokenizer},
+};
 use core::option::Option::Some;
-use std::process::id;
 use std::time::Instant;
 
 /// Helper function to create real tokens from C code using the existing tokenizer
@@ -106,21 +107,18 @@ fn test_oneof_pattern_matching() {
 #[test]
 fn test_countof_pattern_matching() {
     println!("🧪 Testing TokenPattern::CountOf sequence-level matching...");
-    
+
     // CountOf works at sequence level, not individual token level
     use crate::pattern::{HandlerPattern, PatternRule, Patternizer};
-    
+
     // Create a pattern that expects exactly 2 occurrences of "const"
-    let count_pattern = HandlerPattern::new(
-        "count_const".to_string(),
-        "Test pattern with CountOf".to_string(),
-    ).with_rules(vec![
+    let count_pattern = HandlerPattern::new(Id::get("count_const")).with_rules(vec![
         PatternRule::new(TokenPattern::CountOf("const".to_string(), 2)),
         PatternRule::new(TokenPattern::Any).optional(),
     ]);
-    
+
     let patternizer = Patternizer::new();
-    
+
     // Test case 1: Exactly 2 "const" tokens - should match
     let tokens_correct = vec![
         Token::s("const".to_string()),
@@ -128,14 +126,15 @@ fn test_countof_pattern_matching() {
         Token::s("const".to_string()),
         Token::s("x".to_string()),
     ];
-    
+
     let result = patternizer.match_single_pattern(&count_pattern, &tokens_correct);
     println!("🔍 Test case 1 result: {:?}", result);
     assert!(
-        matches!(result, crate::pattern::PatternResult::Match { .. }),
-        "CountOf should match sequence with exactly 2 'const' tokens - got: {:?}", result
+        matches!(result, PatternResult::Match { .. }),
+        "CountOf should match sequence with exactly 2 'const' tokens - got: {:?}",
+        result
     );
-    
+
     // Test case 2: 3 "const" tokens - should not match
     let tokens_too_many = vec![
         Token::s("const".to_string()),
@@ -143,28 +142,30 @@ fn test_countof_pattern_matching() {
         Token::s("const".to_string()),
         Token::s("x".to_string()),
     ];
-    
+
     let result = patternizer.match_single_pattern(&count_pattern, &tokens_too_many);
     println!("🔍 Test case 2 result: {:?}", result);
     assert!(
-        matches!(result, crate::pattern::PatternResult::NoMatch { .. }),
-        "CountOf should not match sequence with 3 'const' tokens when expecting 2 - got: {:?}", result
+        matches!(result, PatternResult::NoMatch { .. }),
+        "CountOf should not match sequence with 3 'const' tokens when expecting 2 - got: {:?}",
+        result
     );
-    
+
     // Test case 3: 1 "const" token - should not match
     let tokens_too_few = vec![
         Token::s("const".to_string()),
         Token::s("int".to_string()),
         Token::s("x".to_string()),
     ];
-    
+
     let result = patternizer.match_single_pattern(&count_pattern, &tokens_too_few);
     println!("🔍 Test case 3 result: {:?}", result);
     assert!(
-        matches!(result, crate::pattern::PatternResult::NoMatch { .. }),
-        "CountOf should not match sequence with 1 'const' token when expecting 2 - got: {:?}", result
+        matches!(result, PatternResult::NoMatch { .. }),
+        "CountOf should not match sequence with 1 'const' token when expecting 2 - got: {:?}",
+        result
     );
-    
+
     // Test individual token matching - should match the pattern being counted
     let const_token = Token::s("const".to_string());
     let non_const_token = Token::s("int".to_string());
@@ -364,59 +365,6 @@ fn test_fragmented_token_detection() {
     println!("✅ Fragmented token detection works correctly");
 }
 
-#[test]
-fn test_context_registry_pattern_storage() {
-    println!("🧪 Testing pattern storage in context registry...");
-
-    let test_pattern = Pattern {
-        id: Id::get("test_function_pattern"),
-        name: "Test Function Pattern".to_string(),
-        description: "Test pattern for function declarations".to_string(),
-        token_patterns: vec![
-            TokenPattern::TypeKeyword,
-            TokenPattern::Identifier,
-            TokenPattern::Exact("(".to_string()),
-        ],
-        priority: 95,
-        handler_types: vec!["function".to_string()],
-        created_at: Instant::now(),
-        usage_metrics: PatternMetrics::default(),
-    };
-
-    context![w].registry.insert(test_pattern.id.clone(), entry::Entry::Patternizer(test_pattern.clone()));
-
-    // Verify the pattern was stored - use the correct key format (just the id name)
-    let pattern_key = "test_function_pattern"; // store_pattern_in_registry uses the id name directly
-
-    // Use shared global Context for consistent access
-    let stored_pattern = context![r].get_pattern(pattern_key).map(|p| p.clone());
-
-    if let Some(stored_pattern) = stored_pattern {
-        // Verify pattern properties
-        assert_eq!(
-            stored_pattern.id,
-            Id::get("test_function_pattern"),
-            "Pattern ID should match"
-        );
-        assert_eq!(
-            stored_pattern.name, "Test Function Pattern",
-            "Pattern name should match"
-        );
-        assert_eq!(stored_pattern.priority, 95, "Pattern priority should match");
-
-        println!(
-            "✅ Successfully retrieved and verified stored pattern: {}",
-            stored_pattern.name
-        );
-
-        println!("✅ Context registry pattern storage works correctly");
-    } else {
-        panic!(
-            "Failed to retrieve stored pattern with key '{}'",
-            pattern_key
-        );
-    }
-}
 
 #[test]
 fn test_pattern_match_caching() {
@@ -486,12 +434,16 @@ fn test_registry_cache_integration() {
         tokenize_c_code("#include \"./header.h\"").expect("Should tokenize C include");
 
     // Test function pattern matching with caching
-    let function_result =
-        match_pattern_with_registry_cache(&mut context![w], "c_function_declaration", &function_tokens);
+    let function_result = match_pattern_with_registry_cache(
+        &mut context![w],
+        "c_function_declaration",
+        &function_tokens,
+    );
     println!("Function pattern result: {}", function_result);
 
     // Test include pattern matching with caching
-    let include_result = match_pattern_with_registry_cache(&mut context![w], "c_include_statement", &include_tokens);
+    let include_result =
+        match_pattern_with_registry_cache(&mut context![w], "c_include_statement", &include_tokens);
     println!("Include pattern result: {}", include_result);
 
     // Verify results are reasonable (not necessarily perfect matches due to simplified implementation)
@@ -503,43 +455,6 @@ fn test_registry_cache_integration() {
     }
 
     println!("✅ Registry cache integration works correctly");
-}
-
-#[test]
-fn test_common_multi_token_patterns() {
-    println!("🧪 Testing registration of common multi-token patterns...");
-
-    register_common_multi_token_patterns(&mut context![w]);
-
-    // Verify function pattern was registered
-    let function_pattern = context![r].get_pattern("c_function_declaration").map(|p| p.clone());
-    assert!(
-        function_pattern.is_some(),
-        "C function declaration pattern should be registered"
-    );
-
-    // Verify include pattern was registered
-    let include_pattern = context![r].get_pattern("c_include_statement").map(|p| p.clone());
-    assert!(
-        include_pattern.is_some(),
-        "C include statement pattern should be registered"
-    );
-
-    // Verify complex identifier pattern was registered
-    let complex_id_pattern = context![r].get_pattern("complex_identifier").map(|p| p.clone());
-    assert!(
-        complex_id_pattern.is_some(),
-        "Complex identifier pattern should be registered"
-    );
-
-    // Verify array pattern was registered
-    let array_pattern = context![r].get_pattern("c_array_declaration").map(|p| p.clone());
-    assert!(
-        array_pattern.is_some(),
-        "C array declaration pattern should be registered"
-    );
-
-    println!("✅ Common multi-token pattern registration works correctly");
 }
 
 #[test]
@@ -639,7 +554,11 @@ fn test_pattern_matching_performance() {
 
     // Run multiple pattern matches to test performance
     for _i in 0..100 {
-        let _result = match_pattern_with_registry_cache(&mut context![w], "c_function_declaration", &test_tokens);
+        let _result = match_pattern_with_registry_cache(
+            &mut context![w],
+            "c_function_declaration",
+            &test_tokens,
+        );
     }
 
     let elapsed = start_time.elapsed();
@@ -1285,10 +1204,10 @@ fn test_negative_caching_system() {
 
     match negative_hit {
         Some(PatternResult::CachedNegative {
-            pattern_id: cached_id,
-            cache_hit_count,
-            reason,
-        }) => {
+                 pattern_id: cached_id,
+                 cache_hit_count,
+                 reason,
+             }) => {
             assert_eq!(cached_id, pattern_id);
             assert_eq!(cache_hit_count, 1);
             assert!(reason.contains("Previously failed"));

@@ -1,6 +1,7 @@
-use crate::{expect_byte, impl_integer, impl_signed, impl_unsigned, json::Parser, Result, C2RError, Kind, Reason};
-
-
+use crate::{
+    expect_byte, impl_integer, impl_signed, impl_unsigned, json::Parser, C2RError, Kind, Reason,
+    Result,
+};
 
 /// NaN value represented in `Number` type. NaN is equal to itself.
 pub const NAN: Number = Number {
@@ -62,8 +63,8 @@ impl Number {
     pub unsafe fn from_parts_unchecked(positive: bool, mantissa: u64, exponent: i16) -> Self {
         Number {
             category: positive as u8,
-            exponent: exponent,
-            mantissa: mantissa,
+            exponent,
+            mantissa,
         }
     }
 
@@ -394,7 +395,6 @@ impl From<std::num::TryFromIntError> for NumberOutOfScope {
         NumberOutOfScope
     }
 }
-
 
 impl_signed!(isize, i8, i16, i32, i64);
 impl_unsigned!(usize, u8, u16, u32, u64);

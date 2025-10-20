@@ -6,8 +6,11 @@
     non_upper_case_globals
 )]
 
-use crate::{convert, ArrayInfo, CommentInfo, EnumInfo, ExpressionInfo, FunctionInfo, GlobalInfo, Id, IncludeInfo, MacroInfo, StructInfo, TypedefInfo};
-use crate::{Token, tok};
+use crate::{tok, Token};
+use crate::{
+    ArrayInfo, CommentInfo, ControlFlowInfo, EnumInfo, ExpressionInfo, FunctionInfo,
+    GlobalInfo, Id, IncludeInfo, MacroInfo, StructInfo, TypedefInfo, VariableInfo,
+};
 use std::fmt;
 use std::ops::Range;
 
@@ -25,13 +28,13 @@ pub enum ExtractedElement {
     Comment(ExtractedComment),
     Expression(ExtractedExpression),
     ControlFlow(ExtractedControlFlow),
+    Variable(ExtractedVariable),
 }
 
 /// Represents an extracted C function
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedFunction {
     pub id: Id,
-    pub code: String,
     pub info: FunctionInfo,
     pub tokens: Vec<Token>,
     pub token_range: Range<usize>,
@@ -77,7 +80,6 @@ impl fmt::Display for ExtractedFunction {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedStruct {
     pub id: Id,
-    pub code: String,
     pub info: StructInfo,
     pub tokens: Vec<Token>,
     pub token_range: Range<usize>,
@@ -98,10 +100,9 @@ impl fmt::Display for ExtractedStruct {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedEnum {
     pub id: Id,
-    pub code: String,
     pub info: EnumInfo,
     pub tokens: Vec<Token>,
-    pub token_range: std::ops::Range<usize>,
+    pub token_range: Range<usize>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -123,10 +124,9 @@ impl fmt::Display for ExtractedEnum {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedTypedef {
     pub id: Id,
-    pub code: String,
     pub info: TypedefInfo,
     pub tokens: Vec<Token>,
-    pub token_range: std::ops::Range<usize>,
+    pub token_range: Range<usize>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -141,7 +141,6 @@ impl fmt::Display for ExtractedTypedef {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedGlobal {
     pub id: Id,
-    pub code: String,
     pub info: GlobalInfo,
     pub tokens: Vec<Token>,
     pub token_range: Range<usize>,
@@ -176,7 +175,7 @@ impl fmt::Display for ExtractedGlobal {
 
         write!(f, "{}", result)?;
 
-        if let Some(init)    = &self.info.initializer {
+        if let Some(init) = &self.info.initializer {
             let init_tokens: Vec<String> = init.chars().map(|t| t.to_string()).collect();
             let init_str = init_tokens.join(" ");
             write!(f, " = {}", init_str)?;
@@ -190,10 +189,9 @@ impl fmt::Display for ExtractedGlobal {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedMacro {
     pub id: Id,
-    pub code: String,
     pub info: MacroInfo,
     pub tokens: Vec<Token>,
-    pub token_range: std::ops::Range<usize>,
+    pub token_range: Range<usize>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -207,7 +205,8 @@ impl fmt::Display for ExtractedMacro {
 
         if !self.info.body.is_empty() {
             let body_text = self
-                .info.body
+                .info
+                .body
                 .chars()
                 .map(|t| t.to_string())
                 .collect::<Vec<_>>()
@@ -222,7 +221,6 @@ impl fmt::Display for ExtractedMacro {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedInclude {
     pub id: Id,
-    pub code: String,
     pub info: IncludeInfo,
     pub tokens: Vec<Token>,
     pub token_range: Range<usize>,
@@ -239,10 +237,9 @@ impl fmt::Display for ExtractedInclude {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedArray {
     pub id: Id,
-    pub code: String,
     pub info: ArrayInfo,
     pub tokens: Vec<Token>,
-    pub token_range: std::ops::Range<usize>,
+    pub token_range: Range<usize>,
     pub metadata: Vec<(String, String)>,
 }
 
@@ -252,10 +249,18 @@ impl fmt::Display for ExtractedArray {
             write!(
                 f,
                 "let mut {}: [{}; {}] = [Default::default(); {}];",
-                self.info.name, self.info.element_type, self.info.size.as_ref().unwrap(), self.info.size.as_ref().unwrap()
+                self.info.name,
+                self.info.element_type,
+                self.info.size.as_ref().unwrap(),
+                self.info.size.as_ref().unwrap()
             )
         } else {
-            write!(f, "{}[{}]", self.info.name, self.info.size.as_ref().unwrap())
+            write!(
+                f,
+                "{}[{}]",
+                self.info.name,
+                self.info.size.as_ref().unwrap()
+            )
         }
     }
 }
@@ -264,24 +269,24 @@ impl fmt::Display for ExtractedArray {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedComment {
     pub id: Id,
-    pub code: String,
     pub info: CommentInfo,
     pub tokens: Vec<Token>,
     pub token_range: Range<usize>,
     pub metadata: Vec<(String, String)>,
 }
+
 impl fmt::Display for ExtractedComment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.info.is_documentation {
-            write!(f, "/// {}", self.code)
+            write!(f, "/// {}", self.info.content)
         } else if self.info.is_multiline {
-            if self.code.contains('\n') {
-                write!(f, "/* {} */", self.code)
+            if self.info.content.contains('\n') {
+                write!(f, "/* {} */", self.info.content)
             } else {
-                write!(f, "// {}", self.code)
+                write!(f, "// {}", self.info.content)
             }
         } else {
-            write!(f, "// {}", self.code)
+            write!(f, "// {}", self.info.content)
         }
     }
 }
@@ -290,7 +295,6 @@ impl fmt::Display for ExtractedComment {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedExpression {
     pub id: Id,
-    pub code: String,
     pub info: ExpressionInfo,
     pub tokens: Vec<Token>,
     pub token_range: Range<usize>,
@@ -328,42 +332,45 @@ impl fmt::Display for ExtractedExpression {
 /// Represents an extracted C control flow statement
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ExtractedControlFlow {
-    pub control_type: String,
-    pub condition: Vec<Token>,
-    pub body: Vec<Token>,
+    pub id: Id,
+    pub info: ControlFlowInfo,
     pub tokens: Vec<Token>,
-    pub code: String,
+    pub token_range: Range<usize>,
     pub metadata: Vec<(String, String)>,
 }
 
 impl fmt::Display for ExtractedControlFlow {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let condition_str = self
-            .condition
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let body_str = self
-            .body
-            .iter()
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(" ");
+        let condition_str = &self.info.condition;
+        let body_str = &self.info.body;
 
-        match self.control_type.as_str() {
+        match self.info.flow_type.as_str() {
             "if" => write!(f, "if {} {{ {} }}", condition_str, body_str),
             "while" => write!(f, "while {} {{ {} }}", condition_str, body_str),
             "for" => write!(f, "for {} {{ {} }}", condition_str, body_str),
             _ => write!(
                 f,
                 "{} {} {{ {} }}",
-                self.control_type, condition_str, body_str
+                self.info.flow_type, condition_str, body_str
             ),
         }
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ExtractedVariable {
+    pub id: Id,
+    pub info: VariableInfo,
+    pub tokens: Vec<Token>,
+    pub token_range: Range<usize>,
+    pub metadata: Vec<(String, String)>,
+}
+
+impl fmt::Display for ExtractedVariable {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.info.name)
+    }
+}
 // Helper for mapping C type strings to Rust types
 
 pub fn tokens_to_rust(tokens: &[Token]) -> String {
@@ -555,15 +562,15 @@ fn token_to_rust(token: &Token) -> String {
         tok!(',') => ",".to_string(),
         tok!('*') => "*".to_string(),
         tok!(id)
-            if *id == "=="
-                || *id == "!="
-                || *id == "<="
-                || *id == ">="
-                || *id == "&&"
-                || *id == "||" =>
-        {
-            id.to_string()
-        }
+        if *id == "=="
+            || *id == "!="
+            || *id == "<="
+            || *id == ">="
+            || *id == "&&"
+            || *id == "||" =>
+            {
+                id.to_string()
+            }
         tok!(id) if *id == "++" => {
             // C's ++ operator has no direct equivalent in Rust
             // Best approximation is += 1
@@ -677,81 +684,3 @@ fn token_to_rust(token: &Token) -> String {
     }
 }
 
-/// Check if a token is one of the specified C qualifiers or specifiers
-pub fn is_c_qualifier_or_specifier(token: &Token) -> bool {
-    !token
-        .matches(vec![
-            tok!("const"),
-            tok!("volatile"),
-            tok!("static"),
-            tok!("extern"),
-            tok!("register"),
-            tok!("inline"),
-        ])
-        .iter()
-        .all(|x| x.is_none())
-}
-
-/// Check if a token is a C keyword that can be used in control flow
-pub fn is_c_control_keyword(token: &Token) -> bool {
-    !token
-        .matches(vec![
-            tok!("if"),
-            tok!("else"),
-            tok!("while"),
-            tok!("for"),
-            tok!("do"),
-            tok!("switch"),
-            tok!("case"),
-            tok!("default"),
-            tok!("return"),
-            tok!("break"),
-            tok!("continue"),
-            tok!("goto"),
-        ])
-        .iter()
-        .all(|x| x.is_none())
-}
-
-/// Try to convert C type tokens to Rust using the existing mapping system
-/// This can be used by handlers when processing token patterns
-pub fn to_rust_string(tokens: &[Token]) -> Option<String> {
-    // Single token type
-    if tokens.len() == 1 {
-        return convert::convert_type_token(&tokens[0]);
-    }
-    Token::tokens_to_string(
-        convert::convert_type_tokens(tokens.to_vec()).as_slice(),
-        0,
-        tokens.len(),
-    )
-}
-
-/// Try to find multi-token type pattern starting at the given position
-/// Returns a tuple of (matched_length, converted_type) if found, or None if not found
-pub fn find_c_type_pattern(tokens: &[Token], start_pos: usize) -> Option<(usize, String)> {
-    if start_pos >= tokens.len() {
-        return None;
-    }
-
-    // Try different lengths of token sequences (up to 3 tokens for cases like "const unsigned int")
-    for len in (1..=3).rev() {
-        if start_pos + len > tokens.len() {
-            continue;
-        }
-
-        let type_tokens = &tokens[start_pos..start_pos + len];
-        if let Some(rust_type) = convert::convert_type_tokens(type_tokens.to_vec()) {
-            return Some((len, rust_type.to_string()));
-        }
-    }
-
-    // Try single token type conversion
-    if convert::is_type_token(&tokens[start_pos]) {
-        if let Some(rust_type) = convert::convert_type_token(&tokens[start_pos]) {
-            return Some((1, rust_type));
-        }
-    }
-
-    None
-}

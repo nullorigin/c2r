@@ -1,22 +1,36 @@
 use std::io::Write;
 
-use crate::{json::{Number, Object, Value,ESCAPED}, C2RError, Kind, Reason, Result};
-
+use crate::{
+    json::{Number, Object, Value, ESCAPED}, C2RError, Kind, Reason,
+    Result,
+};
 
 /// Default trait for serializing JSONValue into string.
 pub trait Generator {
-    type W: std::io::Write;
+    type W: Write;
 
     fn get_writer(&mut self) -> &mut Self::W;
 
     #[inline(always)]
     fn write(&mut self, slice: &[u8]) -> Result<()> {
-        self.get_writer().write_all(slice).map_err(|_| C2RError::new(Kind::Io, Reason::Write("failed"), Some("Failed to write to writer".to_string())))
+        self.get_writer().write_all(slice).map_err(|_| {
+            C2RError::new(
+                Kind::Io,
+                Reason::Write("failed"),
+                Some("Failed to write to writer".to_string()),
+            )
+        })
     }
 
     #[inline(always)]
     fn write_char(&mut self, ch: u8) -> Result<()> {
-        self.get_writer().write_all(&[ch]).map_err(|_| C2RError::new(Kind::Io, Reason::Write("failed"), Some("Failed to write to writer".to_string())))
+        self.get_writer().write_all(&[ch]).map_err(|_| {
+            C2RError::new(
+                Kind::Io,
+                Reason::Write("failed"),
+                Some("Failed to write to writer".to_string()),
+            )
+        })
     }
 
     fn write_min(&mut self, slice: &[u8], min: u8) -> Result<()>;
@@ -268,13 +282,13 @@ impl Generator for PrettyGenerator {
 }
 
 /// Writer Generator, this uses a custom writer to store the JSON result.
-pub struct WriterGenerator<'a, W: 'a + std::io::Write> {
+pub struct WriterGenerator<'a, W: 'a + Write> {
     writer: &'a mut W,
 }
 
 impl<'a, W> WriterGenerator<'a, W>
 where
-    W: 'a + std::io::Write,
+    W: 'a + Write,
 {
     pub fn new(writer: &'a mut W) -> Self {
         WriterGenerator { writer }
@@ -283,7 +297,7 @@ where
 
 impl<'a, W> Generator for WriterGenerator<'a, W>
 where
-    W: std::io::Write,
+    W: Write,
 {
     type W = W;
 
@@ -294,12 +308,14 @@ where
 
     #[inline(always)]
     fn write_min(&mut self, _: &[u8], min: u8) -> Result<()> {
-        self.writer.write_all(&[min]).map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
+        self.writer
+            .write_all(&[min])
+            .map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
     }
 }
 
 /// Pretty Writer Generator, this uses a custom writer to store the JSON result and add indent.
-pub struct PrettyWriterGenerator<'a, W: 'a + std::io::Write> {
+pub struct PrettyWriterGenerator<'a, W: 'a + Write> {
     writer: &'a mut W,
     dent: u16,
     spaces_per_indent: u16,
@@ -307,7 +323,7 @@ pub struct PrettyWriterGenerator<'a, W: 'a + std::io::Write> {
 
 impl<'a, W> PrettyWriterGenerator<'a, W>
 where
-    W: 'a + std::io::Write,
+    W: 'a + Write,
 {
     pub fn new(writer: &'a mut W, spaces: u16) -> Self {
         PrettyWriterGenerator {
@@ -320,7 +336,7 @@ where
 
 impl<'a, W> Generator for PrettyWriterGenerator<'a, W>
 where
-    W: std::io::Write,
+    W: Write,
 {
     type W = W;
 
@@ -331,7 +347,9 @@ where
 
     #[inline(always)]
     fn write_min(&mut self, slice: &[u8], _: u8) -> Result<()> {
-        self.writer.write_all(slice).map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
+        self.writer
+            .write_all(slice)
+            .map_err(|e| C2RError::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
     }
 
     fn new_line(&mut self) -> Result<()> {

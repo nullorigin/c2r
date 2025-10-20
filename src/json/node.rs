@@ -28,7 +28,14 @@ impl std::fmt::Debug for Node {
 }
 impl Display for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "({} {} {} {})", self.key.as_str(), self.value, self.left, self.right)
+        write!(
+            f,
+            "({} {} {} {})",
+            self.key.as_str(),
+            self.value,
+            self.left,
+            self.right
+        )
     }
 }
 impl PartialEq for Node {
@@ -114,7 +121,6 @@ impl<'a> DoubleEndedIterator for IterMut<'a> {
     }
 }
 
-
 impl<'a> IterMut<'a> {
     /// Create an empty iterator that always returns `None`
     pub fn empty() -> Self {
@@ -124,12 +130,9 @@ impl<'a> IterMut<'a> {
     }
 }
 
-
 impl<'a> Iter<'a> {
     /// Create an empty iterator that always returns `None`
     pub fn empty() -> Self {
-        Iter {
-            inner: [].iter(),
-        }
+        Iter { inner: [].iter() }
     }
 }

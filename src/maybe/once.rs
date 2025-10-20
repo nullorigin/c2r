@@ -1,8 +1,5 @@
-use std::panic::{RefUnwindSafe, UnwindSafe};
-use std::ptr::null;
-use std::sync::atomic::AtomicU32;
-
 use crate::maybe::Maybe;
+use std::panic::{RefUnwindSafe, UnwindSafe};
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 
 unsafe impl<T: Send> Send for MaybeOnce<T> {}
@@ -11,6 +8,7 @@ impl<T> UnwindSafe for MaybeOnce<T> {}
 impl<T> RefUnwindSafe for MaybeOnce<T> {}
 
 use crate::maybe::futex::Futex;
+
 const INCOMPLETE: u32 = 0;
 const RUNNING: u32 = 1;
 const COMPLETE: u32 = 2;
@@ -60,13 +58,13 @@ impl<T> MaybeOnce<T> {
                             let ptr = &self.data as *const Maybe<T> as *mut Maybe<T>;
                             ptr.write(Maybe::Some(value));
                         }
-                        self.state.set(COMPLETE);
-                        self.state.futex_wake_all();
+                        self.state.inner.store(COMPLETE, Relaxed);
+                        self.state.futex_wake();
                         self.data.get()
                     }
                     Err(err) => {
-                        self.state.set(PANICKED);
-                        self.state.futex_wake_all();
+                        self.state.inner.store(PANICKED, Relaxed);
+                        self.state.futex_wake();
                         std::panic::resume_unwind(err);
                     }
                 }
@@ -100,7 +98,7 @@ impl<T> MaybeOnce<T> {
         // Force execution even if previously panicked
         let current_state = self.state.get();
         if current_state == PANICKED {
-            self.state.set(INCOMPLETE);
+            self.state.inner.store(INCOMPLETE, Relaxed);
         }
 
         self.call_once(f)
@@ -127,18 +125,18 @@ impl<T> MaybeOnce<T> {
                             let ptr = &self.data as *const Maybe<T> as *mut Maybe<T>;
                             ptr.write(Maybe::Some(value));
                         }
-                        self.state.set(COMPLETE);
-                        self.state.futex_wake_all();
+                        self.state.inner.store(COMPLETE, Relaxed);
+                        self.state.futex_wake();
                         Ok(self.data.get())
                     }
                     Ok(Err(err)) => {
-                        self.state.set(INCOMPLETE);
-                        self.state.futex_wake_all();
+                        self.state.inner.store(INCOMPLETE, Relaxed);
+                        self.state.futex_wake();
                         Err(err)
                     }
                     Err(panic_err) => {
-                        self.state.set(PANICKED);
-                        self.state.futex_wake_all();
+                        self.state.inner.store(PANICKED, Relaxed);
+                        self.state.futex_wake();
                         std::panic::resume_unwind(panic_err);
                     }
                 }
@@ -163,17 +161,17 @@ impl<T> MaybeOnce<T> {
 
     pub fn try_get(&self) -> Maybe<&T> {
         if self.state.get() == COMPLETE {
-            Maybe::Some(self.data.as_ref())
+            Maybe::Some(self.data.get())
         } else {
             Maybe::None
         }
     }
 
-    pub fn get(&self) -> Option<&T> {
+    pub fn get(&self) -> &T {
         if self.state.get() == COMPLETE {
-            Some(self.data.get())
+            self.data.get()
         } else {
-            None
+            panic!("Once instance has not completed")
         }
     }
 
@@ -225,7 +223,7 @@ impl<T> MaybeOnce<T> {
 
     pub fn reset(&mut self) {
         if self.state.get() != INCOMPLETE {
-            self.state.set(INCOMPLETE);
+            self.state.inner.store(INCOMPLETE, Relaxed);
             self.data = Maybe::None;
         }
     }
@@ -237,7 +235,7 @@ impl<T: Clone> Clone for MaybeOnce<T> {
             Maybe::Some(value) => {
                 let mut new_once = MaybeOnce::new();
                 new_once.data = Maybe::Some(value.clone());
-                new_once.state.set(COMPLETE);
+                new_once.state.inner.store(COMPLETE, Relaxed);
                 new_once
             }
             Maybe::None => MaybeOnce::new(),
@@ -276,8 +274,8 @@ impl<T> Drop for MaybeOnce<T> {
     fn drop(&mut self) {
         // Wake any waiting threads before dropping
         if self.state.get() == RUNNING {
-            self.state.set(PANICKED);
-            self.state.futex_wake_all();
+            self.state.inner.store(PANICKED, Relaxed);
+            self.state.futex_wake();
         }
         // Let Maybe<T> handle its own drop
     }

@@ -1,4 +1,4 @@
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::maybe::Maybe;
 
@@ -11,7 +11,7 @@ pub const CLOCK_MONOTONIC: i32 = 1;
 pub const ETIMEDOUT: i32 = 110;
 pub const EINTR: i32 = 4;
 
-#[derive(Debug, Clone,Copy,PartialEq,Eq,PartialOrd,Ord,Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(C)]
 pub struct Timespec {
     pub tv_sec: i64,
@@ -28,16 +28,68 @@ impl Futex {
             inner: AtomicU32::new(0),
         }
     }
-    pub fn futex_wait(&self, expected: u32, timeout: Option<core::time::Duration>) -> bool {
-        use core::sync::atomic::Ordering::Relaxed;
+    pub fn store(&self, value: u32, ordering: Ordering) {
+        self.inner.store(value, ordering);
+    }
+    pub fn load(&self, ordering: Ordering) -> u32 {
+        self.inner.load(ordering)
+    }
+    pub fn lock(&self) {
+        // Try to acquire the lock with compare_exchange
+        if self
+            .inner
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            return;
+        }
+
+        // If that fails, fall back to the slow path
+        self.lock_slow();
+    }
+
+    fn lock_slow(&self) {
+        loop {
+            // Wait for the lock to be released
+            while self.inner.load(Ordering::Relaxed) != 0 {
+                self.futex_wait(1, None);
+            }
+
+            // Try to acquire the lock again
+            if self
+                .inner
+                .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                return;
+            }
+        }
+    }
+
+    pub fn unlock(&self) {
+        self.inner.store(0, Ordering::Release);
+        self.futex_wake();
+    }
+
+    pub fn try_lock(&self) -> bool {
+        self.inner
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+    }
+
+    pub fn futex_wait(&self, expected: u32, timeout: Option<std::time::Duration>) -> bool {
         let mut timespec = None;
         // Calculate the timeout as an absolute timespec.
         if let Some(duration) = timeout {
-            timespec = Some(Timespec::now(CLOCK_MONOTONIC).checked_add_duration(&duration).expect("overflow"));
+            timespec = Some(
+                Timespec::now(CLOCK_MONOTONIC)
+                    .checked_add_duration(&duration)
+                    .expect("overflow"),
+            );
         }
         loop {
             // No need to wait if the value already changed.
-            if self.inner.load(Relaxed) != expected {
+            if self.inner.load(Ordering::Relaxed) != expected {
                 return true;
             }
 
@@ -86,23 +138,48 @@ impl Futex {
     }
 
     pub fn get(&self) -> u32 {
-        self.inner.load(core::sync::atomic::Ordering::Relaxed)
+        self.inner.load(Ordering::Relaxed)
     }
 
     pub fn set(&self, value: u32) {
-        self.inner.store(value, core::sync::atomic::Ordering::Relaxed);
+        self.inner.store(value, Ordering::Relaxed);
     }
 }
 impl Clone for Futex {
     fn clone(&self) -> Self {
         Self {
-            inner: core::sync::atomic::AtomicU32::new(self.inner.load(core::sync::atomic::Ordering::Relaxed)),
+            inner: AtomicU32::new(self.inner.load(Ordering::Relaxed)),
+        }
+    }
+}
+impl PartialEq for Futex {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.load(Ordering::Relaxed) == other.inner.load(Ordering::Relaxed)
+    }
+}
+impl Eq for Futex {}
+impl PartialOrd for Futex {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Futex {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.inner
+            .load(Ordering::Relaxed)
+            .cmp(&other.inner.load(Ordering::Relaxed))
+    }
+}
+impl Default for Futex {
+    fn default() -> Self {
+        Self {
+            inner: AtomicU32::new(0),
         }
     }
 }
 impl Drop for Futex {
     fn drop(&mut self) {
-        self.inner.store(0, core::sync::atomic::Ordering::Relaxed);
+        self.inner.store(0, Ordering::Relaxed);
     }
 }
 impl Timespec {
@@ -142,14 +219,10 @@ impl Timespec {
     }
 }
 
-
-
-
 unsafe extern "C" {
-    pub unsafe fn syscall(num: i32, ...) -> i32;
+    pub fn syscall(num: i32, ...) -> i32;
 }
 
 unsafe extern "C" {
-    unsafe fn __errno_location() -> *mut i32;
+    fn __errno_location() -> *mut i32;
 }
-

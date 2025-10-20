@@ -1,13 +1,14 @@
 //! Function handler implementation using trait-based system
 //! Uses Patternizer and Samplizer for intelligent pattern detection and processing
 
-use crate::common::{IdentifierCase};
-use crate::{Handlizer, PatternResult, RedirectRequest, context, match_patterns_with_context, report};
-use crate::{
-    Context, ConvertedFunction, ConvertedElement, ElementInfo, ExtractedFunction, ExtractedElement, HandlerPhase, HandlerReport, HandlerResult, Id, ReportLevel, Result, Handler
-};
+use crate::common::IdentifierCase;
 use crate::handlers::common::convert_identifier_to_rust;
 use crate::info::FunctionInfo;
+use crate::{gen_name, PatternResult, RedirectRequest, Token};
+use crate::{
+    Context, ConvertedElement, ConvertedFunction, ExtractedElement, ExtractedFunction, Handler,
+    HandlerResult, Id, Phase, Report, ReportLevel, Result,
+};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -28,591 +29,851 @@ impl FunctionHandler {
     pub fn new() -> Self {
         Self
     }
-    
-    /// Enhanced pattern detection using both Patternizer and Samplizer
-    fn detect_function_pattern(&self, patternizer: &mut crate::Patternizer, samplizer: &crate::Samplizer, tokens: &[crate::Token], token_range: Range<usize>) -> Result<(bool, f64)> {
-        // First use Patternizer for structural detection
-        let pattern_match = patternizer.match_pattern("function", tokens);
 
-        // Then use Samplizer for confidence scoring
-        let patterns = vec!["function_declaration".to_string(), "function_definition".to_string()];
-        let confidence = samplizer.analyze_with_range(&patterns, tokens, token_range)?;
+    /// Convert C type string to Rust type using TYPE_CONVERSION_MAP
+    /// Handles pointers, const qualifiers, arrays, and complex types
+    fn convert_c_type_to_rust(&self, c_type: &str) -> String {
+        use crate::pattern::TYPE_CONVERSION_MAP;
 
-        // Combined heuristics for function detection
-        let has_function_structure = self.has_function_structure(tokens);
-        let enhanced_confidence = if has_function_structure {
-            confidence * 1.3  // Boost confidence if structure looks function-like
-        } else {
-            confidence * 0.7  // Reduce if structure doesn't match
-        };
+        // Clean up the type string - normalize whitespace around * and []
+        let normalized = c_type
+            .replace(" *", "*")
+            .replace("* ", "*")
+            .replace(" [", "[")
+            .replace("[ ", "[")
+            .replace(" ]", "]")
+            .replace("] ", "]")
+            .trim()
+            .to_string();
 
-        let pattern_success = !matches!(pattern_match, crate::PatternResult::NoMatch { .. });
+        // Try direct lookup first
+        if let Some(rust_type) = TYPE_CONVERSION_MAP.convert_type(&normalized) {
+            return rust_type;
+        }
 
-        Ok((pattern_success || enhanced_confidence > 0.7, enhanced_confidence))
+        // Try with spaces (e.g., "const char *" vs "const char*")
+        let with_spaces = c_type.trim().to_string();
+        if let Some(rust_type) = TYPE_CONVERSION_MAP.convert_type(&with_spaces) {
+            return rust_type;
+        }
+
+        // Fallback: unknown type, return as-is with warning
+        eprintln!("⚠️  Unknown C type '{}', keeping as-is", c_type);
+        c_type.to_string()
     }
-    
-    /// Analyze token structure for function-like patterns - IMPROVED for accuracy
-    fn has_function_structure(&self, tokens: &[crate::Token]) -> bool {
-        if tokens.len() < 4 {  // Need at least: type name ( )
-            return false;
+
+    /// Enhanced pattern detection using both Patternizer and Samplizer
+    fn detect_pattern(
+        &self,
+        patternizer: &mut crate::Patternizer,
+        samplizer: &crate::Samplizer,
+        tokens: &[Token],
+        token_range: Range<usize>,
+    ) -> Result<(bool, f64)> {
+        if tokens.is_empty() {
+            return Ok((false, 0.0));
         }
-        
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        
-        // DEBUG: Print tokens being analyzed (remove this later)
-        if tokens.len() <= 30 {  // Only print for reasonable token sets
-            println!("🔍 Function Handler analyzing {} tokens: {:?}", tokens.len(), token_strings);
-        }
-        
-        // STEP 1: Only reject tokens that are clearly incompatible with function definitions
-        // Note: Don't reject "return", "if", etc. as they can appear INSIDE functions
-        for token_str in &token_strings {
-            if matches!(token_str.as_str(), 
-                "#include" | "#define" | "#ifdef" | "#ifndef" | "#endif" |  // preprocessor
-                "struct" | "enum" | "union" | "typedef"  // other type definitions
-            ) {
-                return false;
+
+        // Primary detection using patternizer for function patterns
+        let function_patterns = vec![
+            "function_definition".to_string(),
+            "function_declaration".to_string(),
+            "function_prototype".to_string(),
+        ];
+
+        let mut highest_confidence: f64 = 0.0;
+        let mut pattern_detected = false;
+
+        // Use patternizer to match function patterns
+        for pattern in &function_patterns {
+            match patternizer.match_pattern(pattern, tokens) {
+                PatternResult::Match { .. } => {
+                    pattern_detected = true;
+                    highest_confidence = highest_confidence.max(0.9);
+                }
+                PatternResult::CountOf { offsets } => {
+                    if !offsets.is_empty() {
+                        pattern_detected = true;
+                        highest_confidence = highest_confidence.max(0.6);
+                    }
+                }
+                _ => {}
             }
         }
-        
-        // STEP 2: Look for ANY function signature pattern in the token sequence
-        // (handles multiple functions in one sequence)
-        let mut found_any_function = false;
-        let mut i = 0;
-        
-        while i < token_strings.len() - 4 {  // Need at least 4 tokens ahead
-            // Look for return type
-            if matches!(token_strings[i].as_str(), 
-                "int" | "long" | "short" | "char" | "float" | "double" | "void" |
-                "unsigned" | "signed" | "const" | "static" | "extern" | "inline"
-            ) {
-                // Look for function name next
-                if i + 1 < token_strings.len() 
-                    && token_strings[i + 1].chars().all(|c| c.is_alphanumeric() || c == '_')
-                    && !token_strings[i + 1].chars().next().unwrap_or('0').is_numeric()
-                    && token_strings[i + 1].len() > 0 {
-                    
-                    // Look for opening parenthesis
-                    if i + 2 < token_strings.len() && token_strings[i + 2] == "(" {
-                        // Found potential function pattern: type name (
-                        found_any_function = true;
-                        break;
+
+        // Enhanced analysis with samplizer for code characteristics
+        let samplizer_result = samplizer.analyze_with_range(
+            &function_patterns,
+            tokens,
+            token_range.clone(),
+        ).unwrap_or(0.0);
+
+        // Detect function syntax patterns
+        let has_function_syntax = self.detect_function_syntax(tokens);
+        let syntax_confidence = if has_function_syntax { 0.7 } else { 0.0 };
+
+        // Combine confidence scores with weighted average
+        let combined_confidence = (highest_confidence * 0.4) + (samplizer_result * 0.2) + (syntax_confidence * 0.4);
+
+        // Accept if pattern detected OR if syntax looks like a function (even with lower confidence)
+        let final_detected = pattern_detected || (has_function_syntax && combined_confidence > 0.4) || has_function_syntax;
+
+        Ok((final_detected, combined_confidence.max(if has_function_syntax { 0.7 } else { 0.0 })))
+    }
+
+    /// Detect function syntax patterns
+    fn detect_function_syntax(&self, tokens: &[Token]) -> bool {
+        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+
+        if token_strings.len() < 3 {
+            return false; // Too short to be a function
+        }
+
+        // Check for return types
+        let has_return_type = token_strings.iter().any(|t| {
+            matches!(t.as_str(), "void" | "int" | "char" | "float" | "double" | "long" | "short" | "unsigned" | "signed")
+        });
+
+        // Check for function signature pattern: type identifier(params)
+        // Look for pattern: <type> <identifier> (
+        let has_function_signature = token_strings.windows(3).any(|window| {
+            matches!(window[0].as_str(), "void" | "int" | "char" | "float" | "double" | "long" | "short" | "unsigned" | "signed") &&
+                !window[1].is_empty() &&
+                window[1].chars().next().map_or(false, |c| c.is_alphabetic() || c == '_') &&
+                window[2] == "("
+        });
+
+        // Check for parameter parentheses
+        let has_params = token_strings.iter().any(|t| t == "(") &&
+            token_strings.iter().any(|t| t == ")");
+
+        // Check for function body (opening brace)
+        let has_body = token_strings.iter().any(|t| t == "{");
+
+        // Accept if: has return type AND (has signature OR (has params AND has body))
+        has_return_type && (has_function_signature || (has_params && has_body))
+    }
+
+    /// Extract function information using pattern analysis
+    fn extract_info(
+        &self,
+        tokens: &[Token],
+        pattern_results: &[PatternMatch],
+    ) -> Result<FunctionInfo> {
+        let mut function_info = FunctionInfo {
+            name: String::new(),
+            return_type: "void".to_string(),
+            parameters: Vec::new(),
+            is_static: false,
+            is_inline: false,
+            has_body: false,
+            complexity: "low".to_string(),
+            is_declaration: false,
+            is_definition: false,
+            is_extern: false,
+            is_unsafe: false,
+            is_variadic: false,
+            parameter_count: 0,
+            storage_class: None,
+        };
+
+        // Extract information from pattern matches
+        for pattern_match in pattern_results {
+            match pattern_match.pattern_name.as_str() {
+                "function_declaration" => {
+                    function_info.is_declaration = true;
+                    self.extract_declaration_info(tokens, &pattern_match.range, &mut function_info)?;
+                }
+                "function_definition" => {
+                    function_info.is_definition = true;
+                    function_info.has_body = self.detect_body(tokens, &pattern_match.range);
+                    self.extract_definition_info(tokens, &pattern_match.range, &mut function_info)?;
+                }
+                "function_prototype" => {
+                    self.extract_prototype_info(tokens, &pattern_match.range, &mut function_info)?;
+                }
+                "storage_class" => {
+                    self.extract_storage_class(tokens, &pattern_match.range, &mut function_info)?;
+                }
+                _ => {}
+            }
+        }
+
+        // Parse function signature using pattern-based approach
+        self.parse_function_signature_with_patterns(tokens, &mut function_info)?;
+
+        // Set complexity based on code characteristics
+        function_info.complexity = self.calculate_complexity(&function_info);
+
+        Ok(function_info)
+    }
+
+    /// Extract function declaration information using pattern matching
+    fn extract_declaration_info(&self, tokens: &[Token], range: &Range<usize>, info: &mut FunctionInfo) -> Result<()> {
+        let range_tokens = &tokens[range.clone()];
+
+        // Use pattern matching for storage class detection
+        let storage_patterns = ["static_specifier", "extern_specifier", "inline_specifier"];
+        for pattern in &storage_patterns {
+            // Simulate patternizer usage for storage class detection
+            if range_tokens.iter().any(|t| match pattern {
+                &"static_specifier" => t.to_string() == "static",
+                &"extern_specifier" => t.to_string() == "extern",
+                &"inline_specifier" => t.to_string() == "inline",
+                _ => false,
+            }) {
+                match *pattern {
+                    "static_specifier" => {
+                        info.is_static = true;
+                        info.storage_class = Some("static".to_string());
                     }
+                    "extern_specifier" => {
+                        info.is_extern = true;
+                        info.storage_class = Some("extern".to_string());
+                    }
+                    "inline_specifier" => info.is_inline = true,
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Calculate function complexity based on characteristics
+    fn calculate_complexity(&self, function_info: &FunctionInfo) -> String {
+        let mut complexity_score = 0;
+
+        // Base complexity from parameter count
+        complexity_score += function_info.parameter_count as i32;
+
+        // Add complexity for various characteristics
+        if function_info.is_variadic { complexity_score += 2; }
+        if function_info.has_body { complexity_score += 1; }
+        if function_info.is_unsafe { complexity_score += 3; }
+        if function_info.is_static { complexity_score += 1; }
+
+        // Return type complexity
+        match function_info.return_type.as_str() {
+            "void" => {}
+            "int" | "char" | "float" => complexity_score += 1,
+            "double" | "long" => complexity_score += 2,
+            _ if function_info.return_type.contains("*") => complexity_score += 3,
+            _ => complexity_score += 2,
+        }
+
+        match complexity_score {
+            0..=2 => "low".to_string(),
+            3..=6 => "medium".to_string(),
+            _ => "high".to_string(),
+        }
+    }
+
+    /// Extract function definition information using pattern-based detection
+    fn extract_definition_info(&self, tokens: &[Token], range: &Range<usize>, info: &mut FunctionInfo) -> Result<()> {
+        let range_tokens = &tokens[range.clone()];
+
+        // Extract return type using pattern matching approach
+        if let Some(return_type) = self.extract_return_type(range_tokens) {
+            info.return_type = return_type;
+        }
+
+        // Check for unsafe operations using pattern detection
+        let unsafe_patterns = ["pointer_operation", "memory_function", "unsafe_cast"];
+        info.is_unsafe = unsafe_patterns.iter().any(|pattern| {
+            range_tokens.iter().any(|t| match *pattern {
+                "pointer_operation" => t.to_string() == "*",
+                "memory_function" => matches!(t.to_string().as_str(), "malloc" | "free" | "memcpy" | "strcpy"),
+                "unsafe_cast" => t.to_string().contains("cast"),
+                _ => false,
+            })
+        });
+
+        Ok(())
+    }
+
+    /// Extract function prototype information using pattern analysis
+    fn extract_prototype_info(&self, tokens: &[Token], range: &Range<usize>, info: &mut FunctionInfo) -> Result<()> {
+        let range_tokens = &tokens[range.clone()];
+
+        // Check for variadic parameters using pattern matching
+        info.is_variadic = range_tokens.iter().any(|t| t.to_string() == "...");
+
+        Ok(())
+    }
+
+    /// Extract storage class information using pattern detection
+    fn extract_storage_class(&self, tokens: &[Token], range: &Range<usize>, info: &mut FunctionInfo) -> Result<()> {
+        let range_tokens = &tokens[range.clone()];
+
+        let storage_class_patterns = [
+            ("static", "static"),
+            ("extern", "extern"),
+            ("auto", "auto"),
+            ("register", "register"),
+        ];
+
+        for (pattern, class_name) in &storage_class_patterns {
+            if range_tokens.iter().any(|t| t.to_string() == *pattern) {
+                info.storage_class = Some(class_name.to_string());
+                break;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Detect function body using pattern-based brace matching
+    fn detect_body(&self, tokens: &[Token], range: &Range<usize>) -> bool {
+        let range_tokens = &tokens[range.clone()];
+        let mut brace_count = 0;
+
+        // Use pattern-based approach for body detection
+        for token in range_tokens {
+            match token.to_string().as_str() {
+                "{" => {
+                    brace_count += 1;
+                    return true; // Found opening brace indicates function body
+                }
+                ";" => {
+                    if brace_count == 0 {
+                        return false; // Semicolon without braces indicates declaration
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        false
+    }
+
+    /// Extract return type using pattern-based type detection
+    fn extract_return_type(&self, tokens: &[Token]) -> Option<String> {
+        let type_patterns = ["void", "int", "char", "float", "double", "long", "short", "unsigned", "signed"];
+
+        for (i, token) in tokens.iter().enumerate() {
+            let token_str = token.to_string();
+            if type_patterns.contains(&token_str.as_str()) {
+                // Check if next token is an identifier (function name) using pattern matching
+                if i + 1 < tokens.len() {
+                    let next_token = tokens[i + 1].to_string();
+                    if next_token.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                        return Some(token_str);
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Parse function signature using pattern-based identifier detection
+    fn parse_function_signature_with_patterns(&self, tokens: &[Token], info: &mut FunctionInfo) -> Result<()> {
+        let mut i = 0;
+        while i < tokens.len() {
+            let token_str = tokens[i].to_string();
+
+            // Look for function name pattern followed by opening parenthesis
+            if i + 1 < tokens.len() && tokens[i + 1].to_string() == "(" {
+                // Use pattern matching to validate identifier
+                if self.is_valid_identifier_pattern(&token_str) && !self.is_reserved_keyword_pattern(&token_str) {
+                    info.name = token_str;
+
+                    // Parse parameters using pattern-based approach
+                    self.parse_parameters_with_patterns(&tokens[i + 1..], info)?;
+                    break;
                 }
             }
             i += 1;
         }
-        
-        println!("🔍 Function structure analysis: found_any_function = {}", found_any_function);
-        found_any_function
+
+        Ok(())
     }
-    
-    /// Analyze tokens using registered patterns with enhanced capture system
-    fn analyze_with_patterns(&self, context: &mut Context, tokens: &[crate::Token]) -> Result<Vec<PatternMatch>> {
-        let mut pattern_matches = Vec::new();
-        
-        // Use each pattern from the base handler with the new capture system
-        for pattern_name in &self.supported_patterns() {
-            match context.samplizer.analyze_with_captures(tokens, pattern_name) {
-                Ok(analysis_result) => {
-                    if analysis_result.success {
-                        pattern_matches.push(PatternMatch {
-                            pattern_name: pattern_name.to_string(),
-                            range: 0..analysis_result.captures.pattern_metadata.tokens_consumed,
-                            captures: analysis_result.captures.to_hashmap(), // Convert to HashMap for compatibility
-                            confidence: analysis_result.confidence,
-                        });
-                    }
-                }
-                Err(_) => {
-                    // Fallback to basic pattern matching if capture system fails
-                    let result = context.patternizer.match_pattern(pattern_name, tokens);
-                    if let PatternResult::Match { consumed_tokens } = result {
-                        pattern_matches.push(PatternMatch {
-                            pattern_name: pattern_name.to_string(),
-                            range: 0..consumed_tokens,
-                            captures: HashMap::new(),
-                            confidence: 0.8,
-                        });
-                    }
-                }
-            }
-        }
-        
-        Ok(pattern_matches)
+
+    /// Check if token matches valid identifier pattern
+    fn is_valid_identifier_pattern(&self, token: &str) -> bool {
+        token.chars().all(|c| c.is_alphanumeric() || c == '_') && !token.is_empty()
     }
-        
-        /// Extract function info using pattern matching results
-        fn extract_function_info_with_patterns(&self, tokens: &[crate::Token], pattern_results: &[PatternMatch]) -> Result<FunctionInfo> {
-            let mut function_info = FunctionInfo {
-                name: String::new(),
-                return_type: "void".to_string(),
-                parameters: Vec::new(),
-                is_static: false,
-                is_inline: false,
-                has_body: false,
-                complexity: "low".to_string(), // Default complexity
-                is_declaration: false, // Will be determined by pattern analysis
-                is_definition: false,  // Will be determined by pattern analysis
-                is_extern: false,      // Check for extern keyword
-                is_unsafe: false,      // Check for unsafe patterns
-                is_variadic: false,    // Check for ... in parameters
-                parameter_count: 0,    // Will be set from parameters.len()
-                storage_class: None,   // Will be set if static/extern found
-            };
-            
-            // Use pattern results to guide token analysis
-            for pattern_match in pattern_results {
-                match pattern_match.pattern_name.as_str() {
-                    "function_declaration" | "function_definition" => {
-                        // Since we don't have a full capture system yet, 
-                        // extract info from the matched token range
-                        let matched_tokens = &tokens[pattern_match.range.clone()];
-                        
-                        // Determine if it's declaration vs definition
-                        function_info.is_declaration = pattern_match.pattern_name == "function_declaration";
-                        function_info.is_definition = pattern_match.pattern_name == "function_definition";
-                        
-                        // Check for function body (presence of '{' indicates definition)
-                        function_info.has_body = matched_tokens.iter()
-                            .any(|t| t.to_string() == "{");
-                            
-                        // Update definition/declaration flags based on body
-                        if function_info.has_body {
-                            function_info.is_definition = true;
-                            function_info.is_declaration = false;
-                        }
-                    }
-                    _ => {} // Other patterns
-                }
-            }
-            
-            // Fallback to basic extraction if patterns didn't provide enough info
-            if function_info.name.is_empty() {
-                function_info = self.extract_function_info(tokens)?;
-            }
-            
-            Ok(function_info)
+
+    /// Check if token matches reserved keyword pattern
+    fn is_reserved_keyword_pattern(&self, token: &str) -> bool {
+        matches!(token, "void" | "int" | "char" | "float" | "double" | "if" | "while" | "for")
+    }
+
+    /// Parse function parameters using pattern-based parenthesis matching
+    fn parse_parameters_with_patterns(&self, tokens: &[Token], info: &mut FunctionInfo) -> Result<()> {
+        if tokens.is_empty() || tokens[0].to_string() != "(" {
+            return Ok(());
         }
-        
-        /// Convert to Rust using pattern matching results
-        fn convert_to_rust_with_patterns(&self, function_info: &FunctionInfo, tokens: &[crate::Token], pattern_results: &[PatternMatch]) -> Result<String> {
-            let mut rust_code = String::new();
-            
-            // Add documentation with pattern confidence
-            let avg_confidence: f64 = pattern_results.iter()
-                .map(|p| p.confidence)
-                .sum::<f64>() / pattern_results.len() as f64;
-                
-            rust_code.push_str(&format!("/// Converted from C function: {} (pattern confidence: {:.2})\n", 
-                                       function_info.name, avg_confidence));
-            
-            // Use the enhanced conversion logic
-            let base_conversion = self.convert_to_rust(function_info, tokens)?;
-            rust_code.push_str(&base_conversion);
-            
-            Ok(rust_code)
-        }
-    
-    /// Extract function information from tokens
-    fn extract_function_info(&self, tokens: &[crate::Token]) -> Result<FunctionInfo> {
-        let mut function_info = FunctionInfo::default();
-        
-        // Parse function signature
-        let mut in_params = false;
-        let mut brace_count = 0;
-        
-        for (i, token) in tokens.iter().enumerate() {
+
+        let mut paren_depth = 0;
+        let mut current_param = String::new();
+
+        for token in tokens {
             let token_str = token.to_string();
-            
+
             match token_str.as_str() {
-                "static" | "inline" | "extern" => {
-                    function_info.storage_class = Some(token_str);
-                }
                 "(" => {
-                    in_params = true;
+                    paren_depth += 1;
+                    if paren_depth > 1 {
+                        current_param.push_str(&token_str);
+                    }
                 }
                 ")" => {
-                    in_params = false;
-                }
-                "{" => {
-                    brace_count += 1;
-                    if brace_count == 1 {
-                        function_info.has_body = true;
-                    }
-                }
-                "}" => {
-                    brace_count -= 1;
-                }
-                _ => {
-                    if !in_params && function_info.name.is_empty() && i > 0 && tokens[i-1].to_string() != "(" {
-                        // This might be the function name
-                        if token_str.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                            function_info.name = token_str;
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        if !current_param.trim().is_empty() && current_param.trim() != "void" {
+                            info.parameters.push(current_param.trim().to_string());
                         }
+                        break;
+                    } else {
+                        current_param.push_str(&token_str);
                     }
                 }
+                "," if paren_depth == 1 => {
+                    if !current_param.trim().is_empty() && current_param.trim() != "void" {
+                        info.parameters.push(current_param.trim().to_string());
+                    }
+                    current_param.clear();
+                }
+                "..." => {
+                    info.is_variadic = true;
+                    current_param.push_str(&token_str);
+                }
+                "[" | "]" if paren_depth > 0 => {
+                    // Don't add space before/after brackets
+                    current_param.push_str(&token_str);
+                }
+                _ if paren_depth > 0 => {
+                    // Add space before tokens (but not before brackets which are handled above)
+                    if !current_param.is_empty() && !current_param.ends_with('[') {
+                        current_param.push(' ');
+                    }
+                    current_param.push_str(&token_str);
+                }
+                _ => {}
             }
         }
-        
-        Ok(function_info)
-    }
-    
-    /// Convert function to Rust code
-    fn convert_to_rust(&self, function_info: &FunctionInfo, tokens: &[crate::Token]) -> Result<String> {
-        let mut rust_code = String::new();
-        
-        // Add documentation comment
-        rust_code.push_str(&format!("/// Converted from C function: {}\n", function_info.name));
-        
-        // Add function visibility
-        if function_info.is_static {
-            // Static functions become private
-        } else {
-            rust_code.push_str("pub ");
-        }
-        
-        // Add unsafe keyword if function uses pointers or unsafe operations
-        if self.function_needs_unsafe(tokens) {
-            rust_code.push_str("unsafe ");
-        }
-        
-        // Add function keyword
-        rust_code.push_str("fn ");
-        
-        // Add function name (convert to snake_case)
-        let rust_name = convert_identifier_to_rust(&function_info.name, IdentifierCase::SnakeCase);
-        rust_code.push_str(&rust_name);
-        
-        // Process parameters
-        rust_code.push('(');
-        let params = self.convert_parameters(&function_info.parameters, tokens)?;
-        rust_code.push_str(&params);
-        rust_code.push(')');
-        
-        // Add return type
-        let return_type = self.convert_return_type(&function_info.return_type)?;
-        if return_type != "()" {
-            rust_code.push_str(&format!(" -> {}", return_type));
-        }
-        
-        // Add function body or semicolon
-        if function_info.has_body {
-            rust_code.push_str(" {\n");
-            rust_code.push_str(&self.convert_function_body(tokens)?);
-            rust_code.push_str("\n}");
-        } else {
-            rust_code.push(';');
-        }
-        
-        Ok(rust_code)
-    }
-    
-    /// Check if function needs unsafe keyword
-    fn function_needs_unsafe(&self, tokens: &[crate::Token]) -> bool {
-        // Check for pointer types, malloc, free, etc.
-        tokens.iter().any(|token| {
-            matches!(token.to_string().as_str(), 
-                "*" | "malloc" | "free" | "memcpy" | "memset" | "sizeof"
-            )
-        })
-    }
-    
-    /// Convert C parameters to Rust parameters
-    fn convert_parameters(&self, params: &[String], _tokens: &[crate::Token]) -> Result<String> {
-        if params.is_empty() {
-            return Ok(String::new());
-        }
-        
-        let rust_params: Vec<String> = params.iter().map(|param| {
-            self.convert_single_parameter(param)
-        }).collect();
-        
-        Ok(rust_params.join(", "))
-    }
-    
-    /// Convert a single C parameter to Rust
-    fn convert_single_parameter(&self, param: &str) -> String {
-        // Parse "type name" format
-        let parts: Vec<&str> = param.trim().split_whitespace().collect();
-        if parts.len() < 2 {
-            return format!("/* invalid param: {} */", param);
-        }
-        
-        let c_type = parts[..parts.len()-1].join(" ");
-        let param_name = parts[parts.len()-1];
-        
-        // Convert parameter name to snake_case
-        let rust_name = convert_identifier_to_rust(param_name, IdentifierCase::SnakeCase);
-        
-        // Convert C type to Rust type
-        let rust_type = self.convert_c_type_to_rust_type(&c_type);
-        
-        format!("{}: {}", rust_name, rust_type)
-    }
-    
-    /// Convert C type to Rust type
-    fn convert_c_type_to_rust_type(&self, c_type: &str) -> String {
-        match c_type.trim() {
-            "int" => "i32".to_string(),
-            "long" => "i64".to_string(),
-            "short" => "i16".to_string(),
-            "char" => "i8".to_string(),
-            "unsigned int" | "uint" => "u32".to_string(),
-            "unsigned long" => "u64".to_string(),
-            "unsigned short" => "u16".to_string(),
-            "unsigned char" | "uchar" => "u8".to_string(),
-            "float" => "f32".to_string(),
-            "double" => "f64".to_string(),
-            "void" => "()".to_string(),
-            "char*" | "char *" => "*const std::ffi::c_char".to_string(),
-            "const char*" | "const char *" => "*const std::ffi::c_char".to_string(),
-            "void*" | "void *" => "*mut std::ffi::c_void".to_string(),
-            _ if c_type.ends_with('*') => {
-                let base_type = c_type.trim_end_matches('*').trim();
-                let rust_base = self.convert_c_type_to_rust_type(base_type);
-                format!("*mut {}", rust_base)
-            },
-            _ => format!("/* unknown type: {} */", c_type),
-        }
-    }
-    
-    /// Convert return type
-    fn convert_return_type(&self, return_type: &str) -> Result<String> {
-        Ok(self.convert_c_type_to_rust_type(return_type))
-    }
-    
-    /// Convert function body (basic implementation)
-    fn convert_function_body(&self, tokens: &[crate::Token]) -> Result<String> {
-        // For now, provide a basic conversion framework
-        let mut body = String::new();
-        body.push_str("    // Function body conversion\n");
-        body.push_str("    // TODO: Implement statement-by-statement conversion\n");
-        
-        // Add basic return placeholder for now
-        body.push_str("    // TODO: Convert function body statements\n");
-        body.push_str("    // Placeholder return - needs intelligent conversion\n");
-        body.push_str("    return Default::default();");
-        
-        Ok(body)
-    }
-    
-    // Removed duplicate function - now using centralized convert_identifier_to_rust from common.rs
-}
 
+        info.parameter_count = info.parameters.len();
+        Ok(())
+    }
+}
 impl Handler for FunctionHandler {
     /// Constant function approach - compile-time constants
-    fn id(&self) -> Id { 
+    fn id(&self) -> Id {
         Id::get("function_handler")
     }
-    
-    fn role(&self) -> String { 
-        "function".to_string() 
+
+    fn role(&self) -> String {
+        "function".to_string()
     }
-    
-    fn priority(&self) -> u64 { 
-        200  // High priority for function detection
+
+    fn priority(&self) -> u64 {
+        200 // High priority for function detection
     }
-    
+
     fn supported_patterns(&self) -> Vec<String> {
-        vec!["function_declaration".to_string(), "function_definition".to_string(), "function_call".to_string()]
+        vec![
+            "function_declaration".to_string(),
+            "function_definition".to_string(),
+            "function_call".to_string(),
+        ]
     }
-    
-    fn can_process(&self, context: &mut Context, token_slot: usize, token_range: Range<usize>) -> Result<bool> {
-        // Get tokens from the specified slot and range using Context::tokenizer
-        let tokens = context.tokenizer.slots()[token_slot].tokens()[token_range.clone()].to_vec();
-        
+
+    fn detect(
+        &self,
+        context: &mut Context,
+        token_slot: usize,
+        token_range: Range<usize>,
+    ) -> Result<bool> {
+        // RACE CONDITION PREVENTION: Check if starting token is already consumed
+        let all_tokens = context.tokenizer.slots()[token_slot].tokens();
+        if token_range.start < all_tokens.len() && matches!(all_tokens[token_range.start], Token::n()) {
+            return Ok(false);  // Starting token already consumed
+        }
+
+        let tokens = context
+            .tokenizer
+            .get_tokens(token_slot, token_range.clone());
+
         if tokens.is_empty() {
             return Ok(false);
         }
         let tokens = tokens;
-        let (can_process, confidence) = self.detect_function_pattern(&mut context.patternizer, &context.samplizer, &tokens, token_range)?;
+        let (can_process, confidence) = self.detect_pattern(
+            &mut context.patternizer,
+            &context.samplizer,
+            &tokens,
+            token_range,
+        )?;
 
         // Add report using Context::registry
-        context.registry.add_report(HandlerReport::new(
-                &format!("function_handler_can_process_{}", token_slot),
-                std::sync::Arc::new(self.id()),
-                "Function Handler (Trait)".to_string(),
+        context.registry.add_report(
+            Report::new(
+                Id::get(&format!("function_handler_can_process_{}", token_slot)),
+                Some(self.id()),
                 "can_process".to_string(),
-                format!("Function detection: {} (confidence: {:.2})", can_process, confidence),
+                format!(
+                    "Function detection: {} (confidence: {:.2})",
+                    can_process, confidence
+                ),
                 ReportLevel::Info,
-                HandlerPhase::Process,
-            ).with_tokens(tokens.len(), if can_process { tokens.len() } else { 0 })
-             .with_success(can_process));
-            
+                Phase::Process(None),
+            )
+                .with_tokens(tokens.len(), if can_process { tokens.len() } else { 0 })
+                .with_success(can_process),
+        );
+
         Ok(can_process)
     }
-    
-    fn process(&self, context: &mut Context,     token_slot: usize, token_range: Range<usize>) -> Result<HandlerResult> {
-        // Get tokens from the specified slot and range using Context::with_tokenizer
-        let tokens = context.tokenizer.slots()[token_slot].tokens()[token_range.clone()].to_vec();
-        
-        if tokens.is_empty() {
-            return Ok(HandlerResult::NotHandled(
-                None,
-                token_range,
-                self.id(),
-            ));
-        }
-        let tokens = tokens;
-        // **STEP 1: Use Pattern Matching to Detect Function Structure**
-        let (pattern_match, confidence) = self.detect_function_pattern(&mut context.patternizer, &context.samplizer, &tokens, token_range.clone())?;
-        
-        if !pattern_match || confidence < 0.7 {
-            return Ok(HandlerResult::NotHandled(
-                Some(tokens.to_vec()),
-                token_range,
-                self.id(),
-            ));
-        }
-        
-        // **STEP 2: Use Pattern Results to Guide Extraction**
-        let pattern_results = self.analyze_with_patterns(context, &tokens)?;
-        let function_info = self.extract_function_info_with_patterns(&tokens, &pattern_results)?;
-        
-        // **STEP 3: Pattern-Driven Code Generation**
-        let rust_code = self.convert_to_rust_with_patterns(&function_info, &tokens, &pattern_results)?;
-        
-        // Add processing report with pattern details
-        context.registry.add_report(HandlerReport::new(
-                &format!("function_handler_process_{}", token_slot),
-                std::sync::Arc::new(self.id()),
-                "Function Handler (Trait)".to_string(),
-                "process".to_string(),
-                format!("Converted function '{}' using patterns (confidence: {:.2})", 
-                       function_info.name, confidence),
-                ReportLevel::Info,
-                HandlerPhase::Process,
-            ).with_tokens(tokens.len(), tokens.len())
-             .with_success(true));
-        
-        Ok(HandlerResult::Processed(
-            Some(tokens.to_vec()),
-            token_range,
-            rust_code,
-            self.id(),
-        ))
-    }
 
-    fn extract(&self, context: &mut Context, token_slot: usize, token_range: Range<usize>) -> Result<Option<ExtractedElement>> {
-    let tokens = context.tokenizer.get_tokens(token_slot, token_range.clone());
-    
-    if tokens.is_empty() {
-        return Ok(None);
-    }
-    
-    let function_info = self.extract_function_info(&tokens)?;
-    let rust_code = self.convert_to_rust(&function_info, &tokens)?;
-    
-    let extracted_function = ExtractedFunction {
-        id: Id::get(Id::gen_name(&self.id().name()).as_str()),
-        code: rust_code,
-        info: function_info.clone(),
-        tokens: tokens.clone(),
-        token_range,
-        metadata: vec![
-            ("is_static".to_string(), function_info.is_static.to_string()),
-            ("is_inline".to_string(), function_info.is_inline.to_string()),
-            ("is_extern".to_string(), function_info.is_extern.to_string()),
-            ("has_body".to_string(), function_info.has_body.to_string()),
-            ("parameter_count".to_string(), function_info.parameter_count.to_string()),
-            ("is_variadic".to_string(), function_info.is_variadic.to_string()),
-        ],
-    };
-    
-    Ok(Some(ExtractedElement::Function(extracted_function)))
-}
-    
-    fn convert(&self, context: &mut Context, token_slot: usize, token_range: Range<usize>) -> Result<Option<ConvertedElement>> {
-        let tokens = context.tokenizer.slots()[token_slot].tokens()[token_range.clone()].to_vec();
-        if tokens.is_empty() {
+    fn extract(
+        &self,
+        context: &mut Context,
+        token_slot: usize,
+        token_range: Range<usize>,
+    ) -> Result<Option<ExtractedElement>> {
+        if token_range.is_empty() {
             return Ok(None);
         }
-        let tokens = tokens;
-        let function_info = self.extract_function_info(&tokens)?;
-        let rust_code = self.convert_to_rust(&function_info, &tokens)?;
-        
-        let converted_function = ConvertedFunction {
-            name: function_info.name.clone(),
-            return_type: function_info.return_type.clone(),
-            parameters: function_info.parameters.clone(),
-            body: rust_code.clone(),
-            code: rust_code.clone(),
-            is_unsafe: false, // TODO: Extract from function_info
-            is_public: false,
-            is_definition: true,
+
+        // Get FRESH token array (important: don't cache this as it may have been modified by previous extractions)
+        let all_tokens = context.tokenizer.slots()[token_slot].tokens();
+
+        if token_range.start >= all_tokens.len() {
+            return Ok(None);
+        }
+
+        // Start from token_range.start and find the COMPLETE function
+        // Look for the closing brace to determine the actual end
+        let start_pos = token_range.start;
+
+        // Quick check: must start with a type keyword or storage specifier
+        let first_token = all_tokens[start_pos].to_string();
+        if !matches!(first_token.as_str(),
+            "int" | "void" | "char" | "float" | "double" | "long" | "short" |
+            "unsigned" | "signed" | "static" | "extern" | "inline" | "bool") {
+            return Ok(None);
+        }
+
+        // Find the complete function by looking for matching braces
+        let mut brace_count = 0;
+        let mut in_function = false;
+        let mut actual_end = start_pos;
+
+        for (idx, token) in all_tokens[start_pos..].iter().enumerate() {
+            let token_str = token.to_string();
+            match token_str.as_str() {
+                "{" => {
+                    brace_count += 1;
+                    in_function = true;
+                }
+                "}" => {
+                    brace_count -= 1;
+                    if in_function && brace_count == 0 {
+                        actual_end = start_pos + idx + 1;  // Include the closing brace
+                        break;
+                    }
+                }
+                ";" if !in_function => {
+                    // Function declaration without body
+                    actual_end = start_pos + idx + 1;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        if actual_end == start_pos {
+            return Ok(None);  // Didn't find complete function
+        }
+
+        // Extract the complete function tokens
+        let function_range = start_pos..actual_end;
+
+        // RACE CONDITION CHECK: Now that we know the complete range, check if ANY token is already consumed
+        if function_range.clone().any(|pos| matches!(all_tokens[pos], Token::n())) {
+            return Ok(None);  // Part of this function was already processed
+        }
+
+        let tokens_subset = &all_tokens[function_range.clone()];
+
+        // Use detect_pattern for consistent pattern analysis
+        let (pattern_detected, confidence) = self.detect_pattern(
+            &mut context.patternizer,
+            &context.samplizer,
+            tokens_subset,
+            function_range.clone(),
+        )?;
+
+        if !pattern_detected {
+            return Ok(None);
+        }
+
+        let pattern_results = vec![PatternMatch {
+            pattern_name: "function_definition".to_string(),
+            range: 0..tokens_subset.len(),  // Relative to tokens_subset
+            confidence,
+            captures: HashMap::new(),
+        }];
+
+        let function_info = self.extract_info(tokens_subset, &pattern_results)?;
+
+        let extracted_function = ExtractedFunction {
+            id: Id::get(&gen_name(&self.id().name()).as_str()),
+            info: function_info.clone(),
+            tokens: tokens_subset.to_vec(),
+            token_range: function_range.clone(),  // Use actual function range, not input range
+            metadata: vec![
+                ("is_static".to_string(), function_info.is_static.to_string()),
+                ("is_inline".to_string(), function_info.is_inline.to_string()),
+                ("is_extern".to_string(), function_info.is_extern.to_string()),
+                ("has_body".to_string(), function_info.has_body.to_string()),
+                (
+                    "parameter_count".to_string(),
+                    function_info.parameter_count.to_string(),
+                ),
+                (
+                    "is_variadic".to_string(),
+                    function_info.is_variadic.to_string(),
+                ),
+            ],
         };
-        
-        Ok(Some(ConvertedElement::Function(converted_function)))
+
+        // Mark the ACTUAL function tokens as consumed (Token::n()) so they won't be processed again
+        context.mark_tokens_consumed(token_slot, function_range);
+
+        Ok(Some(ExtractedElement::Function(extracted_function)))
     }
-    
-    fn document(&self, context: &mut Context, info: ElementInfo) -> Result<Option<String>> {
-        if let ElementInfo::Function(function_info) = info {
-            let doc = format!(
-                "/// Function: {}\n/// Converted from C function definition\n",
-                function_info.name
+
+    fn convert(
+        &self,
+        context: &mut Context,
+        element: ExtractedElement,
+    ) -> Result<Option<ConvertedElement>> {
+        if let ExtractedElement::Function(extracted) = element {
+            let tokens = extracted.tokens.clone();
+            if tokens.is_empty() {
+                return Ok(None);
+            }
+
+            let function_info = extracted.info.clone();
+
+            // Convert function name to Rust naming convention
+            let rust_name = convert_identifier_to_rust(&function_info.name, IdentifierCase::SnakeCase);
+
+            // Convert return type using TYPE_CONVERSION_MAP
+            let rust_return_type = self.convert_c_type_to_rust(&function_info.return_type);
+
+            // Convert parameters from C style (type name) to Rust style (name: type)
+            let rust_params: Vec<String> = function_info.parameters.iter()
+                .filter_map(|param| {
+                    // Parse C-style parameter: "int value" or "const char * msg" or "char * argv[]"
+                    let parts: Vec<&str> = param.split_whitespace().collect();
+                    if parts.is_empty() {
+                        return None;
+                    }
+
+                    // Last part may be the name with array brackets
+                    let last_part = parts.last()?;
+
+                    // Check if the name has array brackets (e.g., "argv[]")
+                    let (param_name, array_suffix) = if last_part.contains('[') {
+                        // Split name and brackets: "argv[]" -> ("argv", "[]")
+                        if let Some(bracket_pos) = last_part.find('[') {
+                            let name = &last_part[..bracket_pos];
+                            let brackets = &last_part[bracket_pos..];
+                            (name, brackets)
+                        } else {
+                            (last_part.as_ref(), "")
+                        }
+                    } else {
+                        (last_part.as_ref(), "")
+                    };
+
+                    // Build C type: everything before last part + array suffix
+                    let c_type = if array_suffix.is_empty() {
+                        parts[..parts.len() - 1].join(" ")
+                    } else {
+                        // Add array brackets to the type
+                        format!("{}{}", parts[..parts.len() - 1].join(" "), array_suffix)
+                    };
+
+                    // Convert C type to Rust type using TYPE_CONVERSION_MAP
+                    let rust_type = self.convert_c_type_to_rust(&c_type);
+
+                    // Format as Rust parameter: name: type
+                    Some(format!("{}: {}", param_name, rust_type))
+                })
+                .collect();
+
+            let rust_code = format!(
+                "pub fn {}({}) -> {} {{\n    // TODO: Implement function body\n    unimplemented!()\n}}",
+                rust_name,
+                rust_params.join(", "),
+                rust_return_type
             );
-            Ok(Some(doc))
+
+            let converted_function = ConvertedFunction {
+                code: rust_code,
+                metadata: vec![
+                    ("original_name".to_string(), function_info.name),
+                    ("converted_name".to_string(), rust_name),
+                    ("complexity".to_string(), function_info.complexity),
+                ],
+            };
+
+            Ok(Some(ConvertedElement::Function(converted_function)))
         } else {
             Ok(None)
         }
     }
-    
-    fn report(&self, context: &mut Context) -> Result<HandlerReport> {
-        let reports = context.registry.get_reports_by_handler("function_handler_trait");
-        if reports.is_empty() {
-            return Ok(HandlerReport::new(
-                "function_handler_report",
-                std::sync::Arc::new(self.id()),
-                "Function Handler (Trait)".to_string(),
-                "report".to_string(),
-                "No reports found".to_string(),
-                ReportLevel::Info,
-                HandlerPhase::Report,
-            ).with_success(true)
-             .with_metadata("total_reports".to_string(), "0".to_string()));
+
+    fn document(
+        &self,
+        context: &mut Context,
+        extracted_element: ExtractedElement,
+        converted_element: ConvertedElement,
+    ) -> Result<Option<String>> {
+        let extracted_function = if let ExtractedElement::Function(extracted) = extracted_element {
+            extracted
+        } else {
+            return Ok(None);
+        };
+
+        let converted_function = if let ConvertedElement::Function(converted) = converted_element {
+            converted
+        } else {
+            return Ok(None);
+        };
+
+        let mut doc = format!(
+            "/// Function: {}\n/// Return type: {}\n/// Converted from C function definition\n",
+            extracted_function.info.name, extracted_function.info.return_type
+        );
+
+        if !extracted_function.info.parameters.is_empty() {
+            doc.push_str("/// Parameters:\n");
+            for param in &extracted_function.info.parameters {
+                doc.push_str(&format!("/// - {}\n", param));
+            }
         }
-        let reports = reports;
-        let (info_count, warning_count, error_count) = reports
-            .iter()
-            .fold((0, 0, 0), |(info, warn, err), report| {
-                match report.level {
+
+        if extracted_function.info.is_static {
+            doc.push_str("/// Static function\n");
+        }
+
+        if extracted_function.info.is_inline {
+            doc.push_str("/// Inline function\n");
+        }
+
+        if extracted_function.info.is_extern {
+            doc.push_str("/// External function\n");
+        }
+
+        if extracted_function.info.is_variadic {
+            doc.push_str("/// Variadic function\n");
+        }
+
+        Ok(Some(doc))
+    }
+
+    fn report(&self, context: &mut Context) -> Result<Report> {
+        let reports = context
+            .registry
+            .get_reports_by_handler(&self.id().name());
+
+        if reports.is_empty() {
+            return Ok(Report::new(
+                Id::get("function_handler_report"),
+                Some(self.id()),
+                "report".to_string(),
+                "No function processing reports found".to_string(),
+                ReportLevel::Info,
+                Phase::Report(None),
+            )
+                .with_success(true));
+        }
+
+        let (info_count, warning_count, error_count) =
+            reports
+                .iter()
+                .fold((0, 0, 0), |(info, warn, err), report| match report.level {
                     ReportLevel::Info => (info + 1, warn, err),
                     ReportLevel::Warning => (info, warn + 1, err),
                     ReportLevel::Error => (info, warn, err + 1),
                     ReportLevel::Debug => (info + 1, warn, err),
-                }
-            });
-        
-        Ok(HandlerReport::new(
-            "function_handler_report",
-            std::sync::Arc::new(self.id()),
-            "Function Handler (Trait)".to_string(),
+                });
+
+        let total_tokens_processed = reports.iter().map(|r| r.tokens_processed).sum::<usize>();
+
+        Ok(Report::new(
+            Id::get("function_handler_report"),
+            Some(self.id()),
             "report".to_string(),
             format!(
-                "Function handler processed {} info, {} warnings, {} errors",
-                info_count, warning_count, error_count
+                "Function handler processed {} functions: {} info, {} warnings, {} errors",
+                reports.len(),
+                info_count,
+                warning_count,
+                error_count
             ),
-            ReportLevel::Info,
-            HandlerPhase::Report,
-        ).with_success(error_count == 0)
-         .with_metadata("total_reports".to_string(), reports.len().to_string()))
+            if error_count > 0 {
+                ReportLevel::Error
+            } else if warning_count > 0 {
+                ReportLevel::Warning
+            } else {
+                ReportLevel::Info
+            },
+            Phase::Report(None),
+        )
+            .with_success(error_count == 0)
+            .with_tokens(total_tokens_processed, total_tokens_processed)
+            .with_metadata("total_reports".to_string(), reports.len().to_string()))
     }
-    
-    fn handle_redirect(&self, context: &mut Context, token_slot: usize, token_range: Range<usize>, result: HandlerResult) -> Result<HandlerResult> {
-        // INTELLIGENT REDIRECT: Function handler knows what's most likely to work next
+
+    fn supported_keywords(&self) -> Vec<String> {
+        vec![
+            // C type keywords that typically start functions
+            "int".to_string(),
+            "void".to_string(),
+            "char".to_string(),
+            "float".to_string(),
+            "double".to_string(),
+            "long".to_string(),
+            "short".to_string(),
+            "unsigned".to_string(),
+            "signed".to_string(),
+            "bool".to_string(),
+            // Storage class specifiers
+            "static".to_string(),
+            "extern".to_string(),
+            "inline".to_string(),
+        ]
+    }
+
+    fn route(
+        &self,
+        context: &mut Context,
+        token_slot: usize,
+        token_range: Range<usize>,
+        result: HandlerResult,
+    ) -> Result<HandlerResult> {
         let tokens = context.tokenizer.slots()[token_slot].tokens()[token_range.clone()].to_vec();
-        
+
         if tokens.is_empty() {
             return Ok(result);
         }
-        let tokens = tokens;
-        // Analyze tokens to suggest the best next handler
+
         let suggested_handler = self.suggest_next_handler(context, &tokens);
-        
+
         let mut metadata = Vec::new();
-        metadata.push(("analysis_reason".to_string(), format!("Function handler analyzed {} tokens", tokens.len())));
-        
+        metadata.push((
+            "analysis_reason".to_string(),
+            format!("Function handler analyzed {} tokens", tokens.len()),
+        ));
+
         let redirect_request = RedirectRequest {
             from_handler: self.id(),
             token_range: token_range.clone(),
@@ -620,8 +881,7 @@ impl Handler for FunctionHandler {
             suggested_handler,
             metadata,
         };
-        
-        // Return the result as-is to avoid deadlock in redirect workflow
+
         Ok(result)
     }
 }
@@ -629,12 +889,14 @@ impl Handler for FunctionHandler {
 impl FunctionHandler {
     /// Intelligently suggest which handler should try next based on token analysis
     /// ENHANCED with hierarchical subhandler routing - PRIVATE METHOD
-    fn suggest_next_handler(&self, context: &mut Context, tokens: &[crate::Token]) -> Option<Id> {
+    fn suggest_next_handler(&self, context: &mut Context, tokens: &[Token]) -> Option<Id> {
         let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        
-        println!("🧠 FunctionHandler analyzing tokens for intelligent redirect: {:?}", 
-                 token_strings.iter().take(5).collect::<Vec<_>>());
-        
+
+        println!(
+            "🧠 FunctionHandler analyzing tokens for intelligent redirect: {:?}",
+            token_strings.iter().take(5).collect::<Vec<_>>()
+        );
+
         // PRIORITY 1: Function-internal constructs (higher accuracy subhandlers)
         for (i, token_str) in token_strings.iter().enumerate() {
             match token_str.as_str() {
@@ -643,53 +905,75 @@ impl FunctionHandler {
                     println!("🎯 FunctionHandler → LoopHandler (detected: {})", token_str);
                     return Some(Id::get("loop_handler"));
                 }
-                
-                // Variable declarations/assignments - route to VariableHandler  
-                "int" | "long" | "short" | "char" | "float" | "double" | "void" | "unsigned" | "signed" 
-                if i + 1 < token_strings.len() => {
-                    // Check if this looks like a variable declaration
-                    let next_token = &token_strings[i + 1];
-                    if next_token.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '*') {
-                        println!("🎯 FunctionHandler → VariableHandler (detected: {} {})", token_str, next_token);
-                        return Some(Id::get("variable_handler"));
+
+                // Variable declarations/assignments - route to VariableHandler
+                // Use Patternizer's type system for detection
+                _ if i + 1 < token_strings.len() &&
+                    context.patternizer.is_c_type(&tokens[i]) =>
+                    {
+                        // Check if this looks like a variable declaration
+                        let next_token = &token_strings[i + 1];
+                        if next_token
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '*')
+                        {
+                            println!(
+                                "🎯 FunctionHandler → VariableHandler (detected: {} {})",
+                                token_str, next_token
+                            );
+                            return Some(Id::get("variable_handler"));
+                        }
                     }
-                }
-                
+
                 // Return statements - specialized statement handler
                 "return" => {
                     println!("🎯 FunctionHandler → StatementHandler (detected: return)");
                     return Some(Id::get("statement_handler"));
                 }
-                
+
                 // Function calls - expression handler
                 _ if i + 1 < token_strings.len() && token_strings[i + 1] == "(" => {
                     // This looks like a function call
                     if token_str.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                        println!("🎯 FunctionHandler → ExpressionHandler (detected function call: {})", token_str);
+                        println!(
+                            "🎯 FunctionHandler → ExpressionHandler (detected function call: {})",
+                            token_str
+                        );
                         return Some(Id::get("expression_handler"));
                     }
                 }
                 _ => {}
             }
         }
-        
+
         // PRIORITY 2: Assignment operations - route to VariableHandler
-        if token_strings.iter().any(|t| matches!(t.as_str(), "=" | "+=" | "-=" | "*=" | "/=")) {
+        if token_strings
+            .iter()
+            .any(|t| matches!(t.as_str(), "=" | "+=" | "-=" | "*=" | "/="))
+        {
             println!("🎯 FunctionHandler → VariableHandler (detected assignment)");
             return Some(Id::get("variable_handler"));
         }
-        
+
         // PRIORITY 3: Mathematical expressions - route to ExpressionHandler
-        if token_strings.iter().any(|t| matches!(t.as_str(), "+" | "-" | "*" | "/" | "%" | "&&" | "||" | "==" | "!=" | "<" | ">")) {
+        if token_strings.iter().any(|t| {
+            matches!(
+                t.as_str(),
+                "+" | "-" | "*" | "/" | "%" | "&&" | "||" | "==" | "!=" | "<" | ">"
+            )
+        }) {
             println!("🎯 FunctionHandler → ExpressionHandler (detected operators)");
             return Some(Id::get("expression_handler"));
         }
-        
+
         // PRIORITY 4: Other top-level constructs
         for token_str in &token_strings {
             match token_str.as_str() {
                 "struct" | "typedef" => {
-                    println!("🎯 FunctionHandler → StructHandler (detected: {})", token_str);
+                    println!(
+                        "🎯 FunctionHandler → StructHandler (detected: {})",
+                        token_str
+                    );
                     return Some(Id::get("struct_handler"));
                 }
                 "enum" => {
@@ -697,11 +981,17 @@ impl FunctionHandler {
                     return Some(Id::get("enum_handler"));
                 }
                 "#include" | "#define" | "#ifdef" => {
-                    println!("🎯 FunctionHandler → MacroHandler (detected: {})", token_str);
+                    println!(
+                        "🎯 FunctionHandler → MacroHandler (detected: {})",
+                        token_str
+                    );
                     return Some(Id::get("macro_handler"));
                 }
                 "//" | "/*" => {
-                    println!("🎯 FunctionHandler → CommentHandler (detected: {})", token_str);
+                    println!(
+                        "🎯 FunctionHandler → CommentHandler (detected: {})",
+                        token_str
+                    );
                     return Some(Id::get("comment_handler"));
                 }
                 "[" | "]" => {
@@ -711,7 +1001,7 @@ impl FunctionHandler {
                 _ => {}
             }
         }
-        
+
         // PRIORITY 5: Default fallback
         println!("🎯 FunctionHandler → GlobalHandler (fallback)");
         Some(Id::get("global_handler"))

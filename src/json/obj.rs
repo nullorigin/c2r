@@ -2,7 +2,6 @@ use core::option::Option::None;
 
 use crate::json::{hash_key, DumpGenerator, Generator, Node, PrettyGenerator, Value, NULL};
 
-
 /// A binary tree implementation of a string -> `JsonValue` map. You normally don't
 /// have to interact with instances of `Object`, much more likely you will be
 /// using the `JsonValue::Object` variant, which wraps around this struct.
@@ -239,22 +238,16 @@ impl Object {
 
                 match hash == node.key.hash && key_bytes == node.key.as_bytes() {
                     true => break,
-                    false => {
-                        match hash < node.key.hash {
-                            true => {
-                                match node.left == 0 {
-                                    true => return None,
-                                    false => index = node.left,
-                                }
-                            }
-                            false => {
-                                match node.right == 0 {
-                                    true => return None,
-                                    false => index = node.right,
-                                }
-                            }
-                        }
-                    }
+                    false => match hash < node.key.hash {
+                        true => match node.left == 0 {
+                            true => return None,
+                            false => index = node.left,
+                        },
+                        false => match node.right == 0 {
+                            true => return None,
+                            false => index = node.right,
+                        },
+                    },
                 }
             }
         }
@@ -321,7 +314,7 @@ impl Object {
         generator.consume()
     }
 }
-impl std::iter::Iterator for Object {
+impl Iterator for Object {
     type Item = Node;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -338,25 +331,25 @@ impl std::iter::Iterator for Object {
         (self.len, Some(self.len))
     }
 
+    fn count(self) -> usize {
+        self.len
+    }
+
     fn last(self) -> Option<Self::Item> {
         if self.len == 0 {
             return None;
         }
         unsafe { Some(std::ptr::read(self.store.add(self.len - 1))) }
     }
-
-    fn count(self) -> usize {
-        self.len
-    }
 }
 
-impl std::iter::ExactSizeIterator for Object {
+impl ExactSizeIterator for Object {
     fn len(&self) -> usize {
         self.len
     }
 }
 
-impl std::iter::DoubleEndedIterator for Object {
+impl DoubleEndedIterator for Object {
     fn next_back(&mut self) -> Option<Self::Item> {
         if self.len == 0 {
             return None;
@@ -396,7 +389,7 @@ impl Clone for Object {
 }
 
 impl<K: AsRef<str>, V: Into<Value>> FromIterator<(K, V)> for Object {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
+    fn from_iter<I: IntoIterator<Item=(K, V)>>(iter: I) -> Self {
         let iter = iter.into_iter();
         let mut object = Object::with_capacity(iter.size_hint().0);
 
@@ -431,8 +424,6 @@ impl PartialEq for Object {
         true
     }
 }
-
-
 
 /// Implements indexing by `&str` to easily access object members:
 ///

@@ -6,7 +6,7 @@
     non_upper_case_globals
 )]
 
-use crate::{C2RError, Id, Reason, Result, debug, error, info, warn};
+use crate::{debug, error, info, warn, C2RError, Id, Reason, Result};
 use core::cmp::Ordering;
 use core::mem::transmute;
 use core::ops::{Bound, Range, RangeBounds};
@@ -25,13 +25,11 @@ use std::ops::Div;
 use std::ops::Mul;
 use std::ops::Rem;
 use std::ops::Sub;
-use std::str::FromStr;
 use std::str::from_utf8;
-use std::sync::{Arc, RwLock, Condvar, Mutex};
+use std::str::FromStr;
 use std::sync::atomic::AtomicUsize;
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::time::Duration;
-
-
 
 const TOKEN_MAX: usize = 8192;
 const TOKENBOX_CAPACITY: usize = 10000;
@@ -66,20 +64,18 @@ impl Clone for TokenBox {
         }
     }
 }
-impl PartialEq for TokenBox {    
+impl PartialEq for TokenBox {
     fn eq(&self, other: &Self) -> bool {
-        self.id == other.id
-        && self.capacity == other.capacity
+        self.id == other.id && self.capacity == other.capacity
     }
 }
 impl Eq for TokenBox {}
-impl std::hash::Hash for TokenBox {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for TokenBox {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
         self.capacity.hash(state);
     }
 }
-
 
 #[derive(Debug, Clone)]
 struct TokenMetadata {
@@ -117,42 +113,33 @@ impl TokenBox {
 
     /// Deposit tokens from a TokenSlot (called by TokenSlot.flush_to_tokenbox())
     pub fn deposit_from_slot(&self, tokens: Vec<Token>, slot_id: &Id) -> Result<usize> {
-        let mut status_guard = match self.status.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox deposit status lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut status_guard = self.status.lock().unwrap_or_else(|poisoned| {
+            warn!("TokenBox deposit status lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         // Don't accept deposits if being consumed
         if *status_guard == TokenBoxStatus::BeingConsumed {
             return Err(C2RError::new(
                 crate::Kind::Logic,
-                Reason::Other("TokenBox is being consumed, cannot deposit"),
-                None
+                Reason::Access("unavailable"),
+                Some("TokenBox is being consumed, cannot deposit".to_string()),
             ));
         }
 
-        let mut token_storage = match self.tokens.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox deposit tokens lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut token_storage = self.tokens.write().unwrap_or_else(|poisoned| {
+            warn!("TokenBox deposit tokens lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
-        let mut metadata_storage = match self.metadata.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox deposit metadata lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut metadata_storage = self.metadata.write().unwrap_or_else(|poisoned| {
+            warn!("TokenBox deposit metadata lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         let starting_index = token_storage.len();
         let deposited_count = tokens.len();
-        
+
         // Add tokens and create metadata
         for (offset, token) in tokens.into_iter().enumerate() {
             let index = starting_index + offset;
@@ -162,7 +149,7 @@ impl TokenBox {
                 timestamp: std::time::Instant::now(),
                 token_type: token.type_name().to_string(),
             };
-            
+
             token_storage.push(token.clone());
             metadata_storage.insert(format!("{}-{}", slot_id, index), metadata);
         }
@@ -180,25 +167,29 @@ impl TokenBox {
         drop(token_storage);
         drop(metadata_storage);
 
-        info!("TokenBox[{}] deposited {} tokens, total: {}", 
-              self.id, deposited_count, self.len());
+        info!(
+            "TokenBox[{}] deposited {} tokens, total: {}",
+            self.id,
+            deposited_count,
+            self.len()
+        );
 
         Ok(deposited_count)
     }
 
     /// Collect tokens for processing (thread-safe consumer method)
     pub fn collect_tokens(&self, max_tokens: Option<usize>) -> Result<Vec<Token>> {
-        let mut status_guard = match self.status.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox collect status lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut status_guard = self.status.lock().unwrap_or_else(|poisoned| {
+            warn!("TokenBox collect status lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         // Wait for tokens to be available if empty
         while *status_guard == TokenBoxStatus::Empty {
-            status_guard = match self.collection_ready.wait_timeout(status_guard, Duration::from_millis(100)) {
+            status_guard = match self
+                .collection_ready
+                .wait_timeout(status_guard, Duration::from_millis(100))
+            {
                 Ok((guard, _)) => guard,
                 Err(poisoned) => {
                     warn!("TokenBox collect wait poisoned, recovering...");
@@ -211,25 +202,21 @@ impl TokenBox {
         *status_guard = TokenBoxStatus::BeingConsumed;
         drop(status_guard);
 
-        let mut token_storage = match self.tokens.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox collect tokens lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut token_storage = self.tokens.write().unwrap_or_else(|poisoned| {
+            warn!("TokenBox collect tokens lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
-        let collect_count = max_tokens.unwrap_or(token_storage.len()).min(token_storage.len());
+        let collect_count = max_tokens
+            .unwrap_or(token_storage.len())
+            .min(token_storage.len());
         let collected_tokens: Vec<Token> = token_storage.drain(..collect_count).collect();
 
         // Update status
-        let mut status_guard = match self.status.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox collect final status lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut status_guard = self.status.lock().unwrap_or_else(|poisoned| {
+            warn!("TokenBox collect final status lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         *status_guard = if token_storage.is_empty() {
             TokenBoxStatus::Empty
@@ -240,7 +227,11 @@ impl TokenBox {
         drop(status_guard);
         drop(token_storage);
 
-        info!("TokenBox[{}] collected {} tokens", self.id, collected_tokens.len());
+        info!(
+            "TokenBox[{}] collected {} tokens",
+            self.id,
+            collected_tokens.len()
+        );
         Ok(collected_tokens)
     }
 
@@ -289,9 +280,7 @@ impl TokenBox {
     /// Peek at tokens without consuming them
     pub fn peek_tokens(&self, count: usize) -> Vec<Token> {
         match self.tokens.read() {
-            Ok(guard) => {
-                guard.iter().take(count).cloned().collect()
-            }
+            Ok(guard) => guard.iter().take(count).cloned().collect(),
             Err(poisoned) => {
                 warn!("TokenBox peek lock poisoned, recovering...");
                 poisoned.into_inner().iter().take(count).cloned().collect()
@@ -301,32 +290,23 @@ impl TokenBox {
 
     /// Clear all tokens (use with caution)
     pub fn clear(&self) {
-        let mut token_storage = match self.tokens.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox clear tokens lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut token_storage = self.tokens.write().unwrap_or_else(|poisoned| {
+            warn!("TokenBox clear tokens lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
-        let mut metadata_storage = match self.metadata.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox clear metadata lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut metadata_storage = self.metadata.write().unwrap_or_else(|poisoned| {
+            warn!("TokenBox clear metadata lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         token_storage.clear();
         metadata_storage.clear();
 
-        let mut status_guard = match self.status.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenBox clear status lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut status_guard = self.status.lock().unwrap_or_else(|poisoned| {
+            warn!("TokenBox clear status lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         *status_guard = TokenBoxStatus::Empty;
     }
@@ -356,7 +336,7 @@ impl TokenSlot {
         for (index, token) in tokens.iter().enumerate() {
             token_map.insert(token.to_string(), index);
         }
-        
+
         TokenSlot {
             tokens: Arc::new(RwLock::new(tokens)),
             buffer: Arc::new(RwLock::new(Vec::new())),
@@ -380,13 +360,10 @@ impl TokenSlot {
     where
         R: RangeBounds<usize>,
     {
-        let tokens = match self.tokens.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot get_range lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let tokens = self.tokens.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot get_range lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
         let start = match range.start_bound() {
             Bound::Included(&n) => n,
             Bound::Excluded(&n) => n + 1,
@@ -397,7 +374,7 @@ impl TokenSlot {
             Bound::Excluded(&n) => n,
             Bound::Unbounded => tokens.len(),
         };
-        
+
         if start <= end && start < tokens.len() {
             tokens[start..end.min(tokens.len())].to_vec()
         } else {
@@ -406,25 +383,20 @@ impl TokenSlot {
     }
 
     pub fn lookup(&self, key: &str) -> Option<Token> {
-        let map = match self.token_map.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot lookup map lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        let tokens = match self.tokens.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot lookup tokens lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let map = self.token_map.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot lookup map lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
+        let tokens = self.tokens.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot lookup tokens lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
         map.get(key).and_then(|&index| tokens.get(index).cloned())
     }
 
     pub fn seek(&self, position: usize) {
-        self.cursor.store(position, std::sync::atomic::Ordering::SeqCst);
+        self.cursor
+            .store(position, std::sync::atomic::Ordering::SeqCst);
     }
 
     pub fn buffer_token(&self, token: Token) {
@@ -439,20 +411,14 @@ impl TokenSlot {
 
     pub fn flush_buffer(&self) {
         {
-            let mut buffer = match self.buffer.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot flush_buffer buffer lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
-            let mut tokens = match self.tokens.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot flush_buffer tokens lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            let mut buffer = self.buffer.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot flush_buffer buffer lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
+            let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot flush_buffer tokens lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
             tokens.extend(buffer.drain(..));
         } // Drop both locks here
         self.rebuild_token_map();
@@ -460,13 +426,10 @@ impl TokenSlot {
 
     /// Flush tokens to a TokenBox (arcade-themed producer method)
     pub fn flush_to_tokenbox(&self, tokenbox: &TokenBox) -> Result<usize> {
-        let mut tokens = match self.tokens.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot flush_to_tokenbox tokens lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot flush_to_tokenbox tokens lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         if tokens.is_empty() {
             return Ok(0);
@@ -488,13 +451,21 @@ impl TokenSlot {
         // Deposit into TokenBox
         match tokenbox.deposit_from_slot(tokens_to_flush, &self.id) {
             Ok(deposited) => {
-                info!("TokenSlot[{}] flushed {} tokens to TokenBox[{}]", 
-                      self.id, deposited, tokenbox.id());
+                info!(
+                    "TokenSlot[{}] flushed {} tokens to TokenBox[{}]",
+                    self.id,
+                    deposited,
+                    tokenbox.id()
+                );
                 Ok(deposited)
             }
             Err(e) => {
-                error!("Failed to flush TokenSlot[{}] to TokenBox[{}]: {}", 
-                       self.id, tokenbox.id(), e);
+                error!(
+                    "Failed to flush TokenSlot[{}] to TokenBox[{}]: {}",
+                    self.id,
+                    tokenbox.id(),
+                    e
+                );
                 Err(e)
             }
         }
@@ -502,13 +473,10 @@ impl TokenSlot {
 
     /// Flush buffer to TokenBox without storing in local tokens first
     pub fn flush_buffer_to_tokenbox(&self, tokenbox: &TokenBox) -> Result<usize> {
-        let mut buffer = match self.buffer.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot flush_buffer_to_tokenbox lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut buffer = self.buffer.write().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot flush_buffer_to_tokenbox lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
 
         if buffer.is_empty() {
             return Ok(0);
@@ -521,13 +489,21 @@ impl TokenSlot {
         // Deposit into TokenBox
         match tokenbox.deposit_from_slot(buffer_tokens, &self.id) {
             Ok(deposited) => {
-                info!("TokenSlot[{}] flushed buffer {} tokens to TokenBox[{}]", 
-                      self.id, deposited, tokenbox.id());
+                info!(
+                    "TokenSlot[{}] flushed buffer {} tokens to TokenBox[{}]",
+                    self.id,
+                    deposited,
+                    tokenbox.id()
+                );
                 Ok(deposited)
             }
             Err(e) => {
-                error!("Failed to flush TokenSlot[{}] buffer to TokenBox[{}]: {}", 
-                       self.id, tokenbox.id(), e);
+                error!(
+                    "Failed to flush TokenSlot[{}] buffer to TokenBox[{}]: {}",
+                    self.id,
+                    tokenbox.id(),
+                    e
+                );
                 Err(e)
             }
         }
@@ -539,7 +515,9 @@ impl TokenSlot {
                 Ok(mut guard) => guard.sort_by(|a, b| a.to_string().cmp(&b.to_string())),
                 Err(poisoned) => {
                     warn!("TokenSlot sort lock poisoned, recovering...");
-                    poisoned.into_inner().sort_by(|a, b| a.to_string().cmp(&b.to_string()));
+                    poisoned
+                        .into_inner()
+                        .sort_by(|a, b| a.to_string().cmp(&b.to_string()));
                 }
             }
         } // Drop lock here
@@ -560,17 +538,16 @@ impl TokenSlot {
     }
 
     pub fn push(&self, token: Token) {
-        let mut tokens = match self.tokens.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot push tokens lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot push tokens lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
         let index = tokens.len();
         tokens.push(token.clone());
         match self.token_map.write() {
-            Ok(mut map) => { map.insert(token.to_string(), index); }
+            Ok(mut map) => {
+                map.insert(token.to_string(), index);
+            }
             Err(poisoned) => {
                 warn!("TokenSlot push map lock poisoned, recovering...");
                 poisoned.into_inner().insert(token.to_string(), index);
@@ -580,13 +557,10 @@ impl TokenSlot {
 
     pub fn append(&self, mut other: Vec<Token>) {
         {
-            let mut tokens = match self.tokens.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot append lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot append lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
             tokens.append(&mut other);
         } // Drop lock here
         self.rebuild_token_map();
@@ -594,13 +568,10 @@ impl TokenSlot {
 
     pub fn pop(&self) -> Option<Token> {
         let result = {
-            let mut tokens = match self.tokens.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot pop lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot pop lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
             tokens.pop()
         }; // Drop lock here
         if result.is_some() {
@@ -658,15 +629,13 @@ impl TokenSlot {
 
     pub fn insert(&self, index: usize, token: Token) {
         let should_rebuild = {
-            let mut tokens = match self.tokens.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot insert lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
-            if index <= tokens.len() {
-                tokens.insert(index, token);
+            let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot insert lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
+            if index < tokens.len() {
+                // REPLACE the token at this index, don't insert (which would shift everything)
+                tokens[index] = token;
                 true
             } else {
                 false
@@ -679,13 +648,10 @@ impl TokenSlot {
 
     pub fn remove(&self, index: usize) -> Option<Token> {
         let result = {
-            let mut tokens = match self.tokens.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot remove lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot remove lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
             if index < tokens.len() {
                 Some(tokens.remove(index))
             } else {
@@ -708,7 +674,7 @@ impl TokenSlot {
         }
     }
 
-    pub fn retain<F>(&self, mut f: F) 
+    pub fn retain<F>(&self, mut f: F)
     where
         F: FnMut(&Token) -> bool,
     {
@@ -726,16 +692,13 @@ impl TokenSlot {
 
     pub fn extend<I>(&self, iter: I)
     where
-        I: IntoIterator<Item = Token>,
+        I: IntoIterator<Item=Token>,
     {
         {
-            let mut tokens = match self.tokens.write() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot extend lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            let mut tokens = self.tokens.write().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot extend lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
             tokens.extend(iter);
         } // Drop lock here
         self.rebuild_token_map();
@@ -757,26 +720,20 @@ impl TokenSlot {
     fn rebuild_token_map(&self) {
         // First, create a local copy of tokens to avoid holding both locks simultaneously
         let token_strings: Vec<String> = {
-            let tokens = match self.tokens.read() {
-                Ok(guard) => guard,
-                Err(poisoned) => {
-                    warn!("TokenSlot rebuild_token_map tokens lock poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            let tokens = self.tokens.read().unwrap_or_else(|poisoned| {
+                warn!("TokenSlot rebuild_token_map tokens lock poisoned, recovering...");
+                poisoned.into_inner()
+            });
             // Create a local copy and release the lock immediately
             tokens.iter().map(|token| token.to_string()).collect()
         }; // tokens lock is dropped here
-        
+
         // Now rebuild the map with only the write lock held
-        let mut map = match self.token_map.write() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot rebuild_token_map map lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        
+        let mut map = self.token_map.write().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot rebuild_token_map map lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
+
         map.clear();
         for (index, token_string) in token_strings.into_iter().enumerate() {
             map.insert(token_string, index);
@@ -786,27 +743,24 @@ impl TokenSlot {
 
 impl Iterator for TokenSlot {
     type Item = Token;
-    
+
     fn next(&mut self) -> Option<Token> {
         let cursor = self.cursor.load(std::sync::atomic::Ordering::SeqCst);
-        let tokens = match self.tokens.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot iterator lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        
+        let tokens = self.tokens.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot iterator lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
+
         if cursor < tokens.len() {
             let token = tokens[cursor].clone();
-            self.cursor.store(cursor + 1, std::sync::atomic::Ordering::SeqCst);
+            self.cursor
+                .store(cursor + 1, std::sync::atomic::Ordering::SeqCst);
             Some(token)
         } else {
             None
         }
     }
 }
-
 
 impl Default for TokenSlot {
     fn default() -> Self {
@@ -816,24 +770,19 @@ impl Default for TokenSlot {
 
 impl PartialEq for TokenSlot {
     fn eq(&self, other: &Self) -> bool {
-        let self_tokens = match self.tokens.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot eq self lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        let other_tokens = match other.tokens.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot eq other lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
-        
-        self.id == other.id && 
-        *self_tokens == *other_tokens && 
-        self.cursor.load(std::sync::atomic::Ordering::SeqCst) == other.cursor.load(std::sync::atomic::Ordering::SeqCst)
+        let self_tokens = self.tokens.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot eq self lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
+        let other_tokens = other.tokens.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot eq other lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
+
+        self.id == other.id
+            && *self_tokens == *other_tokens
+            && self.cursor.load(std::sync::atomic::Ordering::SeqCst)
+            == other.cursor.load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
@@ -842,15 +791,14 @@ impl Eq for TokenSlot {}
 impl Hash for TokenSlot {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id.hash(state);
-        let tokens = match self.tokens.read() {
-            Ok(guard) => guard,
-            Err(poisoned) => {
-                warn!("TokenSlot hash lock poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        let tokens = self.tokens.read().unwrap_or_else(|poisoned| {
+            warn!("TokenSlot hash lock poisoned, recovering...");
+            poisoned.into_inner()
+        });
         tokens.hash(state);
-        self.cursor.load(std::sync::atomic::Ordering::SeqCst).hash(state);
+        self.cursor
+            .load(std::sync::atomic::Ordering::SeqCst)
+            .hash(state);
     }
 }
 pub enum Token {
@@ -867,8 +815,8 @@ pub enum Token {
     d(Vec<char>), // Delimiter token variant - stores delimiter character sequences
     n(),          // None/consumed token variant - placeholder for consumed tokens
 }
-impl std::fmt::Debug for Token {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::a(a, s) => write!(f, "Token::a({:?}, {})", a, s),
             Token::b(b) => write!(f, "Token::b({})", b),
@@ -885,7 +833,7 @@ impl std::fmt::Debug for Token {
         }
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq,Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Tokenizer {
     content: Vec<u8>,
     cursor: usize,
@@ -910,7 +858,7 @@ impl Token {
     pub fn type_name(&self) -> &'static str {
         match self {
             Token::a(_, _) => "array",
-            Token::b(_) => "byte", 
+            Token::b(_) => "byte",
             Token::c(_) => "char",
             Token::f(_) => "float",
             Token::i(_) => "integer",
@@ -919,7 +867,7 @@ impl Token {
             Token::u(_) => "unsigned",
             Token::v(_) => "vector",
             Token::w(_) => "whitespace",
-            Token::d(_) => "delimiter", 
+            Token::d(_) => "delimiter",
             Token::n() => "none",
         }
     }
@@ -1042,7 +990,7 @@ impl Ord for Token {
                 if *s == 1 {
                     a.cmp(&(b[0] as char))
                 } else {
-                    std::cmp::Ordering::Greater
+                    Ordering::Greater
                 }
             }
             (Token::c(a), Token::b(b)) => a.cmp(&(*b as char)),
@@ -1056,7 +1004,7 @@ impl Ord for Token {
                 if b.len() == 1 {
                     a.cmp(&(b[0] as char))
                 } else {
-                    std::cmp::Ordering::Less
+                    Ordering::Less
                 }
             }
 
@@ -1139,7 +1087,7 @@ impl Ord for Token {
                 if a.len() == 1 {
                     (a[0] as char).cmp(b)
                 } else {
-                    std::cmp::Ordering::Greater
+                    Ordering::Greater
                 }
             }
             (Token::v(a), Token::f(b)) => String::from_utf8(a.clone())
@@ -1230,9 +1178,9 @@ impl Ord for Token {
                 .cmp(&b.iter().collect::<String>()),
             (Token::w(a), Token::d(b)) => a.cmp(&b.iter().collect::<String>()),
             // Token::n patterns - consumed tokens are always equal to each other and less than all others
-            (Token::n(), Token::n()) => std::cmp::Ordering::Equal,
-            (Token::n(), _) => std::cmp::Ordering::Less,
-            (_, Token::n()) => std::cmp::Ordering::Greater,
+            (Token::n(), Token::n()) => Ordering::Equal,
+            (Token::n(), _) => Ordering::Less,
+            (_, Token::n()) => Ordering::Greater,
         }
     }
 }
@@ -1401,7 +1349,8 @@ impl Token {
         }
     }
     pub fn matches(&self, others: Vec<Token>) -> Vec<Option<Token>> {
-        others.into_iter()
+        others
+            .into_iter()
             .map(|other| if *self == other { Some(other) } else { None })
             .collect()
     }
@@ -1771,20 +1720,28 @@ impl Tokenizer {
     }
     pub fn insert_tokens(&mut self, tokens: Vec<Token>) {
         if self.active_slot >= self.slots.len() {
-            self.add_slot(TokenSlot::new(tokens.clone(), 0, Id::get(format!("token_slot_{}", self.slot_count()).as_str())));
+            self.add_slot(TokenSlot::new(
+                tokens.clone(),
+                0,
+                Id::get(format!("token_slot_{}", self.slot_count()).as_str()),
+            ));
         }
         self.slots[self.active_slot].append(tokens.clone());
     }
     pub fn insert_token(&mut self, token: Token) {
         if self.active_slot >= self.slots.len() {
-            self.add_slot(TokenSlot::new(Vec::new(), 0, Id::get(format!("token_slot_{}", self.slot_count()).as_str())));
+            self.add_slot(TokenSlot::new(
+                Vec::new(),
+                0,
+                Id::get(format!("token_slot_{}", self.slot_count()).as_str()),
+            ));
         }
         self.slots[self.active_slot].push(token.clone());
     }
     pub fn get_tokens(&self, slot: usize, range: Range<usize>) -> Vec<Token> {
         self.slots[slot].get_range(range)
     }
-    
+
     /// Flush current slot to TokenBox for multi-threaded processing
     pub fn flush_current_slot_to_tokenbox(&mut self, tokenbox: &TokenBox) -> Result<usize> {
         if self.active_slot < self.slots.len() {
@@ -1793,7 +1750,7 @@ impl Tokenizer {
             Ok(0)
         }
     }
-    
+
     /// Flush all slots to TokenBox
     pub fn flush_all_slots_to_tokenbox(&mut self, tokenbox: &TokenBox) -> Result<usize> {
         let mut total_flushed = 0;
@@ -1810,18 +1767,22 @@ impl Tokenizer {
     pub fn tokenize(&mut self, content: Vec<u8>) -> Result<Vec<Token>> {
         self.content = content;
         self.cursor = 0;
-        
+
         if self.content.is_empty() {
             return Ok(Vec::new());
         }
 
         const TOKEN_LIMIT: usize = 100_000;
-        
+
         let mut tokens = Vec::new();
         while self.cursor < self.content.len() {
             if let Some(token) = self.next_token() {
                 if tokens.len() >= TOKEN_LIMIT {
-                    return Err(C2RError::new(crate::Kind::Logic, Reason::Other("Token limit exceeded"), None));
+                    return Err(C2RError::new(
+                        crate::Kind::Logic,
+                        Reason::Exceeded("token limit"),
+                        None,
+                    ));
                 }
                 println!("Token: {}", token);
                 tokens.push(token.clone());
@@ -1830,10 +1791,14 @@ impl Tokenizer {
             }
         }
 
-        self.add_slot(TokenSlot::new(tokens.clone(), 0, Id::get(&format!("token_slot_{}", self.slots.len()))));
+        self.add_slot(TokenSlot::new(
+            tokens.clone(),
+            0,
+            Id::get(&format!("token_slot_{}", self.slots.len())),
+        ));
         self.active_slot = self.slots.len() - 1;
-        self.insert_tokens(tokens);
-        Ok(self.current_tokens().to_vec())
+        // Don't call insert_tokens - tokens are already in the slot from constructor
+        Ok(tokens)
     }
     pub fn byte_at(&self, index: usize) -> u8 {
         self.content[index]
@@ -1853,6 +1818,8 @@ impl Tokenizer {
         if self.cursor >= self.content.len() {
             return None;
         }
+
+        let b = self.cursor_byte();
 
         // Check for comments and skip them
         if self.cursor + 1 < self.content.len() {
@@ -1878,8 +1845,8 @@ impl Tokenizer {
         if b.is_ascii_alphabetic() || b == b'_' {
             while self.cursor < self.content.len()
                 && (self.cursor_byte().is_ascii_alphanumeric()
-                    || self.cursor_byte() == b'_'
-                    || self.cursor_byte() == b'.')
+                || self.cursor_byte() == b'_'
+                || self.cursor_byte() == b'.')
             {
                 self.cursor += 1;
             }
@@ -1929,17 +1896,13 @@ impl Tokenizer {
             // Use transmute directly for performance - content should be valid ASCII/UTF-8 from C source
             let content = unsafe { transmute::<&[u8], &str>(&self.content[start..end]) };
 
-            if _is_str || content.contains(' ') {
-                return Some(Token::s(content.trim().to_string()));
-            }
-
-            // Handle numeric literals - create proper Token::i() or Token::f() variants using tok! macro
+            // Handle numeric literals first
             if b.is_ascii_digit()
                 || (b == b'.'
-                    && self
-                        .content
-                        .get(start + 1)
-                        .map_or(false, |&next| next.is_ascii_digit()))
+                && self
+                .content
+                .get(start + 1)
+                .map_or(false, |&next| next.is_ascii_digit()))
             {
                 if content.contains('.') || content.contains('e') || content.contains('E') {
                     // Parse as float
@@ -1955,6 +1918,9 @@ impl Tokenizer {
                 // If parsing fails, fall back to string token
                 return Some(Token::s(content.to_string()));
             }
+
+            // Handle identifiers and strings - return for ALL non-numeric consumed content
+            return Some(Token::s(content.trim().to_string()));
         }
 
         match b {
@@ -2514,7 +2480,7 @@ impl Tokenizer {
             let mut search_pos: usize = comment_start_pos;
 
             while let Some(idx) = content[search_pos..].find(pattern) {
-                let pos : usize = search_pos + idx;
+                let pos: usize = search_pos + idx;
                 let line_end: usize = content[pos..].find('\n').unwrap_or(content.len() - pos);
                 let line: &str = &content[pos..pos + line_end];
 
@@ -2525,8 +2491,8 @@ impl Tokenizer {
                         let before_paren: &str = &line[pattern.len()..paren_pos].trim();
                         if !before_paren.is_empty()
                             && before_paren
-                                .chars()
-                                .all(|c| c.is_alphanumeric() || c == '_')
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_')
                         {
                             candidates.push((pos, line.to_string()));
                             debug!(

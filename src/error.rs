@@ -13,14 +13,239 @@ pub type Result<T> = std::result::Result<T, C2RError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
-    Io = 1,
-    Int = 2,
-    Float = 3,
-    Format = 4,
-    Network = 5,
-    Json = 6,
-    Logic = 7,
-    Other = 9,
+    // IO operations
+    IoRead,
+    IoWrite,
+    IoAccess,
+    IoNotFound,
+    IoPermission,
+
+    // Network operations
+    NetworkConnection,
+    NetworkTimeout,
+    NetworkHost,
+
+    // Parsing operations
+    ParseInt,
+    ParseFloat,
+    ParseJson,
+
+    // Format operations
+    FormatInvalid,
+
+    // Logic operations
+    LogicAssertion,
+    LogicState,
+
+    // Memory operations
+    Memory,
+    MemoryLeak,
+    MemoryAccess,
+
+    // Threading operations
+    Thread,
+    ThreadLock,
+    ThreadMutex,
+
+    // File operations
+    File,
+    FileOpen,
+    FileClose,
+
+    // System operations
+    System,
+    SystemCall,
+    SystemResource,
+
+    // Configuration operations
+    Config,
+    ConfigMissing,
+    ConfigInvalid,
+
+    // Authentication operations
+    Auth,
+    AuthPermission,
+    AuthAccess,
+
+    // Database operations
+    Database,
+    DatabaseConnection,
+    DatabaseQuery,
+
+    // Cache operations
+    Cache,
+    CacheExpired,
+    CacheMiss,
+
+    // Operation states
+    Abort,
+    Access,
+    Activate,
+    Add,
+    Address,
+    Allow,
+    Archive,
+    Array,
+    Argument,
+    Bind,
+    Block,
+    Bound,
+    Broken,
+    Busy,
+    Change,
+    Character,
+    Clock,
+    Close,
+    Conflict,
+    Connection,
+    Count,
+    Cross,
+    Dead,
+    Deadlock,
+    Delete,
+    Deny,
+    Device,
+    Directory,
+    Disable,
+    Disconnect,
+    Disk,
+    Drain,
+    Drop,
+    Empty,
+    Enable,
+    End,
+    Error,
+    Event,
+    Executable,
+    Exists,
+    Exit,
+    Expire,
+    Fail,
+    Filesystem,
+    Filter,
+    Find,
+    Finish,
+    Flag,
+    Flush,
+    Format,
+    Full,
+    Function,
+    Generate,
+    Group,
+    Handle,
+    Hash,
+    Header,
+    Host,
+    Index,
+    Initialize,
+    Input,
+    Insert,
+    Install,
+    Interrupt,
+    Invalid,
+    Item,
+    Json,
+    Key,
+    Kill,
+    Last,
+    Leak,
+    Left,
+    Length,
+    Limit,
+    Link,
+    Lock,
+    Log,
+    Loop,
+    Mail,
+    Message,
+    Missing,
+    Module,
+    Multiple,
+    Multiply,
+    Mutex,
+    Name,
+    Negate,
+    Network,
+    New,
+    Next,
+    Node,
+    Null,
+    Number,
+    Object,
+    Open,
+    Operation,
+    Option,
+    Order,
+    OutOf,
+    Overflow,
+    Permission,
+    Process,
+    Protocol,
+    Queue,
+    Quota,
+    Read,
+    Receive,
+    Record,
+    Reference,
+    Register,
+    Remove,
+    Request,
+    Resource,
+    Response,
+    Right,
+    Route,
+    Search,
+    Security,
+    Send,
+    Service,
+    Session,
+    Set,
+    Share,
+    Signal,
+    Size,
+    Socket,
+    Stale,
+    Start,
+    State,
+    Storage,
+    Stream,
+    String,
+    Sync,
+    Table,
+    Task,
+    Terminate,
+    Test,
+    Time,
+    Timeout,
+    Token,
+    Transaction,
+    Transfer,
+    Transform,
+    Type,
+    Unavailable,
+    Undefined,
+    Unexpected,
+    Unicode,
+    Uninitialized,
+    Unknown,
+    Unlock,
+    Unregister,
+    Update,
+    Upload,
+    User,
+    Validation,
+    Value,
+    Version,
+    Wait,
+    Warning,
+    Write,
+
+    // General categories
+    Io,
+    Int,
+    Float,
+    Logic,
+    Other,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -28,285 +253,113 @@ pub enum Reason {
     Abort(&'static str),
     Aborted(&'static str),
     Access(&'static str),
-    Accessible(&'static str),
     Activate(&'static str),
-    Activated(&'static str),
-    Active(&'static str),
     Add(&'static str),
-    Added(&'static str),
-    Addition(&'static str),
-    Addressable(&'static str),
     Address(&'static str),
     Already(&'static str),
     Allow(&'static str),
-    Allowed(&'static str),
     Archive(&'static str),
-    Archived(&'static str),
-    Array(&'static str),
     Argument(&'static str),
-    Arguments(&'static str),
     Bad(&'static str),
     Bind(&'static str),
     Block(&'static str),
-    Blocked(&'static str),
     Bound(&'static str),
     Broken(&'static str),
     Busy(&'static str),
     Cache(&'static str),
-    Cached(&'static str),
-    Can(&'static str),
     Cannot(&'static str),
     Change(&'static str),
-    Changed(&'static str),
     Character(&'static str),
-    Clock(&'static str),
     Close(&'static str),
-    Closed(&'static str),
     Conflict(&'static str),
     Connection(&'static str),
     Count(&'static str),
     Crosses(&'static str),
-    Crossed(&'static str),
     Dead(&'static str),
     Deadlock(&'static str),
     Deny(&'static str),
-    Denied(&'static str),
-    Dependency(&'static str),
-    Dependent(&'static str),
-    Depth(&'static str),
-    Digit(&'static str),
-    Direct(&'static str),
     Directory(&'static str),
-    Disallow(&'static str),
-    Disallowed(&'static str),
     Disconnect(&'static str),
-    Disconnected(&'static str),
     Divide(&'static str),
-    Divided(&'static str),
-    Division(&'static str),
     Duplicate(&'static str),
     Empty(&'static str),
     End(&'static str),
-    Ended(&'static str),
     Eof(&'static str),
-    Error(&'static str),
     Executable(&'static str),
     Exceeded(&'static str),
     Expected(&'static str),
     Exists(&'static str),
     Exit(&'static str),
-    Exited(&'static str),
     External(&'static str),
     Failed(&'static str),
     File(&'static str),
-    FileDescriptor(&'static str),
     Filesystem(&'static str),
-    General(&'static str),
-    Get(&'static str),
-    Good(&'static str),
-    Group(&'static str),
-    Grow(&'static str),
-    Hardware(&'static str),
     Hash(&'static str),
-    Hashable(&'static str),
-    Hashed(&'static str),
     Host(&'static str),
-    Hostname(&'static str),
-    Id(&'static str),
     Illegal(&'static str),
-    Impossible(&'static str),
-    Improbable(&'static str),
-    Incompatible(&'static str),
     Incomplete(&'static str),
-    Inconsistent(&'static str),
     Index(&'static str),
-    Indexed(&'static str),
-    Infinity(&'static str),
     Infinite(&'static str),
-    Infintesimal(&'static str),
-    Information(&'static str),
-    InProgress(&'static str),
     Input(&'static str),
-    Insert(&'static str),
-    Inserted(&'static str),
     Install(&'static str),
-    Installed(&'static str),
-    Instance(&'static str),
-    Instant(&'static str),
-    Instantiated(&'static str),
     Internal(&'static str),
-    Interrupt(&'static str),
     Interrupted(&'static str),
     Invalid(&'static str),
     Is(&'static str),
-    IsNot(&'static str),
-    Json(&'static str),
-    Key(&'static str),
     Kill(&'static str),
-    Killed(&'static str),
-    Last(&'static str),
     Leak(&'static str),
-    Leaked(&'static str),
-    Left(&'static str),
     Length(&'static str),
     Limit(&'static str),
     Link(&'static str),
-    Linked(&'static str),
-    Linkability(&'static str),
     Lock(&'static str),
-    Locked(&'static str),
-    Log(&'static str),
-    Logged(&'static str),
-    Loop(&'static str),
-    Mail(&'static str),
     Memory(&'static str),
-    Message(&'static str),
     Missing(&'static str),
-    Module(&'static str),
-    More(&'static str),
     Multiple(&'static str),
-    Multiply(&'static str),
-    Multiplied(&'static str),
-    Multiplication(&'static str),
     Mutex(&'static str),
     Name(&'static str),
-    Named(&'static str),
-    Negate(&'static str),
-    Negativity(&'static str),
-    Negative(&'static str),
-    Negated(&'static str),
     Network(&'static str),
-    NoneOf(&'static str),
-    None(&'static str),
-    Nonexistent(&'static str),
     Not(&'static str),
-    Only(&'static str),
+    Null(&'static str),
     Open(&'static str),
-    Opened(&'static str),
-    Other(&'static str),
+    Operation(&'static str),
     OutOf(&'static str),
-    Output(&'static str),
-    Outside(&'static str),
     Overflow(&'static str),
-    Overflowed(&'static str),
-    Overflowing(&'static str),
     Parse(&'static str),
-    Parseable(&'static str),
-    Parsed(&'static str),
-    Parser(&'static str),
     Path(&'static str),
-    Pause(&'static str),
-    Paused(&'static str),
     Permission(&'static str),
+    Pipe(&'static str),
+    Pointer(&'static str),
     Port(&'static str),
-    Positive(&'static str),
-    Positivity(&'static str),
-    Pop(&'static str),
-    Possible(&'static str),
     Process(&'static str),
     Protocol(&'static str),
     Queue(&'static str),
-    Question(&'static str),
-    Questionable(&'static str),
     Quota(&'static str),
-    Push(&'static str),
     Range(&'static str),
-    Ranged(&'static str),
     Read(&'static str),
-    Readable(&'static str),
-    Readability(&'static str),
-    Recover(&'static str),
-    Recovered(&'static str),
-    Recursion(&'static str),
-    Recursive(&'static str),
-    Redirect(&'static str),
-    Redirection(&'static str),
-    Redundant(&'static str),
     Reference(&'static str),
-    Reliability(&'static str),
-    Release(&'static str),
-    Released(&'static str),
     Resource(&'static str),
-    Restart(&'static str),
-    Restartable(&'static str),
-    Restarted(&'static str),
-    Result(&'static str),
-    Resume(&'static str),
-    Resumed(&'static str),
-    Return(&'static str),
-    Reverse(&'static str),
-    Right(&'static str),
-    Root(&'static str),
-    Same(&'static str),
-    Seek(&'static str),
-    Seekable(&'static str),
-    Select(&'static str),
-    Selected(&'static str),
-    Server(&'static str),
-    Set(&'static str),
-    Sizeable(&'static str),
-    Shared(&'static str),
-    Shrink(&'static str),
-    Signal(&'static str),
+    Security(&'static str),
     Size(&'static str),
-    Skip(&'static str),
-    Skippable(&'static str),
-    Skipped(&'static str),
-    Slice(&'static str),
     Socket(&'static str),
     Stale(&'static str),
-    Start(&'static str),
-    Started(&'static str),
-    State(&'static str),
-    Status(&'static str),
-    Stop(&'static str),
-    Stopped(&'static str),
     Storage(&'static str),
-    String(&'static str),
-    Subtract(&'static str),
-    Subtracted(&'static str),
-    Subtraction(&'static str),
+    Stream(&'static str),
+    System(&'static str),
     Thread(&'static str),
-    Threaded(&'static str),
-    Time(&'static str),
     Timeout(&'static str),
-    Too(&'static str),
     Type(&'static str),
-    Unaddressable(&'static str),
-    Unavailable(&'static str),
-    Unexpected(&'static str),
+    Undefined(&'static str),
+    Unicode(&'static str),
     Unknown(&'static str),
-    Unlinkable(&'static str),
-    Unlinked(&'static str),
-    Unlocked(&'static str),
+    Unlock(&'static str),
     Unreachable(&'static str),
-    Unread(&'static str),
-    Unreadable(&'static str),
-    Unseekable(&'static str),
-    Unset(&'static str),
-    Unsized(&'static str),
-    Unstable(&'static str),
     Unsupported(&'static str),
-    Unwritable(&'static str),
-    Unwritten(&'static str),
-    Up(&'static str),
-    Update(&'static str),
-    Updated(&'static str),
     User(&'static str),
     Value(&'static str),
-    Version(&'static str),
-    Wait(&'static str),
-    Waitable(&'static str),
-    Waiting(&'static str),
-    Would(&'static str),
     Write(&'static str),
-    Writability(&'static str),
-    Writable(&'static str),
-    Wrong(&'static str),
-    Zero(&'static str),
-    Zeroed(&'static str),
-    Zombie(&'static str),
+    Unexpected(&'static str),
 }
+
 impl C2RError {
     pub fn new(kind: Kind, reason: Reason, message: Option<String>) -> Self {
         Self(kind, reason, message)
@@ -344,7 +397,7 @@ impl C2RError {
 }
 impl Default for C2RError {
     fn default() -> Self {
-        Self(Kind::Other, Reason::Other("other error"), None)
+        Self(Kind::Other, Reason::Unknown("unknown error"), None)
     }
 }
 impl Display for C2RError {
@@ -366,117 +419,123 @@ impl PartialOrd for C2RError {
 
 impl From<std::fmt::Error> for C2RError {
     fn from(e: std::fmt::Error) -> Self {
-        C2RError(Kind::Format, Reason::Invalid("format"), Some(e.to_string()))
+        C2RError::new(Kind::Format, Reason::Invalid("format"), Some(e.to_string()))
     }
 }
+
 impl From<C2RError> for std::fmt::Error {
     fn from(_e: C2RError) -> Self {
-        std::fmt::Error {}
+        std::fmt::Error
     }
 }
+
 impl From<std::num::ParseIntError> for C2RError {
-    fn from(e: std::num::ParseIntError) -> C2RError {
+    fn from(e: std::num::ParseIntError) -> Self {
         match e.kind() {
             std::num::IntErrorKind::Empty => {
-                C2RError(Kind::Int, Reason::Empty(""), Some(e.to_string()))
+                C2RError::new(Kind::ParseInt, Reason::Empty("string"), Some(e.to_string()))
             }
-            std::num::IntErrorKind::InvalidDigit => {
-                C2RError(Kind::Int, Reason::Digit("is invalid"), Some(e.to_string()))
-            }
-            std::num::IntErrorKind::PosOverflow => C2RError(
-                Kind::Int,
-                Reason::Overflow("of positive type"),
+            std::num::IntErrorKind::InvalidDigit => C2RError::new(
+                Kind::ParseInt,
+                Reason::Invalid("digit"),
                 Some(e.to_string()),
             ),
-            std::num::IntErrorKind::NegOverflow => C2RError(
-                Kind::Int,
-                Reason::Overflow("of negative type"),
+            std::num::IntErrorKind::PosOverflow => C2RError::new(
+                Kind::ParseInt,
+                Reason::Overflow("positive"),
                 Some(e.to_string()),
             ),
-            std::num::IntErrorKind::Zero => {
-                C2RError(Kind::Int, Reason::Size("is zero"), Some(e.to_string()))
-            }
-            _ => C2RError(
-                Kind::Int,
-                Reason::Other("integer error"),
+            std::num::IntErrorKind::NegOverflow => C2RError::new(
+                Kind::ParseInt,
+                Reason::Overflow("negative"),
+                Some(e.to_string()),
+            ),
+            std::num::IntErrorKind::Zero => C2RError::new(
+                Kind::ParseInt,
+                Reason::Divide("by zero"),
+                Some(e.to_string()),
+            ),
+            _ => C2RError::new(
+                Kind::ParseInt,
+                Reason::Unknown("integer parsing"),
                 Some(e.to_string()),
             ),
         }
     }
 }
-impl From<C2RError> for std::num::ParseIntError {
-    fn from(e: C2RError) -> std::num::ParseIntError {
-        match e {
-            C2RError(Kind::Int, _, _) => std::num::ParseIntError::try_from(e).unwrap(),
-            _ => panic!("unhandled error: {}", e.to_string()),
-        }
-    }
-}
+
 impl From<std::num::ParseFloatError> for C2RError {
     fn from(e: std::num::ParseFloatError) -> Self {
         match e.to_string().as_str() {
-            "cannot parse float from empty string" => {
-                C2RError(Kind::Float, Reason::Empty("string"), Some(e.to_string()))
-            }
-            "invalid float literal" => {
-                C2RError(Kind::Float, Reason::Invalid("float"), Some(e.to_string()))
-            }
+            "cannot parse float from empty string" => C2RError(
+                Kind::ParseFloat,
+                Reason::Empty("string"),
+                Some(e.to_string()),
+            ),
+            "invalid float literal" => C2RError(
+                Kind::ParseFloat,
+                Reason::Invalid("float"),
+                Some(e.to_string()),
+            ),
             _ => C2RError(
-                Kind::Float,
-                Reason::Other("float parsing error"),
+                Kind::ParseFloat,
+                Reason::Parse("float parsing error"),
                 Some(e.to_string()),
             ),
         }
     }
 }
-impl From<C2RError> for std::num::ParseFloatError {
-    fn from(e: C2RError) -> Self {
-        match e {
-            C2RError(Kind::Float, _, _) => std::num::ParseFloatError::try_from(e).unwrap(),
-            _ => panic!("unhandled error: {}", e.to_string()),
-        }
-    }
-}
+
 impl From<std::io::Error> for C2RError {
     fn from(e: std::io::Error) -> Self {
         match e.kind() {
-            std::io::ErrorKind::AddrInUse => {
-                C2RError(Kind::Io, Reason::Address("in use"), Some(e.to_string()))
-            }
+            std::io::ErrorKind::AddrInUse => C2RError(
+                Kind::IoAccess,
+                Reason::Address("in use"),
+                Some(e.to_string()),
+            ),
             std::io::ErrorKind::AddrNotAvailable => C2RError(
-                Kind::Io,
+                Kind::IoAccess,
                 Reason::Address("not available"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::AlreadyExists => {
-                C2RError(Kind::Io, Reason::Exists("already"), Some(e.to_string()))
-            }
-            std::io::ErrorKind::ArgumentListTooLong => {
-                C2RError(Kind::Io, Reason::Length("too long"), Some(e.to_string()))
-            }
+            std::io::ErrorKind::AlreadyExists => C2RError(
+                Kind::IoAccess,
+                Reason::Exists("already"),
+                Some(e.to_string()),
+            ),
+            std::io::ErrorKind::ArgumentListTooLong => C2RError(
+                Kind::Io,
+                Reason::Argument("list too long"),
+                Some(e.to_string()),
+            ),
             std::io::ErrorKind::BrokenPipe => {
                 C2RError(Kind::Io, Reason::Broken("pipe"), Some(e.to_string()))
             }
-            std::io::ErrorKind::ConnectionAborted => {
-                C2RError(Kind::Io, Reason::Connection("aborted"), Some(e.to_string()))
-            }
-            std::io::ErrorKind::ConnectionRefused => {
-                C2RError(Kind::Io, Reason::Connection("refused"), Some(e.to_string()))
-            }
-            std::io::ErrorKind::ConnectionReset => {
-                C2RError(Kind::Io, Reason::Connection("reset"), Some(e.to_string()))
-            }
+            std::io::ErrorKind::ConnectionAborted => C2RError(
+                Kind::NetworkConnection,
+                Reason::Connection("aborted"),
+                Some(e.to_string()),
+            ),
+            std::io::ErrorKind::ConnectionRefused => C2RError(
+                Kind::NetworkConnection,
+                Reason::Connection("refused"),
+                Some(e.to_string()),
+            ),
+            std::io::ErrorKind::ConnectionReset => C2RError(
+                Kind::NetworkConnection,
+                Reason::Connection("reset"),
+                Some(e.to_string()),
+            ),
             std::io::ErrorKind::CrossesDevices => {
                 C2RError(Kind::Io, Reason::Crosses("devices"), Some(e.to_string()))
             }
-            std::io::ErrorKind::Deadlock => C2RError(
-                Kind::Io,
-                Reason::Deadlock("from unknown origin"),
-                Some(e.to_string()),
-            ),
+            std::io::ErrorKind::Deadlock => {
+                C2RError(Kind::Io, Reason::Deadlock("detected"), Some(e.to_string()))
+            }
             std::io::ErrorKind::DirectoryNotEmpty => C2RError(
                 Kind::Io,
-                Reason::Not("an empty directory"),
+                Reason::Directory("not empty"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::ExecutableFileBusy => C2RError(
@@ -487,9 +546,11 @@ impl From<std::io::Error> for C2RError {
             std::io::ErrorKind::FileTooLarge => {
                 C2RError(Kind::Io, Reason::File("too large"), Some(e.to_string()))
             }
-            std::io::ErrorKind::HostUnreachable => {
-                C2RError(Kind::Io, Reason::Host("unreachable"), Some(e.to_string()))
-            }
+            std::io::ErrorKind::HostUnreachable => C2RError(
+                Kind::NetworkHost,
+                Reason::Host("unreachable"),
+                Some(e.to_string()),
+            ),
             std::io::ErrorKind::Interrupted => C2RError(
                 Kind::Io,
                 Reason::Interrupted("operation"),
@@ -508,46 +569,48 @@ impl From<std::io::Error> for C2RError {
                 C2RError(Kind::Io, Reason::Is("a directory"), Some(e.to_string()))
             }
             std::io::ErrorKind::NetworkDown => {
-                C2RError(Kind::Io, Reason::Network("down"), Some(e.to_string()))
+                C2RError(Kind::Network, Reason::Network("down"), Some(e.to_string()))
             }
             std::io::ErrorKind::NetworkUnreachable => C2RError(
-                Kind::Io,
+                Kind::Network,
                 Reason::Network("unreachable"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::NotADirectory => {
                 C2RError(Kind::Io, Reason::Not("a directory"), Some(e.to_string()))
             }
-            std::io::ErrorKind::NotConnected => {
-                C2RError(Kind::Io, Reason::Not("connected"), Some(e.to_string()))
-            }
+            std::io::ErrorKind::NotConnected => C2RError(
+                Kind::NetworkConnection,
+                Reason::Not("connected"),
+                Some(e.to_string()),
+            ),
             std::io::ErrorKind::NotFound => {
-                C2RError(Kind::Io, Reason::Not("found"), Some(e.to_string()))
+                C2RError(Kind::IoNotFound, Reason::Not("found"), Some(e.to_string()))
             }
             std::io::ErrorKind::NotSeekable => {
                 C2RError(Kind::Io, Reason::Not("seekable"), Some(e.to_string()))
             }
-            std::io::ErrorKind::OutOfMemory => C2RError(
-                Kind::Io,
-                Reason::Memory("limit exceeded"),
+            std::io::ErrorKind::OutOfMemory => {
+                C2RError(Kind::Io, Reason::OutOf("memory"), Some(e.to_string()))
+            }
+            std::io::ErrorKind::PermissionDenied => C2RError(
+                Kind::IoPermission,
+                Reason::Permission("denied"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::PermissionDenied => {
-                C2RError(Kind::Io, Reason::Permission("denied"), Some(e.to_string()))
-            }
             std::io::ErrorKind::QuotaExceeded => {
                 C2RError(Kind::Io, Reason::Quota("exceeded"), Some(e.to_string()))
             }
             std::io::ErrorKind::ReadOnlyFilesystem => C2RError(
                 Kind::Io,
-                Reason::Read("only filesystem"),
+                Reason::Filesystem("read-only"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::ResourceBusy => {
-                C2RError(Kind::Io, Reason::Resource("busy"), Some(e.to_string()))
+                C2RError(Kind::Io, Reason::Busy("resource"), Some(e.to_string()))
             }
             std::io::ErrorKind::StaleNetworkFileHandle => C2RError(
-                Kind::Io,
+                Kind::Network,
                 Reason::Stale("network file handle"),
                 Some(e.to_string()),
             ),
@@ -555,74 +618,68 @@ impl From<std::io::Error> for C2RError {
                 C2RError(Kind::Io, Reason::Storage("full"), Some(e.to_string()))
             }
             std::io::ErrorKind::TimedOut => C2RError(
-                Kind::Io,
-                Reason::Time("limit exceeded"),
+                Kind::NetworkTimeout,
+                Reason::Timeout("operation"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::TooManyLinks => {
-                C2RError(Kind::Io, Reason::Too("many links"), Some(e.to_string()))
+                C2RError(Kind::Io, Reason::Multiple("links"), Some(e.to_string()))
             }
             std::io::ErrorKind::UnexpectedEof => {
-                C2RError(Kind::Io, Reason::Eof("unexpected"), Some(e.to_string()))
+                C2RError(Kind::IoRead, Reason::Unexpected("eof"), Some(e.to_string()))
             }
             std::io::ErrorKind::Unsupported => C2RError(
                 Kind::Io,
                 Reason::Unsupported("operation"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::WouldBlock => C2RError(
-                Kind::Io,
-                Reason::Would("block input/output"),
-                Some(e.to_string()),
-            ),
-            std::io::ErrorKind::WriteZero => C2RError(
-                Kind::Io,
-                Reason::Write("with zero bytes written"),
-                Some(e.to_string()),
-            ),
-            std::io::ErrorKind::Other => C2RError(
-                Kind::Io,
-                Reason::Other("unspecified error"),
-                Some(e.to_string()),
-            ),
-            _ => C2RError(Kind::Io, Reason::Invalid("error"), Some(e.to_string())),
+            std::io::ErrorKind::WouldBlock => {
+                C2RError(Kind::Io, Reason::Block("would block"), Some(e.to_string()))
+            }
+            std::io::ErrorKind::WriteZero => {
+                C2RError(Kind::IoWrite, Reason::Write("zero"), Some(e.to_string()))
+            }
+            std::io::ErrorKind::Other => {
+                C2RError(Kind::Io, Reason::Unknown("other"), Some(e.to_string()))
+            }
+            _ => C2RError(Kind::Io, Reason::Unknown("unknown"), Some(e.to_string())),
         }
     }
 }
 impl From<C2RError> for std::io::Error {
     fn from(e: C2RError) -> Self {
         match e {
-            C2RError(Kind::Io, Reason::Address("in use"), _) => {
+            C2RError(Kind::Io, Reason::Address("address is in use"), _) => {
                 std::io::Error::new(std::io::ErrorKind::AddrInUse, e)
             }
-            C2RError(Kind::Io, Reason::Address("not available"), _) => {
+            C2RError(Kind::Io, Reason::Address("address is not available"), _) => {
                 std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, e)
             }
-            C2RError(Kind::Io, Reason::Already("exists"), _) => {
+            C2RError(Kind::Io, Reason::Already("unspecified io exists already"), _) => {
                 std::io::Error::new(std::io::ErrorKind::AlreadyExists, e)
             }
-            C2RError(Kind::Io, Reason::Argument("list too long"), _) => {
+            C2RError(Kind::Io, Reason::Argument("list is too long"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ArgumentListTooLong, e)
             }
-            C2RError(Kind::Io, Reason::Broken("pipe"), _) => {
+            C2RError(Kind::Io, Reason::Broken("pipe is broken"), _) => {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
             }
-            C2RError(Kind::Io, Reason::Connection("aborted"), _) => {
+            C2RError(Kind::Io, Reason::Connection("connection has been aborted"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e)
             }
-            C2RError(Kind::Io, Reason::Connection("refused"), _) => {
+            C2RError(Kind::Io, Reason::Connection("connection has been refused"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e)
             }
-            C2RError(Kind::Io, Reason::Connection("reset"), _) => {
+            C2RError(Kind::Io, Reason::Connection("connection has been reset"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ConnectionReset, e)
             }
-            C2RError(Kind::Io, Reason::Crosses("devices"), _) => {
+            C2RError(Kind::Io, Reason::Crosses("io operations cross devices"), _) => {
                 std::io::Error::new(std::io::ErrorKind::CrossesDevices, e)
             }
-            C2RError(Kind::Io, Reason::Deadlock(_), _) => {
+            C2RError(Kind::Io, Reason::Deadlock("io operations are deadlocked"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Deadlock, e)
             }
-            C2RError(Kind::Io, Reason::Directory("not empty"), _) => {
+            C2RError(Kind::Io, Reason::Directory("directory is not empty"), _) => {
                 std::io::Error::new(std::io::ErrorKind::DirectoryNotEmpty, e)
             }
             C2RError(Kind::Io, Reason::Executable("file busy"), _) => {
@@ -634,79 +691,79 @@ impl From<C2RError> for std::io::Error {
             C2RError(Kind::Io, Reason::Host("unreachable"), _) => {
                 std::io::Error::new(std::io::ErrorKind::HostUnreachable, e)
             }
-            C2RError(Kind::Io, Reason::Interrupted(_), _) => {
+            C2RError(Kind::Io, Reason::Interrupted("io operation was interrupted"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Interrupted, e)
             }
-            C2RError(Kind::Io, Reason::Invalid("data"), _) => {
+            C2RError(Kind::Io, Reason::Invalid("invalid io data"), _) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, e)
             }
-            C2RError(Kind::Io, Reason::Invalid("filename"), _) => {
+            C2RError(Kind::Io, Reason::Invalid("invalid filename"), _) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidFilename, e)
             }
-            C2RError(Kind::Io, Reason::Invalid("input"), _) => {
+            C2RError(Kind::Io, Reason::Invalid("invalid input"), _) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
             }
-            C2RError(Kind::Io, Reason::Is("a directory"), _) => {
+            C2RError(Kind::Io, Reason::Is("is a directory"), _) => {
                 std::io::Error::new(std::io::ErrorKind::IsADirectory, e)
             }
-            C2RError(Kind::Io, Reason::Network("down"), _) => {
+            C2RError(Kind::Io, Reason::Network("network is down"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NetworkDown, e)
             }
             C2RError(Kind::Io, Reason::Network("unreachable"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NetworkUnreachable, e)
             }
-            C2RError(Kind::Io, Reason::Not("a directory"), _) => {
+            C2RError(Kind::Io, Reason::Not("not a directory"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotADirectory, e)
             }
-            C2RError(Kind::Io, Reason::Not("connected"), _) => {
+            C2RError(Kind::Io, Reason::Not("not connected"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotConnected, e)
             }
-            C2RError(Kind::Io, Reason::Not("found"), _) => {
+            C2RError(Kind::Io, Reason::Not("unspecified io entity not found"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotFound, e)
             }
-            C2RError(Kind::Io, Reason::Not("seekable"), _) => {
+            C2RError(Kind::Io, Reason::Not("not seekable"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotSeekable, e)
             }
-            C2RError(Kind::Io, Reason::OutOf("memory"), _) => {
+            C2RError(Kind::Io, Reason::OutOf("out of memory"), _) => {
                 std::io::Error::new(std::io::ErrorKind::OutOfMemory, e)
             }
-            C2RError(Kind::Io, Reason::Permission("denied"), _) => {
+            C2RError(Kind::Io, Reason::Permission("permission denied"), _) => {
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
             }
-            C2RError(Kind::Io, Reason::Quota("exceeded"), _) => {
+            C2RError(Kind::Io, Reason::Quota("quota exceeded"), _) => {
                 std::io::Error::new(std::io::ErrorKind::QuotaExceeded, e)
             }
-            C2RError(Kind::Io, Reason::Filesystem("read-only"), _) => {
+            C2RError(Kind::Io, Reason::Filesystem("filesystem is read-only"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ReadOnlyFilesystem, e)
             }
-            C2RError(Kind::Io, Reason::Resource("busy"), _) => {
+            C2RError(Kind::Io, Reason::Resource("resource is busy"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ResourceBusy, e)
             }
-            C2RError(Kind::Io, Reason::Stale("network file handle"), _) => {
+            C2RError(Kind::Io, Reason::Stale("network file handle stale"), _) => {
                 std::io::Error::new(std::io::ErrorKind::StaleNetworkFileHandle, e)
             }
-            C2RError(Kind::Io, Reason::Storage("full"), _) => {
+            C2RError(Kind::Io, Reason::Storage("storage full"), _) => {
                 std::io::Error::new(std::io::ErrorKind::StorageFull, e)
             }
-            C2RError(Kind::Io, Reason::Time("ran out"), _) => {
+            C2RError(Kind::Io, Reason::Timeout("timed out"), _) => {
                 std::io::Error::new(std::io::ErrorKind::TimedOut, e)
             }
-            C2RError(Kind::Io, Reason::Too("many links"), _) => {
+            C2RError(Kind::Io, Reason::Exceeded("max number of links exceeded"), _) => {
                 std::io::Error::new(std::io::ErrorKind::TooManyLinks, e)
             }
-            C2RError(Kind::Io, Reason::Unexpected("eof"), _) => {
+            C2RError(Kind::Io, Reason::Unexpected("unexpected end of file"), _) => {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, e)
             }
-            C2RError(Kind::Io, Reason::Unsupported(_), _) => {
+            C2RError(Kind::Io, Reason::Unsupported("unsupported io operation"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Unsupported, e)
             }
-            C2RError(Kind::Io, Reason::Would("block"), _) => {
+            C2RError(Kind::Io, Reason::Conflict("io operation would block"), _) => {
                 std::io::Error::new(std::io::ErrorKind::WouldBlock, e)
             }
-            C2RError(Kind::Io, Reason::Write("zero"), _) => {
+            C2RError(Kind::Io, Reason::Write("would write zero bytes"), _) => {
                 std::io::Error::new(std::io::ErrorKind::WriteZero, e)
             }
-            C2RError(Kind::Io, Reason::Other(e), _) => {
+            C2RError(Kind::Io, Reason::Unknown("unknown io error"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             }
             _ => std::io::Error::new(std::io::ErrorKind::Other, e),
@@ -724,12 +781,26 @@ impl From<std::num::TryFromIntError> for C2RError {
 }
 impl From<Box<dyn std::error::Error + Send + Sync>> for C2RError {
     fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        C2RError::new(Kind::Other, Reason::Other("error"), Some(e.to_string()))
+        C2RError::new(Kind::Other, Reason::Unknown("error"), Some(e.to_string()))
     }
 }
 impl Kind {
     pub fn as_str(&self) -> &'static str {
         match self {
+            Kind::IoRead => "io read",
+            Kind::IoWrite => "io write",
+            Kind::IoAccess => "io access",
+            Kind::IoNotFound => "io not found",
+            Kind::IoPermission => "io permission",
+            Kind::NetworkConnection => "network connection",
+            Kind::NetworkTimeout => "network timeout",
+            Kind::NetworkHost => "network host",
+            Kind::ParseInt => "parse int",
+            Kind::ParseFloat => "parse float",
+            Kind::ParseJson => "parse json",
+            Kind::FormatInvalid => "format invalid",
+            Kind::LogicAssertion => "logic assertion",
+            Kind::LogicState => "logic state",
             Kind::Io => "io",
             Kind::Int => "int",
             Kind::Float => "float",
@@ -738,6 +809,188 @@ impl Kind {
             Kind::Json => "json",
             Kind::Logic => "logic",
             Kind::Other => "other",
+            Kind::Memory => "memory",
+            Kind::MemoryLeak => "memory leak",
+            Kind::MemoryAccess => "memory access",
+            Kind::Thread => "thread",
+            Kind::ThreadLock => "thread lock",
+            Kind::ThreadMutex => "thread mutex",
+            Kind::File => "file",
+            Kind::FileOpen => "file open",
+            Kind::FileClose => "file close",
+            Kind::System => "system",
+            Kind::SystemCall => "system call",
+            Kind::SystemResource => "system resource",
+            Kind::Config => "config",
+            Kind::ConfigMissing => "config missing",
+            Kind::ConfigInvalid => "config invalid",
+            Kind::Auth => "auth",
+            Kind::AuthPermission => "auth permission",
+            Kind::AuthAccess => "auth access",
+            Kind::Database => "database",
+            Kind::DatabaseConnection => "database connection",
+            Kind::DatabaseQuery => "database query",
+            Kind::Cache => "cache",
+            Kind::CacheExpired => "cache expired",
+            Kind::CacheMiss => "cache miss",
+            Kind::Abort => "abort",
+            Kind::Access => "access",
+            Kind::Activate => "activate",
+            Kind::Add => "add",
+            Kind::Address => "address",
+            Kind::Allow => "allow",
+            Kind::Archive => "archive",
+            Kind::Array => "array",
+            Kind::Argument => "argument",
+            Kind::Bind => "bind",
+            Kind::Block => "block",
+            Kind::Bound => "bound",
+            Kind::Broken => "broken",
+            Kind::Busy => "busy",
+            Kind::Change => "change",
+            Kind::Character => "character",
+            Kind::Clock => "clock",
+            Kind::Close => "close",
+            Kind::Conflict => "conflict",
+            Kind::Connection => "connection",
+            Kind::Count => "count",
+            Kind::Cross => "cross",
+            Kind::Dead => "dead",
+            Kind::Deadlock => "deadlock",
+            Kind::Delete => "delete",
+            Kind::Deny => "deny",
+            Kind::Device => "device",
+            Kind::Directory => "directory",
+            Kind::Disable => "disable",
+            Kind::Disconnect => "disconnect",
+            Kind::Disk => "disk",
+            Kind::Drain => "drain",
+            Kind::Drop => "drop",
+            Kind::Empty => "empty",
+            Kind::Enable => "enable",
+            Kind::End => "end",
+            Kind::Error => "error",
+            Kind::Event => "event",
+            Kind::Executable => "executable",
+            Kind::Exists => "exists",
+            Kind::Exit => "exit",
+            Kind::Expire => "expire",
+            Kind::Fail => "fail",
+            Kind::Filesystem => "filesystem",
+            Kind::Filter => "filter",
+            Kind::Find => "find",
+            Kind::Finish => "finish",
+            Kind::Flag => "flag",
+            Kind::Flush => "flush",
+            Kind::Full => "full",
+            Kind::Function => "function",
+            Kind::Generate => "generate",
+            Kind::Group => "group",
+            Kind::Handle => "handle",
+            Kind::Hash => "hash",
+            Kind::Header => "header",
+            Kind::Host => "host",
+            Kind::Index => "index",
+            Kind::Initialize => "initialize",
+            Kind::Input => "input",
+            Kind::Insert => "insert",
+            Kind::Install => "install",
+            Kind::Interrupt => "interrupt",
+            Kind::Invalid => "invalid",
+            Kind::Item => "item",
+            Kind::Key => "key",
+            Kind::Kill => "kill",
+            Kind::Last => "last",
+            Kind::Leak => "leak",
+            Kind::Left => "left",
+            Kind::Length => "length",
+            Kind::Limit => "limit",
+            Kind::Link => "link",
+            Kind::Lock => "lock",
+            Kind::Log => "log",
+            Kind::Loop => "loop",
+            Kind::Mail => "mail",
+            Kind::Message => "message",
+            Kind::Missing => "missing",
+            Kind::Module => "module",
+            Kind::Multiple => "multiple",
+            Kind::Multiply => "multiply",
+            Kind::Mutex => "mutex",
+            Kind::Name => "name",
+            Kind::Negate => "negate",
+            Kind::New => "new",
+            Kind::Next => "next",
+            Kind::Node => "node",
+            Kind::Null => "null",
+            Kind::Number => "number",
+            Kind::Object => "object",
+            Kind::Open => "open",
+            Kind::Operation => "operation",
+            Kind::Option => "option",
+            Kind::Order => "order",
+            Kind::OutOf => "out of",
+            Kind::Overflow => "overflow",
+            Kind::Permission => "permission",
+            Kind::Process => "process",
+            Kind::Protocol => "protocol",
+            Kind::Queue => "queue",
+            Kind::Quota => "quota",
+            Kind::Read => "read",
+            Kind::Receive => "receive",
+            Kind::Record => "record",
+            Kind::Reference => "reference",
+            Kind::Register => "register",
+            Kind::Remove => "remove",
+            Kind::Request => "request",
+            Kind::Resource => "resource",
+            Kind::Response => "response",
+            Kind::Right => "right",
+            Kind::Route => "route",
+            Kind::Search => "search",
+            Kind::Security => "security",
+            Kind::Send => "send",
+            Kind::Service => "service",
+            Kind::Session => "session",
+            Kind::Set => "set",
+            Kind::Share => "share",
+            Kind::Signal => "signal",
+            Kind::Size => "size",
+            Kind::Socket => "socket",
+            Kind::Stale => "stale",
+            Kind::Start => "start",
+            Kind::State => "state",
+            Kind::Storage => "storage",
+            Kind::Stream => "stream",
+            Kind::String => "string",
+            Kind::Sync => "sync",
+            Kind::Table => "table",
+            Kind::Task => "task",
+            Kind::Terminate => "terminate",
+            Kind::Test => "test",
+            Kind::Time => "time",
+            Kind::Timeout => "timeout",
+            Kind::Token => "token",
+            Kind::Transaction => "transaction",
+            Kind::Transfer => "transfer",
+            Kind::Transform => "transform",
+            Kind::Type => "type",
+            Kind::Unavailable => "unavailable",
+            Kind::Undefined => "undefined",
+            Kind::Unexpected => "unexpected",
+            Kind::Unicode => "unicode",
+            Kind::Uninitialized => "uninitialized",
+            Kind::Unknown => "unknown",
+            Kind::Unlock => "unlock",
+            Kind::Unregister => "unregister",
+            Kind::Update => "update",
+            Kind::Upload => "upload",
+            Kind::User => "user",
+            Kind::Validation => "validation",
+            Kind::Value => "value",
+            Kind::Version => "version",
+            Kind::Wait => "wait",
+            Kind::Warning => "warning",
+            Kind::Write => "write",
         }
     }
 }
@@ -760,287 +1013,114 @@ impl PartialOrd for Kind {
 impl Reason {
     pub fn as_str(&self) -> String {
         match self {
-            Reason::Abort(s) => ["Abort ", s].join(""),
-            Reason::Aborted(s) => ["Aborted ", s].join(""),
-            Reason::Access(s) => ["Access ", s].join(""),
-            Reason::Accessible(s) => ["Accessible ", s].join(""),
-            Reason::Activate(s) => ["Activate ", s].join(""),
-            Reason::Activated(s) => ["Activated ", s].join(""),
-            Reason::Active(s) => ["Active ", s].join(""),
-            Reason::Add(s) => ["Add ", s].join(""),
-            Reason::Added(s) => ["Added ", s].join(""),
-            Reason::Addition(s) => ["Addition ", s].join(""),
-            Reason::Addressable(s) => ["Addressable ", s].join(""),
-            Reason::Address(s) => ["Address ", s].join(""),
-            Reason::Already(s) => ["Already ", s].join(""),
-            Reason::Allow(s) => ["Allow ", s].join(""),
-            Reason::Allowed(s) => ["Allowed ", s].join(""),
-            Reason::Archive(s) => ["Archive ", s].join(""),
-            Reason::Archived(s) => ["Archived ", s].join(""),
-            Reason::Array(s) => ["Array ", s].join(""),
-            Reason::Argument(s) => ["Argument ", s].join(""),
-            Reason::Arguments(s) => ["Arguments ", s].join(""),
-            Reason::Bad(s) => ["Bad ", s].join(""),
-            Reason::Bind(s) => ["Bind ", s].join(""),
-            Reason::Block(s) => ["Block ", s].join(""),
-            Reason::Blocked(s) => ["Blocked ", s].join(""),
-            Reason::Bound(s) => ["Bound ", s].join(""),
-            Reason::Broken(s) => ["Broken ", s].join(""),
-            Reason::Busy(s) => ["Busy ", s].join(""),
-            Reason::Cache(s) => ["Cache ", s].join(""),
-            Reason::Cached(s) => ["Cached ", s].join(""),
-            Reason::Can(s) => ["Can ", s].join(""),
-            Reason::Cannot(s) => ["Cannot ", s].join(""),
-            Reason::Change(s) => ["Change ", s].join(""),
-            Reason::Changed(s) => ["Changed ", s].join(""),
-            Reason::Character(s) => ["Character ", s].join(""),
-            Reason::Clock(s) => ["Clock ", s].join(""),
-            Reason::Close(s) => ["Close ", s].join(""),
-            Reason::Closed(s) => ["Closed ", s].join(""),
-            Reason::Conflict(s) => ["Conflict ", s].join(""),
-            Reason::Connection(s) => ["Connection ", s].join(""),
-            Reason::Count(s) => ["Count ", s].join(""),
-            Reason::Crosses(s) => ["Crosses ", s].join(""),
-            Reason::Crossed(s) => ["Crossed ", s].join(""),
-            Reason::Dead(s) => ["Dead ", s].join(""),
-            Reason::Deadlock(s) => ["Deadlock ", s].join(""),
-            Reason::Deny(s) => ["Deny ", s].join(""),
-            Reason::Denied(s) => ["Denied ", s].join(""),
-            Reason::Dependency(s) => ["Dependency ", s].join(""),
-            Reason::Dependent(s) => ["Dependent ", s].join(""),
-            Reason::Depth(s) => ["Depth ", s].join(""),
-            Reason::Digit(s) => ["Digit ", s].join(""),
-            Reason::Direct(s) => ["Direct ", s].join(""),
-            Reason::Directory(s) => ["Directory ", s].join(""),
-            Reason::Disallow(s) => ["Disallow ", s].join(""),
-            Reason::Disallowed(s) => ["Disallowed ", s].join(""),
-            Reason::Disconnect(s) => ["Disconnect ", s].join(""),
-            Reason::Disconnected(s) => ["Disconnected ", s].join(""),
-            Reason::Divide(s) => ["Divide ", s].join(""),
-            Reason::Divided(s) => ["Divided ", s].join(""),
-            Reason::Division(s) => ["Division ", s].join(""),
-            Reason::Duplicate(s) => ["Duplicate ", s].join(""),
-            Reason::Empty(s) => ["Empty ", s].join(""),
-            Reason::End(s) => ["End ", s].join(""),
-            Reason::Ended(s) => ["Ended ", s].join(""),
-            Reason::Eof(s) => ["Eof ", s].join(""),
-            Reason::Error(s) => ["Error ", s].join(""),
-            Reason::Executable(s) => ["Executable ", s].join(""),
-            Reason::Exceeded(s) => ["Exceeded ", s].join(""),
-            Reason::Expected(s) => ["Expected ", s].join(""),
-            Reason::Exists(s) => ["Exists ", s].join(""),
-            Reason::Exit(s) => ["Exit ", s].join(""),
-            Reason::Exited(s) => ["Exited ", s].join(""),
-            Reason::External(s) => ["External ", s].join(""),
-            Reason::Failed(s) => ["Failed ", s].join(""),
-            Reason::File(s) => ["File ", s].join(""),
-            Reason::FileDescriptor(s) => ["FileDescriptor ", s].join(""),
-            Reason::Filesystem(s) => ["Filesystem ", s].join(""),
-            Reason::General(s) => ["General ", s].join(""),
-            Reason::Get(s) => ["Get ", s].join(""),
-            Reason::Good(s) => ["Good ", s].join(""),
-            Reason::Group(s) => ["Group ", s].join(""),
-            Reason::Grow(s) => ["Grow ", s].join(""),
-            Reason::Hardware(s) => ["Hardware ", s].join(""),
-            Reason::Hash(s) => ["Hash ", s].join(""),
-            Reason::Hashable(s) => ["Hashable ", s].join(""),
-            Reason::Hashed(s) => ["Hashed ", s].join(""),
-            Reason::Host(s) => ["Host ", s].join(""),
-            Reason::Hostname(s) => ["Hostname ", s].join(""),
-            Reason::Id(s) => ["Id ", s].join(""),
-            Reason::Illegal(s) => ["Illegal ", s].join(""),
-            Reason::Impossible(s) => ["Impossible ", s].join(""),
-            Reason::Improbable(s) => ["Improbable ", s].join(""),
-            Reason::Incompatible(s) => ["Incompatible ", s].join(""),
-            Reason::Incomplete(s) => ["Incomplete ", s].join(""),
-            Reason::Inconsistent(s) => ["Inconsistent ", s].join(""),
-            Reason::Index(s) => ["Index ", s].join(""),
-            Reason::Indexed(s) => ["Indexed ", s].join(""),
-            Reason::Infinity(s) => ["Infinity ", s].join(""),
-            Reason::Infinite(s) => ["Infinite ", s].join(""),
-            Reason::Infintesimal(s) => ["Infintesimal ", s].join(""),
-            Reason::Information(s) => ["Information ", s].join(""),
-            Reason::InProgress(s) => ["InProgress ", s].join(""),
-            Reason::Input(s) => ["Input ", s].join(""),
-            Reason::Insert(s) => ["Insert ", s].join(""),
-            Reason::Inserted(s) => ["Inserted ", s].join(""),
-            Reason::Install(s) => ["Install ", s].join(""),
-            Reason::Installed(s) => ["Installed ", s].join(""),
-            Reason::Instance(s) => ["Instance ", s].join(""),
-            Reason::Instant(s) => ["Instant ", s].join(""),
-            Reason::Instantiated(s) => ["Instantiated ", s].join(""),
-            Reason::Internal(s) => ["Internal ", s].join(""),
-            Reason::Interrupt(s) => ["Interrupt ", s].join(""),
-            Reason::Interrupted(s) => ["Interrupted ", s].join(""),
-            Reason::Invalid(s) => ["Invalid ", s].join(""),
-            Reason::Is(s) => ["Is ", s].join(""),
-            Reason::IsNot(s) => ["IsNot ", s].join(""),
-            Reason::Json(s) => ["Json ", s].join(""),
-            Reason::Key(s) => ["Key ", s].join(""),
-            Reason::Kill(s) => ["Kill ", s].join(""),
-            Reason::Killed(s) => ["Killed ", s].join(""),
-            Reason::Last(s) => ["Last ", s].join(""),
-            Reason::Leak(s) => ["Leak ", s].join(""),
-            Reason::Leaked(s) => ["Leaked ", s].join(""),
-            Reason::Left(s) => ["Left ", s].join(""),
-            Reason::Length(s) => ["Length ", s].join(""),
-            Reason::Limit(s) => ["Limit ", s].join(""),
-            Reason::Link(s) => ["Link ", s].join(""),
-            Reason::Linked(s) => ["Linked ", s].join(""),
-            Reason::Linkability(s) => ["Linkability ", s].join(""),
-            Reason::Lock(s) => ["Lock ", s].join(""),
-            Reason::Locked(s) => ["Locked ", s].join(""),
-            Reason::Log(s) => ["Log ", s].join(""),
-            Reason::Logged(s) => ["Logged ", s].join(""),
-            Reason::Loop(s) => ["Loop ", s].join(""),
-            Reason::Mail(s) => ["Mail ", s].join(""),
-            Reason::Memory(s) => ["Memory ", s].join(""),
-            Reason::Message(s) => ["Message ", s].join(""),
-            Reason::Missing(s) => ["Missing ", s].join(""),
-            Reason::Module(s) => ["Module ", s].join(""),
-            Reason::More(s) => ["More ", s].join(""),
-            Reason::Multiple(s) => ["Multiple ", s].join(""),
-            Reason::Multiply(s) => ["Multiply ", s].join(""),
-            Reason::Multiplied(s) => ["Multiplied ", s].join(""),
-            Reason::Multiplication(s) => ["Multiplication ", s].join(""),
-            Reason::Mutex(s) => ["Mutex ", s].join(""),
-            Reason::Name(s) => ["Name ", s].join(""),
-            Reason::Named(s) => ["Named ", s].join(""),
-            Reason::Negate(s) => ["Negate ", s].join(""),
-            Reason::Negativity(s) => ["Negativity ", s].join(""),
-            Reason::Negative(s) => ["Negative ", s].join(""),
-            Reason::Negated(s) => ["Negated ", s].join(""),
-            Reason::Network(s) => ["Network ", s].join(""),
-            Reason::NoneOf(s) => ["NoneOf ", s].join(""),
-            Reason::None(s) => ["None ", s].join(""),
-            Reason::Nonexistent(s) => ["Nonexistent ", s].join(""),
-            Reason::Not(s) => ["Not ", s].join(""),
-            Reason::Only(s) => ["Only ", s].join(""),
-            Reason::Open(s) => ["Open ", s].join(""),
-            Reason::Opened(s) => ["Opened ", s].join(""),
-            Reason::Other(s) => ["Other ", s].join(""),
-            Reason::OutOf(s) => ["OutOf ", s].join(""),
-            Reason::Output(s) => ["Output ", s].join(""),
-            Reason::Outside(s) => ["Outside ", s].join(""),
-            Reason::Overflow(s) => ["Overflow ", s].join(""),
-            Reason::Overflowed(s) => ["Overflowed ", s].join(""),
-            Reason::Overflowing(s) => ["Overflowing ", s].join(""),
-            Reason::Parse(s) => ["Parse ", s].join(""),
-            Reason::Parseable(s) => ["Parseable ", s].join(""),
-            Reason::Parsed(s) => ["Parsed ", s].join(""),
-            Reason::Parser(s) => ["Parser ", s].join(""),
-            Reason::Path(s) => ["Path ", s].join(""),
-            Reason::Pause(s) => ["Pause ", s].join(""),
-            Reason::Paused(s) => ["Paused ", s].join(""),
-            Reason::Permission(s) => ["Permission ", s].join(""),
-            Reason::Port(s) => ["Port ", s].join(""),
-            Reason::Positive(s) => ["Positive ", s].join(""),
-            Reason::Positivity(s) => ["Positivity ", s].join(""),
-            Reason::Pop(s) => ["Pop ", s].join(""),
-            Reason::Possible(s) => ["Possible ", s].join(""),
-            Reason::Process(s) => ["Process ", s].join(""),
-            Reason::Protocol(s) => ["Protocol ", s].join(""),
-            Reason::Queue(s) => ["Queue ", s].join(""),
-            Reason::Question(s) => ["Question ", s].join(""),
-            Reason::Questionable(s) => ["Questionable ", s].join(""),
-            Reason::Quota(s) => ["Quota ", s].join(""),
-            Reason::Push(s) => ["Push ", s].join(""),
-            Reason::Range(s) => ["Range ", s].join(""),
-            Reason::Ranged(s) => ["Ranged ", s].join(""),
-            Reason::Read(s) => ["Read ", s].join(""),
-            Reason::Readable(s) => ["Readable ", s].join(""),
-            Reason::Readability(s) => ["Readability ", s].join(""),
-            Reason::Recover(s) => ["Recover ", s].join(""),
-            Reason::Recovered(s) => ["Recovered ", s].join(""),
-            Reason::Recursion(s) => ["Recursion ", s].join(""),
-            Reason::Recursive(s) => ["Recursive ", s].join(""),
-            Reason::Redirect(s) => ["Redirect ", s].join(""),
-            Reason::Redirection(s) => ["Redirection ", s].join(""),
-            Reason::Redundant(s) => ["Redundant ", s].join(""),
-            Reason::Reference(s) => ["Reference ", s].join(""),
-            Reason::Reliability(s) => ["Reliability ", s].join(""),
-            Reason::Release(s) => ["Release ", s].join(""),
-            Reason::Released(s) => ["Released ", s].join(""),
-            Reason::Resource(s) => ["Resource ", s].join(""),
-            Reason::Restart(s) => ["Restart ", s].join(""),
-            Reason::Restartable(s) => ["Restartable ", s].join(""),
-            Reason::Restarted(s) => ["Restarted ", s].join(""),
-            Reason::Result(s) => ["Result ", s].join(""),
-            Reason::Resume(s) => ["Resume ", s].join(""),
-            Reason::Resumed(s) => ["Resumed ", s].join(""),
-            Reason::Return(s) => ["Return ", s].join(""),
-            Reason::Reverse(s) => ["Reverse ", s].join(""),
-            Reason::Right(s) => ["Right ", s].join(""),
-            Reason::Root(s) => ["Root ", s].join(""),
-            Reason::Same(s) => ["Same ", s].join(""),
-            Reason::Seek(s) => ["Seek ", s].join(""),
-            Reason::Seekable(s) => ["Seekable ", s].join(""),
-            Reason::Select(s) => ["Select ", s].join(""),
-            Reason::Selected(s) => ["Selected ", s].join(""),
-            Reason::Server(s) => ["Server ", s].join(""),
-            Reason::Set(s) => ["Set ", s].join(""),
-            Reason::Sizeable(s) => ["Sizeable ", s].join(""),
-            Reason::Shared(s) => ["Shared ", s].join(""),
-            Reason::Shrink(s) => ["Shrink ", s].join(""),
-            Reason::Signal(s) => ["Signal ", s].join(""),
-            Reason::Size(s) => ["Size ", s].join(""),
-            Reason::Skip(s) => ["Skip ", s].join(""),
-            Reason::Skippable(s) => ["Skippable ", s].join(""),
-            Reason::Skipped(s) => ["Skipped ", s].join(""),
-            Reason::Slice(s) => ["Slice ", s].join(""),
-            Reason::Socket(s) => ["Socket ", s].join(""),
-            Reason::Stale(s) => ["Stale ", s].join(""),
-            Reason::Start(s) => ["Start ", s].join(""),
-            Reason::Started(s) => ["Started ", s].join(""),
-            Reason::State(s) => ["State ", s].join(""),
-            Reason::Status(s) => ["Status ", s].join(""),
-            Reason::Stop(s) => ["Stop ", s].join(""),
-            Reason::Stopped(s) => ["Stopped ", s].join(""),
-            Reason::Storage(s) => ["Storage ", s].join(""),
-            Reason::String(s) => ["String ", s].join(""),
-            Reason::Subtract(s) => ["Subtract ", s].join(""),
-            Reason::Subtracted(s) => ["Subtracted ", s].join(""),
-            Reason::Subtraction(s) => ["Subtraction ", s].join(""),
-            Reason::Thread(s) => ["Thread ", s].join(""),
-            Reason::Threaded(s) => ["Threaded ", s].join(""),
-            Reason::Time(s) => ["Time ", s].join(""),
-            Reason::Timeout(s) => ["Timeout ", s].join(""),
-            Reason::Too(s) => ["Too ", s].join(""),
-            Reason::Type(s) => ["Type ", s].join(""),
-            Reason::Unaddressable(s) => ["Unaddressable ", s].join(""),
-            Reason::Unavailable(s) => ["Unavailable ", s].join(""),
-            Reason::Unexpected(s) => ["Unexpected ", s].join(""),
-            Reason::Unknown(s) => ["Unknown ", s].join(""),
-            Reason::Unlinkable(s) => ["Unlinkable ", s].join(""),
-            Reason::Unlinked(s) => ["Unlinked ", s].join(""),
-            Reason::Unlocked(s) => ["Unlocked ", s].join(""),
-            Reason::Unreachable(s) => ["Unreachable ", s].join(""),
-            Reason::Unread(s) => ["Unread ", s].join(""),
-            Reason::Unreadable(s) => ["Unreadable ", s].join(""),
-            Reason::Unseekable(s) => ["Unseekable ", s].join(""),
-            Reason::Unset(s) => ["Unset ", s].join(""),
-            Reason::Unsized(s) => ["Unsized ", s].join(""),
-            Reason::Unstable(s) => ["Unstable ", s].join(""),
-            Reason::Unsupported(s) => ["Unsupported ", s].join(""),
-            Reason::Unwritable(s) => ["Unwritable ", s].join(""),
-            Reason::Unwritten(s) => ["Unwritten ", s].join(""),
-            Reason::Up(s) => ["Up ", s].join(""),
-            Reason::Update(s) => ["Update ", s].join(""),
-            Reason::Updated(s) => ["Updated ", s].join(""),
-            Reason::User(s) => ["User ", s].join(""),
-            Reason::Value(s) => ["Value ", s].join(""),
-            Reason::Version(s) => ["Version ", s].join(""),
-            Reason::Wait(s) => ["Wait ", s].join(""),
-            Reason::Waitable(s) => ["Waitable ", s].join(""),
-            Reason::Waiting(s) => ["Waiting ", s].join(""),
-            Reason::Would(s) => ["Would ", s].join(""),
-            Reason::Write(s) => ["Write ", s].join(""),
-            Reason::Writability(s) => ["Writability ", s].join(""),
-            Reason::Writable(s) => ["Writable ", s].join(""),
-            Reason::Wrong(s) => ["Wrong ", s].join(""),
-            Reason::Zero(s) => ["Zero ", s].join(""),
-            Reason::Zeroed(s) => ["Zeroed ", s].join(""),
-            Reason::Zombie(s) => ["Zombie ", s].join(""),
+            Reason::Abort(s) => format!("Abort {}", s),
+            Reason::Aborted(s) => format!("Aborted {}", s),
+            Reason::Access(s) => format!("Access {}", s),
+            Reason::Activate(s) => format!("Activate {}", s),
+            Reason::Add(s) => format!("Add {}", s),
+            Reason::Address(s) => format!("Address {}", s),
+            Reason::Already(s) => format!("Already {}", s),
+            Reason::Allow(s) => format!("Allow {}", s),
+            Reason::Archive(s) => format!("Archive {}", s),
+            Reason::Argument(s) => format!("Argument {}", s),
+            Reason::Bad(s) => format!("Bad {}", s),
+            Reason::Bind(s) => format!("Bind {}", s),
+            Reason::Block(s) => format!("Block {}", s),
+            Reason::Bound(s) => format!("Bound {}", s),
+            Reason::Broken(s) => format!("Broken {}", s),
+            Reason::Busy(s) => format!("Busy {}", s),
+            Reason::Cache(s) => format!("Cache {}", s),
+            Reason::Cannot(s) => format!("Cannot {}", s),
+            Reason::Change(s) => format!("Change {}", s),
+            Reason::Character(s) => format!("Character {}", s),
+            Reason::Close(s) => format!("Close {}", s),
+            Reason::Conflict(s) => format!("Conflict {}", s),
+            Reason::Connection(s) => format!("Connection {}", s),
+            Reason::Count(s) => format!("Count {}", s),
+            Reason::Crosses(s) => format!("Crosses {}", s),
+            Reason::Dead(s) => format!("Dead {}", s),
+            Reason::Deadlock(s) => format!("Deadlock {}", s),
+            Reason::Deny(s) => format!("Deny {}", s),
+            Reason::Directory(s) => format!("Directory {}", s),
+            Reason::Disconnect(s) => format!("Disconnect {}", s),
+            Reason::Divide(s) => format!("Divide {}", s),
+            Reason::Duplicate(s) => format!("Duplicate {}", s),
+            Reason::Empty(s) => format!("Empty {}", s),
+            Reason::End(s) => format!("End {}", s),
+            Reason::Eof(s) => format!("Eof {}", s),
+            Reason::Executable(s) => format!("Executable {}", s),
+            Reason::Exceeded(s) => format!("Exceeded {}", s),
+            Reason::Expected(s) => format!("Expected {}", s),
+            Reason::Exists(s) => format!("Exists {}", s),
+            Reason::Exit(s) => format!("Exit {}", s),
+            Reason::External(s) => format!("External {}", s),
+            Reason::Failed(s) => format!("Failed {}", s),
+            Reason::File(s) => format!("File {}", s),
+            Reason::Filesystem(s) => format!("Filesystem {}", s),
+            Reason::Hash(s) => format!("Hash {}", s),
+            Reason::Host(s) => format!("Host {}", s),
+            Reason::Illegal(s) => format!("Illegal {}", s),
+            Reason::Incomplete(s) => format!("Incomplete {}", s),
+            Reason::Index(s) => format!("Index {}", s),
+            Reason::Infinite(s) => format!("Infinite {}", s),
+            Reason::Input(s) => format!("Input {}", s),
+            Reason::Install(s) => format!("Install {}", s),
+            Reason::Internal(s) => format!("Internal {}", s),
+            Reason::Interrupted(s) => format!("Interrupted {}", s),
+            Reason::Invalid(s) => format!("Invalid {}", s),
+            Reason::Is(s) => format!("Is {}", s),
+            Reason::Kill(s) => format!("Kill {}", s),
+            Reason::Leak(s) => format!("Leak {}", s),
+            Reason::Length(s) => format!("Length {}", s),
+            Reason::Limit(s) => format!("Limit {}", s),
+            Reason::Link(s) => format!("Link {}", s),
+            Reason::Lock(s) => format!("Lock {}", s),
+            Reason::Memory(s) => format!("Memory {}", s),
+            Reason::Missing(s) => format!("Missing {}", s),
+            Reason::Multiple(s) => format!("Multiple {}", s),
+            Reason::Mutex(s) => format!("Mutex {}", s),
+            Reason::Name(s) => format!("Name {}", s),
+            Reason::Network(s) => format!("Network {}", s),
+            Reason::Not(s) => format!("Not {}", s),
+            Reason::Null(s) => format!("Null {}", s),
+            Reason::Open(s) => format!("Open {}", s),
+            Reason::Operation(s) => format!("Operation {}", s),
+            Reason::OutOf(s) => format!("OutOf {}", s),
+            Reason::Overflow(s) => format!("Overflow {}", s),
+            Reason::Parse(s) => format!("Parse {}", s),
+            Reason::Path(s) => format!("Path {}", s),
+            Reason::Permission(s) => format!("Permission {}", s),
+            Reason::Pipe(s) => format!("Pipe {}", s),
+            Reason::Pointer(s) => format!("Pointer {}", s),
+            Reason::Port(s) => format!("Port {}", s),
+            Reason::Process(s) => format!("Process {}", s),
+            Reason::Protocol(s) => format!("Protocol {}", s),
+            Reason::Queue(s) => format!("Queue {}", s),
+            Reason::Quota(s) => format!("Quota {}", s),
+            Reason::Range(s) => format!("Range {}", s),
+            Reason::Read(s) => format!("Read {}", s),
+            Reason::Reference(s) => format!("Reference {}", s),
+            Reason::Resource(s) => format!("Resource {}", s),
+            Reason::Security(s) => format!("Security {}", s),
+            Reason::Size(s) => format!("Size {}", s),
+            Reason::Socket(s) => format!("Socket {}", s),
+            Reason::Stale(s) => format!("Stale {}", s),
+            Reason::Storage(s) => format!("Storage {}", s),
+            Reason::Stream(s) => format!("Stream {}", s),
+            Reason::System(s) => format!("System {}", s),
+            Reason::Thread(s) => format!("Thread {}", s),
+            Reason::Timeout(s) => format!("Timeout {}", s),
+            Reason::Type(s) => format!("Type {}", s),
+            Reason::Undefined(s) => format!("Undefined {}", s),
+            Reason::Unexpected(s) => format!("Unexpected {}", s),
+            Reason::Unicode(s) => format!("Unicode {}", s),
+            Reason::Unknown(s) => format!("Unknown {}", s),
+            Reason::Unlock(s) => format!("Unlock {}", s),
+            Reason::Unreachable(s) => format!("Unreachable {}", s),
+            Reason::Unsupported(s) => format!("Unsupported {}", s),
+            Reason::User(s) => format!("User {}", s),
+            Reason::Value(s) => format!("Value {}", s),
+            Reason::Write(s) => format!("Write {}", s),
         }
     }
 }
@@ -1064,19 +1144,19 @@ impl From<std::io::ErrorKind> for Reason {
         match kind {
             std::io::ErrorKind::AddrInUse => Reason::Address("in use"),
             std::io::ErrorKind::AddrNotAvailable => Reason::Address("not available"),
-            std::io::ErrorKind::AlreadyExists => Reason::Already("exists"),
+            std::io::ErrorKind::AlreadyExists => Reason::Exists("already"),
             std::io::ErrorKind::ArgumentListTooLong => Reason::Argument("list too long"),
             std::io::ErrorKind::BrokenPipe => Reason::Broken("pipe"),
             std::io::ErrorKind::ConnectionAborted => Reason::Connection("aborted"),
             std::io::ErrorKind::ConnectionRefused => Reason::Connection("refused"),
             std::io::ErrorKind::ConnectionReset => Reason::Connection("reset"),
             std::io::ErrorKind::CrossesDevices => Reason::Crosses("devices"),
-            std::io::ErrorKind::Deadlock => Reason::Deadlock(""),
+            std::io::ErrorKind::Deadlock => Reason::Deadlock("detected"),
             std::io::ErrorKind::DirectoryNotEmpty => Reason::Directory("not empty"),
             std::io::ErrorKind::ExecutableFileBusy => Reason::Executable("file busy"),
             std::io::ErrorKind::FileTooLarge => Reason::File("too large"),
             std::io::ErrorKind::HostUnreachable => Reason::Host("unreachable"),
-            std::io::ErrorKind::Interrupted => Reason::Interrupted(""),
+            std::io::ErrorKind::Interrupted => Reason::Interrupted("operation"),
             std::io::ErrorKind::InvalidData => Reason::Invalid("data"),
             std::io::ErrorKind::InvalidFilename => Reason::Invalid("filename"),
             std::io::ErrorKind::InvalidInput => Reason::Invalid("input"),
@@ -1094,57 +1174,61 @@ impl From<std::io::ErrorKind> for Reason {
             std::io::ErrorKind::ResourceBusy => Reason::Resource("busy"),
             std::io::ErrorKind::StaleNetworkFileHandle => Reason::Stale("network file handle"),
             std::io::ErrorKind::StorageFull => Reason::Storage("full"),
-            std::io::ErrorKind::TimedOut => Reason::Time("ran out"),
-            std::io::ErrorKind::TooManyLinks => Reason::Too("many links"),
-            std::io::ErrorKind::UnexpectedEof => Reason::Eof("unexpected"),
-            std::io::ErrorKind::Unsupported => Reason::Unsupported(""),
-            std::io::ErrorKind::WouldBlock => Reason::Would("block"),
-            std::io::ErrorKind::WriteZero => Reason::Write("zero"),
-            _ => Reason::Other("unknown"),
+            std::io::ErrorKind::TimedOut => Reason::Timeout("occurred"),
+            std::io::ErrorKind::TooManyLinks => Reason::Exceeded("max links"),
+            std::io::ErrorKind::UnexpectedEof => Reason::End("unexpected eof"),
+            std::io::ErrorKind::Unsupported => Reason::Unsupported("operation"),
+            std::io::ErrorKind::WouldBlock => Reason::Conflict("would block"),
+            std::io::ErrorKind::WriteZero => Reason::Write("zero bytes"),
+            _ => Reason::Unknown("io error kind"),
         }
     }
 }
 impl From<Reason> for std::io::ErrorKind {
-    fn from(kind: Reason) -> Self {
-        match kind {
-            Reason::Address("in use") => std::io::ErrorKind::AddrInUse,
-            Reason::Address("not available") => std::io::ErrorKind::AddrNotAvailable,
-            Reason::Exists("already") => std::io::ErrorKind::AlreadyExists,
-            Reason::Argument("list too long") => std::io::ErrorKind::ArgumentListTooLong,
-            Reason::Broken("pipe") => std::io::ErrorKind::BrokenPipe,
-            Reason::Connection("aborted") => std::io::ErrorKind::ConnectionAborted,
-            Reason::Connection("refused") => std::io::ErrorKind::ConnectionRefused,
-            Reason::Connection("reset") => std::io::ErrorKind::ConnectionReset,
-            Reason::Crosses("devices") => std::io::ErrorKind::CrossesDevices,
-            Reason::Deadlock(_) => std::io::ErrorKind::Deadlock,
-            Reason::Directory("not empty") => std::io::ErrorKind::DirectoryNotEmpty,
-            Reason::Executable("file busy") => std::io::ErrorKind::ExecutableFileBusy,
-            Reason::File("too large") => std::io::ErrorKind::FileTooLarge,
-            Reason::Host("unreachable") => std::io::ErrorKind::HostUnreachable,
-            Reason::Interrupted(_) => std::io::ErrorKind::Interrupted,
-            Reason::Invalid("data") => std::io::ErrorKind::InvalidData,
-            Reason::Invalid("filename") => std::io::ErrorKind::InvalidFilename,
-            Reason::Invalid("input") => std::io::ErrorKind::InvalidInput,
-            Reason::Is("a directory") => std::io::ErrorKind::IsADirectory,
-            Reason::Network("down") => std::io::ErrorKind::NetworkDown,
-            Reason::Network("unreachable") => std::io::ErrorKind::NetworkUnreachable,
-            Reason::Not("a directory") => std::io::ErrorKind::NotADirectory,
-            Reason::Not("connected") => std::io::ErrorKind::NotConnected,
-            Reason::Not("found") => std::io::ErrorKind::NotFound,
-            Reason::Not("seekable") => std::io::ErrorKind::NotSeekable,
-            Reason::OutOf("memory") => std::io::ErrorKind::OutOfMemory,
-            Reason::Permission("denied") => std::io::ErrorKind::PermissionDenied,
-            Reason::Quota("exceeded") => std::io::ErrorKind::QuotaExceeded,
-            Reason::Filesystem("read-only") => std::io::ErrorKind::ReadOnlyFilesystem,
-            Reason::Resource("busy") => std::io::ErrorKind::ResourceBusy,
-            Reason::Stale("network file handle") => std::io::ErrorKind::StaleNetworkFileHandle,
-            Reason::Storage("full") => std::io::ErrorKind::StorageFull,
-            Reason::Time("ran out") => std::io::ErrorKind::TimedOut,
-            Reason::Too("many links") => std::io::ErrorKind::TooManyLinks,
-            Reason::Unexpected("eof") => std::io::ErrorKind::UnexpectedEof,
-            Reason::Unsupported(_) => std::io::ErrorKind::Unsupported,
-            Reason::Would("block") => std::io::ErrorKind::WouldBlock,
-            Reason::Write("zero") => std::io::ErrorKind::WriteZero,
+    fn from(reason: Reason) -> Self {
+        match reason {
+            Reason::Address(msg) if msg == "in use" => std::io::ErrorKind::AddrInUse,
+            Reason::Address(msg) if msg == "not available" => std::io::ErrorKind::AddrNotAvailable,
+            Reason::Exists(msg) if msg == "already" => std::io::ErrorKind::AlreadyExists,
+            Reason::Argument(msg) if msg == "list too long" => {
+                std::io::ErrorKind::ArgumentListTooLong
+            }
+            Reason::Broken(msg) if msg == "pipe" => std::io::ErrorKind::BrokenPipe,
+            Reason::Connection(msg) if msg == "aborted" => std::io::ErrorKind::ConnectionAborted,
+            Reason::Connection(msg) if msg == "refused" => std::io::ErrorKind::ConnectionRefused,
+            Reason::Connection(msg) if msg == "reset" => std::io::ErrorKind::ConnectionReset,
+            Reason::Crosses(msg) if msg == "devices" => std::io::ErrorKind::CrossesDevices,
+            Reason::Deadlock(msg) if msg == "detected" => std::io::ErrorKind::Deadlock,
+            Reason::Directory(msg) if msg == "not empty" => std::io::ErrorKind::DirectoryNotEmpty,
+            Reason::Executable(msg) if msg == "file busy" => std::io::ErrorKind::ExecutableFileBusy,
+            Reason::File(msg) if msg == "too large" => std::io::ErrorKind::FileTooLarge,
+            Reason::Host(msg) if msg == "unreachable" => std::io::ErrorKind::HostUnreachable,
+            Reason::Interrupted(msg) if msg == "operation" => std::io::ErrorKind::Interrupted,
+            Reason::Invalid(msg) if msg == "data" => std::io::ErrorKind::InvalidData,
+            Reason::Invalid(msg) if msg == "filename" => std::io::ErrorKind::InvalidFilename,
+            Reason::Invalid(msg) if msg == "input" => std::io::ErrorKind::InvalidInput,
+            Reason::Is(msg) if msg == "a directory" => std::io::ErrorKind::IsADirectory,
+            Reason::Network(msg) if msg == "down" => std::io::ErrorKind::NetworkDown,
+            Reason::Network(msg) if msg == "unreachable" => std::io::ErrorKind::NetworkUnreachable,
+            Reason::Not(msg) if msg == "a directory" => std::io::ErrorKind::NotADirectory,
+            Reason::Not(msg) if msg == "connected" => std::io::ErrorKind::NotConnected,
+            Reason::Not(msg) if msg == "found" => std::io::ErrorKind::NotFound,
+            Reason::Not(msg) if msg == "seekable" => std::io::ErrorKind::NotSeekable,
+            Reason::OutOf(msg) if msg == "memory" => std::io::ErrorKind::OutOfMemory,
+            Reason::Permission(msg) if msg == "denied" => std::io::ErrorKind::PermissionDenied,
+            Reason::Exceeded(msg) if msg == "quota" => std::io::ErrorKind::QuotaExceeded,
+            Reason::Filesystem(msg) if msg == "read-only" => std::io::ErrorKind::ReadOnlyFilesystem,
+            Reason::Resource(msg) if msg == "busy" => std::io::ErrorKind::ResourceBusy,
+            Reason::Stale(msg) if msg == "network file handle" => {
+                std::io::ErrorKind::StaleNetworkFileHandle
+            }
+            Reason::Storage(msg) if msg == "full" => std::io::ErrorKind::StorageFull,
+            Reason::Timeout(msg) if msg == "occurred" => std::io::ErrorKind::TimedOut,
+            Reason::Exceeded(msg) if msg == "max links" => std::io::ErrorKind::TooManyLinks,
+            Reason::End(msg) if msg == "unexpected eof" => std::io::ErrorKind::UnexpectedEof,
+            Reason::Unsupported(msg) if msg == "operation" => std::io::ErrorKind::Unsupported,
+            Reason::Conflict(msg) if msg == "would block" => std::io::ErrorKind::WouldBlock,
+            Reason::Write(msg) if msg == "zero bytes" => std::io::ErrorKind::WriteZero,
             _ => std::io::ErrorKind::Other,
         }
     }
@@ -1153,23 +1237,24 @@ impl From<std::num::IntErrorKind> for Reason {
     fn from(kind: std::num::IntErrorKind) -> Self {
         match kind {
             std::num::IntErrorKind::Empty => Reason::Empty("value"),
-            std::num::IntErrorKind::PosOverflow => Reason::Overflow("of positive type"),
-            std::num::IntErrorKind::NegOverflow => Reason::Overflow("of negative type"),
-            std::num::IntErrorKind::InvalidDigit => Reason::Digit("invalid"),
-            std::num::IntErrorKind::Zero => Reason::Zero("as divisor"),
-            _ => Reason::Other("unknown integer error"),
+            std::num::IntErrorKind::PosOverflow => Reason::Overflow("positive"),
+            std::num::IntErrorKind::NegOverflow => Reason::Overflow("negative"),
+            std::num::IntErrorKind::InvalidDigit => Reason::Invalid("digit"),
+            std::num::IntErrorKind::Zero => Reason::Divide("by zero"),
+            _ => Reason::Unknown("integer parsing"),
         }
     }
 }
+
 impl From<Reason> for std::num::IntErrorKind {
-    fn from(kind: Reason) -> Self {
-        match kind {
-            Reason::Empty("value") => std::num::IntErrorKind::Empty,
-            Reason::Overflow("of positive type") => std::num::IntErrorKind::PosOverflow,
-            Reason::Overflow("of negative type") => std::num::IntErrorKind::NegOverflow,
-            Reason::Digit("is invalid") => std::num::IntErrorKind::InvalidDigit,
-            Reason::Zero("as divisor") => std::num::IntErrorKind::Zero,
-            _ => panic!("unhandled error: {}", kind.to_string()),
+    fn from(reason: Reason) -> Self {
+        match reason {
+            Reason::Empty(msg) if msg == "value" => std::num::IntErrorKind::Empty,
+            Reason::Overflow(msg) if msg == "positive" => std::num::IntErrorKind::PosOverflow,
+            Reason::Overflow(msg) if msg == "negative" => std::num::IntErrorKind::NegOverflow,
+            Reason::Invalid(msg) if msg == "digit" => std::num::IntErrorKind::InvalidDigit,
+            Reason::Divide(msg) if msg == "by zero" => std::num::IntErrorKind::Zero,
+            _ => std::num::IntErrorKind::InvalidDigit,
         }
     }
 }

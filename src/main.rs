@@ -11,10 +11,13 @@ pub mod info;
 pub mod json;
 pub mod lock;
 pub mod logging;
+pub mod macros;
+pub mod map;
 pub mod maybe;
 pub mod option_lock;
 pub mod pattern;
 pub mod registry;
+pub mod routing;
 pub mod sample;
 pub mod table;
 pub mod tests;
@@ -32,16 +35,12 @@ pub use crate::info::*;
 pub use crate::lock::*;
 pub use crate::logging::*;
 pub use crate::maybe::*;
-pub use crate::option_lock::*;
 pub use crate::pattern::*;
 pub use crate::registry::*;
+pub use crate::routing::*;
 pub use crate::sample::*;
 pub use crate::table::*;
 pub use crate::token::*;
-pub use core::clone::Clone;
-pub use core::option::Option::Some;
-pub use core::result::Result::Err;
-pub use core::result::Result::Ok;
 // HashMap import removed - no longer needed for handler management
 // Import logging macros
 use std::env;
@@ -49,7 +48,6 @@ use std::fs;
 use std::io::Write;
 use std::path::Path;
 use std::path::PathBuf;
-use std::ptr::swap;
 pub const TOKEN_MAX: usize = 8192;
 
 #[allow(unused, static_mut_refs, unsafe_code)]
@@ -70,9 +68,9 @@ fn main() {
     let mut output_to_stdout = true;
     let mut base_dir = PathBuf::new();
     let mut context = Context::new();
-    
-    logging::initialize(verbose_count);
-    
+
+    initialize(verbose_count);
+
     // Parse command line arguments
     while let Some(arg) = args_iter.next() {
         match arg.as_str() {
@@ -119,7 +117,7 @@ fn main() {
                     verbosity = VERBOSITY_DEBUG;
                     verbose_count = 3; // Debug level
                 }
-                logging::initialize(verbose_count);
+                initialize(verbose_count);
             }
             "--output-file" | "-o" => {
                 // Set output file
@@ -201,7 +199,7 @@ fn main() {
 
     // CRITICAL: Initialize the Context and all global components
     context.initialize();
-    
+
     // Print the current verbosity level
     match verbosity {
         VERBOSITY_WARN => warn!("Verbosity: Warnings and Errors"),
@@ -210,7 +208,7 @@ fn main() {
         VERBOSITY_INFO => info!("Verbosity: All messages"),
         _ => info!("Verbosity: Custom level {}", verbosity),
     }
-    
+
     // Set base directory in the context
     if !base_dir.as_os_str().is_empty() {
         context.set_base_dir(base_dir);
@@ -230,10 +228,7 @@ fn main() {
         println!(
             "═══════════════════════════════════════════════════════════════════════════════════════"
         );
-        match context
-            .handlizer
-            .analyze_patterns_with_samplizer_cached(use_cache)
-        {
+        match context.handlizer.analyze_patterns(use_cache) {
             Ok(()) => {
                 println!("✅ Pattern analysis completed successfully");
             }
@@ -309,7 +304,9 @@ fn print_usage(program_name: &str) {
     info!("  --base-dir <dir>       Set the base directory for resolving paths");
     info!("  --system-includes      Enable processing of system includes");
     info!("  --test-handlers        Run handler tests");
-    info!("  --display-registry     Display the registry database view with all entries and statistics");
+    info!(
+        "  --display-registry     Display the registry database view with all entries and statistics"
+    );
     info!("  --analyze-patterns     Run pattern analysis with samplizer");
     info!("  --cache                Enable analysis result caching (default)");
     info!("  --no-cache             Disable analysis result caching, force fresh analysis");
@@ -325,7 +322,7 @@ fn print_usage(program_name: &str) {
 }
 pub fn convert(context: &mut Context, input_file: &str, output_file: &str, output_to_stdout: bool) {
     println!("Converting... {}", input_file);
-    
+
     // Read input file
     let content = match fs::read_to_string(&input_file) {
         Ok(content) => {
@@ -360,15 +357,15 @@ pub fn convert(context: &mut Context, input_file: &str, output_file: &str, outpu
     };
 
     // Setup cache directory
-    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+    let cache_dir = env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
         format!(
             "{}/.c2r/cache",
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
         )
     });
 
     info!("Using cache directory: {}", cache_dir);
-    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+    if let Err(e) = fs::create_dir_all(&cache_dir) {
         warn!("Failed to create cache directory: {}", e);
     } else {
         debug!("Cache directory ready: {}", cache_dir);
@@ -405,7 +402,6 @@ pub fn convert(context: &mut Context, input_file: &str, output_file: &str, outpu
             let mut converted_code = String::new();
             for result in &results {
                 match result {
-                    HandlerResult::Processed(_, _, code, _)
                     | HandlerResult::Completed(_, _, code, _)
                     | HandlerResult::Converted(_, _, code, _)
                     | HandlerResult::Extracted(_, _, code, _) => {
@@ -446,7 +442,7 @@ pub fn convert(context: &mut Context, input_file: &str, output_file: &str, outpu
             let report_count = context.registry.get_reports().len();
             info!("Processing completed with {} reports", report_count);
             context.display_full_context();
-            
+
             if get_verbosity_level() >= VERBOSITY_DEBUG {
                 context.display_reports();
             }
@@ -501,14 +497,14 @@ fn write_output_file(file_path: &str, code: &str) -> Result<()> {
     Ok(())
 }
 pub fn show_cache() {
-    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+    let cache_dir = env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
         format!(
             "{}/.c2r/cache",
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
         )
     });
 
-    let cache_file = std::path::Path::new(&cache_dir).join("pattern_cache.json");
+    let cache_file = Path::new(&cache_dir).join("pattern_cache.json");
 
     println!("📊 Pattern Cache Information");
     println!(
@@ -525,9 +521,9 @@ pub fn show_cache() {
     }
 
     if cache_file.exists() {
-        match std::fs::read_to_string(&cache_file) {
+        match fs::read_to_string(&cache_file) {
             Ok(content) => {
-                match crate::json::parse(&content) {
+                match json::parse(&content) {
                     Ok(json_data) => {
                         println!("✅ Cache file found and parsed successfully");
 
@@ -605,14 +601,14 @@ pub fn show_cache() {
     }
 }
 pub fn clear_cache() {
-    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+    let cache_dir = env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
         format!(
             "{}/.c2r/cache",
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
         )
     });
 
-    match std::fs::remove_dir_all(&cache_dir) {
+    match fs::remove_dir_all(&cache_dir) {
         Ok(()) => {
             println!("🗑️  Pattern cache cleared successfully");
             println!("Cache directory removed: {}", cache_dir);
@@ -628,14 +624,14 @@ pub fn clear_cache() {
     return;
 }
 pub fn clear_analysis_cache() {
-    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+    let cache_dir = env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
         format!(
             "{}/.c2r/cache",
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
         )
     });
 
-    match std::fs::read_dir(&cache_dir) {
+    match fs::read_dir(&cache_dir) {
         Ok(entries) => {
             let mut cleared_count = 0;
             for entry in entries {
@@ -643,7 +639,7 @@ pub fn clear_analysis_cache() {
                     let path = entry.path();
                     if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
                         if file_name.starts_with("analysis_") && file_name.ends_with(".json") {
-                            match std::fs::remove_file(&path) {
+                            match fs::remove_file(&path) {
                                 Ok(()) => {
                                     cleared_count += 1;
                                     println!("🗑️  Removed analysis cache: {}", file_name);
@@ -674,63 +670,63 @@ pub fn clear_analysis_cache() {
     return;
 }
 pub fn create_demo_cache() {
-    let cache_dir = std::env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
+    let cache_dir = env::var("C2R_CACHE_DIR").unwrap_or_else(|_| {
         format!(
             "{}/.c2r/cache",
-            std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
+            env::var("HOME").unwrap_or_else(|_| "/tmp".to_string())
         )
     });
 
     println!("🔧 Creating demo pattern cache...");
 
     // Ensure cache directory exists
-    if let Err(e) = std::fs::create_dir_all(&cache_dir) {
+    if let Err(e) = fs::create_dir_all(&cache_dir) {
         error!("Failed to create cache directory: {}", e);
         return;
     }
 
     // Create a Patternizer with some demo patterns and cache entries
-    let mut patternizer = crate::pattern::Patternizer::new();
+    let mut patternizer = Patternizer::new();
 
     // Add some realistic cache entries that would be created during conversion
     patternizer.match_cache.insert(
         "function_handler:int|main|(|)|{".to_string(),
-        crate::pattern::PatternResult::Match { consumed_tokens: 8 },
+        PatternResult::Match { consumed_tokens: 8 },
     );
 
     patternizer.match_cache.insert(
         "function_handler:void|printf|(|const|char*|)|;".to_string(),
-        crate::pattern::PatternResult::NoMatch {
+        PatternResult::NoMatch {
             reason: "Function call, not declaration".to_string(),
         },
     );
 
     patternizer.match_cache.insert(
         "struct_handler:struct|Point|{|int|x|;|int|y|;|}|;".to_string(),
-        crate::pattern::PatternResult::Match {
+        PatternResult::Match {
             consumed_tokens: 11,
         },
     );
 
     patternizer.match_cache.insert(
         "array_handler:int|arr|[|10|]|;".to_string(),
-        crate::pattern::PatternResult::CountOf {
+        PatternResult::CountOf {
             offsets: vec![0..2, 4..6],
         },
     );
 
     patternizer.match_cache.insert(
         "typedef_handler:typedef|struct|Node|{|...|}|Node|;".to_string(),
-        crate::pattern::PatternResult::Sequence { range: 0..7 },
+        PatternResult::Sequence { range: 0..7 },
     );
-    let cache_file = std::path::Path::new(&cache_dir).join("pattern_cache.json");
+    let cache_file = Path::new(&cache_dir).join("pattern_cache.json");
 
     match patternizer.save_cache_to_json(&cache_file.to_string_lossy()) {
         Ok(()) => {
             println!("✅ Demo cache created successfully!");
             println!("Cache file: {}", cache_file.display());
             println!("Cache entries: {}", patternizer.match_cache.len());
-            println!("");
+            println!();
             println!("Now try: c2r --show-cache");
         }
         Err(e) => {

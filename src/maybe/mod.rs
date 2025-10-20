@@ -1,14 +1,11 @@
-use core::any::type_name;
+use core::fmt;
 use core::ops::{Deref, DerefMut};
-use core::{fmt};
 use std::hash::Hasher;
-use std::sync::{Once};
 
 pub mod futex;
 pub use futex::Futex;
-pub mod once;
-pub use once::MaybeOnce;
 pub mod lock;
+pub mod once;
 pub use lock::MaybeLock;
 
 pub enum Maybe<T> {
@@ -32,7 +29,7 @@ impl<T> Maybe<T> {
         T: Copy,
     {
         let mut u = Maybe::<T>::uninit();
-        unsafe { 
+        unsafe {
             core::ptr::write_bytes(u.as_mut_ptr(), 0, 1);
         }
         u
@@ -71,11 +68,8 @@ impl<T> Maybe<T> {
     #[inline]
     pub fn as_bytes(&self) -> &[u8] {
         match self {
-            Maybe::Some(val) => unsafe { 
-                core::slice::from_raw_parts(
-                    val as *const T as *const u8,
-                    core::mem::size_of::<T>()
-                )
+            Maybe::Some(val) => unsafe {
+                core::slice::from_raw_parts(val as *const T as *const u8, size_of::<T>())
             },
             Maybe::None => &[],
         }
@@ -85,10 +79,7 @@ impl<T> Maybe<T> {
     pub fn as_bytes_mut(&mut self) -> &mut [u8] {
         match self {
             Maybe::Some(val) => unsafe {
-                core::slice::from_raw_parts_mut(
-                    val as *mut T as *mut u8,
-                    core::mem::size_of::<T>()
-                )
+                core::slice::from_raw_parts_mut(val as *mut T as *mut u8, size_of::<T>())
             },
             Maybe::None => &mut [],
         }
@@ -103,8 +94,8 @@ impl<T> Maybe<T> {
     }
 
     #[inline]
-    pub fn assume_init_read(&self) -> T 
-    where 
+    pub fn assume_init_read(&self) -> T
+    where
         T: Copy,
     {
         match self {
@@ -115,7 +106,7 @@ impl<T> Maybe<T> {
 
     pub fn assume_init_drop(&mut self) {
         if let Maybe::Some(_) = self {
-            unsafe { 
+            unsafe {
                 core::ptr::drop_in_place(self.as_mut_ptr());
             }
             *self = Maybe::None;
@@ -175,7 +166,7 @@ impl<T> Maybe<T> {
         }
     }
 
-    pub fn unwrap_or_else<F>(self, f: F) -> T 
+    pub fn unwrap_or_else<F>(self, f: F) -> T
     where
         F: FnOnce() -> T,
     {
@@ -287,7 +278,7 @@ impl<T> Maybe<T> {
 
     pub fn drop_in_place(val: &mut Maybe<T>) {
         if let Maybe::Some(_) = val {
-            unsafe { 
+            unsafe {
                 core::ptr::drop_in_place(val.as_mut_ptr());
             }
             *val = Maybe::None;
@@ -347,7 +338,7 @@ impl<T: Clone> Clone for Maybe<T> {
         }
     }
 }
-impl<T:PartialEq> PartialEq for Maybe<T> {
+impl<T: PartialEq> PartialEq for Maybe<T> {
     #[inline]
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -357,8 +348,8 @@ impl<T:PartialEq> PartialEq for Maybe<T> {
         }
     }
 }
-impl<T:Eq> Eq for Maybe<T> {}
-impl<T:PartialOrd> PartialOrd for Maybe<T> {
+impl<T: Eq> Eq for Maybe<T> {}
+impl<T: PartialOrd> PartialOrd for Maybe<T> {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         match (self, other) {
@@ -368,7 +359,7 @@ impl<T:PartialOrd> PartialOrd for Maybe<T> {
         }
     }
 }
-impl<T:Ord> Ord for Maybe<T> {
+impl<T: Ord> Ord for Maybe<T> {
     #[inline]
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         match (self, other) {
@@ -379,16 +370,16 @@ impl<T:Ord> Ord for Maybe<T> {
         }
     }
 }
-impl<T:core::hash::Hash> core::hash::Hash for Maybe<T> {
+impl<T: core::hash::Hash> core::hash::Hash for Maybe<T> {
     #[inline]
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         match self {
             Maybe::Some(val) => val.hash(state),
             Maybe::None => state.write_u8(0),
         }
     }
 }
-impl<T: core::fmt::Debug> core::fmt::Debug for Maybe<T> {
+impl<T: fmt::Debug> fmt::Debug for Maybe<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Maybe::Some(val) => f.debug_tuple("Some").field(val).finish(),
@@ -406,10 +397,13 @@ impl<T, const N: usize> Maybe<[T; N]> {
         unsafe { core::mem::transmute(self) }
     }
     #[inline]
-    pub fn to_array(&self) -> [T; N] where T: Default + Copy {
+    pub fn to_array(&self) -> [T; N]
+    where
+        T: Default + Copy,
+    {
         match self {
             Maybe::Some(arr) => *arr,
-            Maybe::None => [T::default(); N]    
+            Maybe::None => [T::default(); N],
         }
     }
 }
@@ -419,10 +413,10 @@ impl<T> From<T> for Maybe<T> {
         Maybe::Some(value)
     }
 }
-impl<T, const N: usize> FromIterator<T> for Maybe<[T;N]> {
+impl<T, const N: usize> FromIterator<T> for Maybe<[T; N]> {
     #[inline]
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        let arr = iter.into_iter().collect::<Maybe<[T; N]>>();  
+    fn from_iter<I: IntoIterator<Item=T>>(iter: I) -> Self {
+        let arr = iter.into_iter().collect::<Maybe<[T; N]>>();
         arr
     }
 }

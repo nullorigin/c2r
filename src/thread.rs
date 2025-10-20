@@ -12,13 +12,10 @@
  * - Zero external dependencies beyond std
  */
 
-use crate::{Maybe, MaybeLock, OptionLock};
+use crate::{Maybe, MaybeLock};
 use core::ops::{Fn, FnOnce};
 use core::option::Option::Some;
-use core::time;
 use std::collections::{HashMap, VecDeque};
-use std::ops::Deref;
-use std::ptr::drop_in_place;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -70,7 +67,7 @@ impl Drop for ThreadPool {
     fn drop(&mut self) {
         // Signal shutdown to all worker threads
         self.tasks.shutdown.store(true, Ordering::SeqCst);
-        
+
         // Gracefully join all worker threads, preventing resource leaks
         for worker in &mut self.workers {
             if let Some(handle) = worker.handle.take() {
@@ -94,9 +91,7 @@ pub struct Worker {
 }
 impl Clone for Worker {
     fn clone(&self) -> Self {
-        Worker {
-            handle: None,
-        }
+        Worker { handle: None }
     }
 }
 impl PartialEq for Worker {
@@ -138,7 +133,7 @@ impl PartialEq for ThreadTasks {
     fn eq(&self, other: &Self) -> bool {
         self.receiver.is_poisoned() == other.receiver.is_poisoned()
             && self.active_tasks.load(Ordering::Relaxed)
-                == other.active_tasks.load(Ordering::Relaxed)
+            == other.active_tasks.load(Ordering::Relaxed)
             && self.shutdown.load(Ordering::Relaxed) == other.shutdown.load(Ordering::Relaxed)
     }
 }
@@ -261,7 +256,7 @@ impl Worker {
                     // Try to get a task with timeout to respect shutdown
                     let task = {
                         if let Ok(receiver) = receiver.lock() {
-                            receiver.recv_timeout(std::time::Duration::from_millis(100))
+                            receiver.recv_timeout(Duration::from_millis(100))
                         } else {
                             break;
                         }
@@ -278,11 +273,11 @@ impl Worker {
                             // Decrement active task counter
                             active_tasks.fetch_sub(1, Ordering::Relaxed);
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
                             // Timeout occurred, continue loop to check shutdown flag
                             continue;
                         }
-                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
                             // Channel closed, time to shut down
                             break;
                         }
@@ -344,10 +339,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
 
         let results_guard = results.read();
         let results_vec = results_guard.as_ref();
-        results_vec
-            .iter()
-            .filter_map(|opt| opt.clone())
-            .collect()
+        results_vec.iter().filter_map(|opt| opt.clone()).collect()
     }
 
     /// Filter items in parallel and collect results
@@ -426,7 +418,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
 }
 
 /// Extension trait to add parallel capabilities to iterators
-pub trait Parallizer<T: Send + Sync + 'static>: Iterator<Item = T> + Sized {
+pub trait Parallizer<T: Send + Sync + 'static>: Iterator<Item=T> + Sized {
     fn parallel(self) -> Iterizer<T> {
         Iterizer::from_vec(self.collect())
     }
@@ -438,10 +430,9 @@ pub trait Parallizer<T: Send + Sync + 'static>: Iterator<Item = T> + Sized {
 
 impl<I, T> Parallizer<T> for I
 where
-    I: Iterator<Item = T>,
+    I: Iterator<Item=T>,
     T: Send + Sync + 'static,
-{
-}
+{}
 
 /// Work-stealing queue for advanced task distribution
 
@@ -460,7 +451,9 @@ impl<T: Clone> Clone for WorkStealer<T> {
 }
 impl<T: PartialEq> PartialEq for WorkStealer<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.queues == other.queues && self.current_queue.load(Ordering::Relaxed) == other.current_queue.load(Ordering::Relaxed)
+        self.queues == other.queues
+            && self.current_queue.load(Ordering::Relaxed)
+            == other.current_queue.load(Ordering::Relaxed)
     }
 }
 impl<T: PartialEq> Eq for WorkStealer<T> {}
@@ -471,9 +464,11 @@ impl<T: Ord> PartialOrd for WorkStealer<T> {
 }
 impl<T: Ord> Ord for WorkStealer<T> {
     fn cmp(&self, other: &Self) -> core::cmp::Ordering {
-        self.current_queue.load(Ordering::Relaxed).cmp(&other.current_queue.load(Ordering::Relaxed))
+        self.current_queue
+            .load(Ordering::Relaxed)
+            .cmp(&other.current_queue.load(Ordering::Relaxed))
     }
-}   
+}
 impl<T: Send + 'static> WorkStealer<T> {
     pub fn new(num_queues: usize) -> Self {
         let mut queues = Vec::with_capacity(num_queues);
@@ -565,10 +560,7 @@ where
 
     let results_guard = results.read();
     let results_vec = results_guard.as_ref();
-    results_vec
-        .iter()
-        .filter_map(|opt| opt.clone())
-        .collect()
+    results_vec.iter().filter_map(|opt| opt.clone()).collect()
 }
 
 #[cfg(test)]
@@ -617,7 +609,7 @@ pub enum ThreadHealth {
 }
 
 /// Thread recovery statistics
-#[derive(Debug, Clone,PartialEq,Eq,PartialOrd,Ord,Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RecoveryStats {
     pub restarts: usize,
     pub failures: usize,
@@ -667,8 +659,7 @@ impl PartialEq for Watcher {
         self.thread_health == other.thread_health
             && self.thread_heartbeats == other.thread_heartbeats
             && self.recovery_stats == other.recovery_stats
-            && self.shutdown.load(Ordering::Relaxed)
-                == other.shutdown.load(Ordering::Relaxed)
+            && self.shutdown.load(Ordering::Relaxed) == other.shutdown.load(Ordering::Relaxed)
             && self.check_interval == other.check_interval
             && self.timeout_threshold == other.timeout_threshold
     }
@@ -764,7 +755,7 @@ impl Watcher {
                     health_guard.as_mut(),
                     stats_guard.as_mut(),
                 );
-                
+
                 for (&thread_id, &last_heartbeat) in heartbeat_map.iter() {
                     let elapsed = now.duration_since(last_heartbeat);
 
@@ -861,12 +852,12 @@ impl Watcher {
         if let Some(health) = health_map.get_mut(&thread_id) {
             if *health == ThreadHealth::Failed {
                 *health = ThreadHealth::Healthy;
-                
+
                 // Reset heartbeat for recovered thread
                 let mut heartbeat_guard = self.thread_heartbeats.write();
                 let heartbeat_map = heartbeat_guard.as_mut();
                 heartbeat_map.insert(thread_id, Instant::now());
-                
+
                 let mut stats_guard = self.recovery_stats.write();
                 let stats_map = stats_guard.as_mut();
                 if let Some(stats) = stats_map.get_mut(&thread_id) {
@@ -882,7 +873,7 @@ impl Watcher {
     /// Shutdown the watchdog system
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        
+
         // Safely extract handle to avoid double-drop
         if let Maybe::Some(mut handle_opt) = self.watchdog_handle.take() {
             if let Some(handle) = handle_opt.take() {
@@ -916,12 +907,8 @@ impl PartialEq for ResilientThreadPool {
         self.pool == other.pool
             && self.watchdog == other.watchdog
             && self.incremental_results == other.incremental_results
-            && self
-                .sync_barrier
-                .load(core::sync::atomic::Ordering::Relaxed)
-                == other
-                    .sync_barrier
-                    .load(core::sync::atomic::Ordering::Relaxed)
+            && self.sync_barrier.load(Ordering::Relaxed)
+            == other.sync_barrier.load(Ordering::Relaxed)
     }
 }
 
@@ -932,9 +919,7 @@ impl std::hash::Hash for ResilientThreadPool {
         self.pool.hash(state);
         self.watchdog.hash(state);
         self.incremental_results.hash(state);
-        self.sync_barrier
-            .load(core::sync::atomic::Ordering::Relaxed)
-            .hash(state);
+        self.sync_barrier.load(Ordering::Relaxed).hash(state);
     }
 }
 
@@ -943,7 +928,7 @@ impl ResilientThreadPool {
     pub fn new() -> Self {
         let mut config = ThreadPoolConfig::new();
         config.name_prefix = "resilient";
-        config.worker_count = 4;
+        config.worker_count = 16;
         config.queue_capacity = Some(1024);
         Self::with_config(config)
     }
@@ -964,7 +949,7 @@ impl ResilientThreadPool {
             sync_barrier: Arc::new(AtomicUsize::new(0)),
         }
     }
-    
+
     /// Shutdown the resilient thread pool
     pub fn shutdown(&mut self) {
         // Shutdown watchdog first
@@ -981,7 +966,7 @@ impl ResilientThreadPool {
         F: FnOnce() + Send + Sync + 'static,
     {
         let mut watchdog = self.watchdog.clone();
-        
+
         self.pool.execute(move || {
             // Heartbeat before starting
             {

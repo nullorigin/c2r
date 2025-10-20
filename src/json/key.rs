@@ -68,9 +68,9 @@ impl Key {
     pub fn new(hash: u64, len: usize) -> Self {
         Key {
             buf: [0; KEY_BUF_LEN],
-            len: len,
+            len,
             ptr: std::ptr::null_mut(),
-            hash: hash,
+            hash,
         }
     }
 
@@ -129,7 +129,7 @@ impl Drop for Key {
                 let heap = Vec::from_raw_parts(self.ptr, self.len, self.len);
 
                 // Now that we have an owned `Vec<u8>`, drop it.
-                std::mem::drop(heap);
+                drop(heap);
             }
         }
     }
@@ -147,7 +147,7 @@ impl Clone for Key {
             Key {
                 buf: [0; KEY_BUF_LEN],
                 len: self.len,
-                ptr: ptr,
+                ptr,
                 hash: self.hash,
             }
         } else {

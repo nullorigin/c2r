@@ -15,6 +15,7 @@ pub enum ElementInfo {
     Macro(MacroInfo),
     Struct(StructInfo),
     Typedef(TypedefInfo),
+    Variable(VariableInfo),
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -51,11 +52,14 @@ pub struct ControlFlowInfo {
     pub complexity: String,
     pub description: String,
     pub flow_type: String,
-    pub has_body: bool,
-    pub has_condition: bool,
+    pub body: String,
+    pub condition: String,
     pub has_else_clause: bool,
     pub is_infinite_loop: bool,
     pub is_range_based: bool,
+    pub is_comparison_based: bool,
+    pub increment: String,
+    pub initialization: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
@@ -70,7 +74,7 @@ pub struct EnumInfo {
     pub is_typedef: bool,
     pub name: String,
     pub typedef_name: Option<String>,
-    pub variants: Vec<(String,Option<String>)>,
+    pub variants: Vec<(String, Option<String>)>,
     pub variant_count: usize,
 }
 
@@ -171,7 +175,7 @@ pub enum MacroKind {
 pub struct StructInfo {
     pub complexity: String,
     pub field_count: usize,
-    pub fields: Vec<(String,String)>,
+    pub fields: Vec<(String, String)>,
     pub has_body: bool,
     pub is_anonymous: bool,
     pub is_declaration: bool,
@@ -191,7 +195,7 @@ pub struct TypedefInfo {
     pub is_declaration: bool,
     pub is_definition: bool,
     pub is_function_pointer: bool,
-    pub kind: TypedefKind,
+    pub kind: String,
     pub kind_description: String,
     pub name: String,
     pub original_type: String,
@@ -199,16 +203,20 @@ pub struct TypedefInfo {
     pub typedef_type: String,
 }
 
-/// Enum representing different kinds of typedefs for specialized handling
-#[derive(Debug,Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum TypedefKind {
-    #[default]
-    Simple,
-    Pointer,
-    Array,
-    Function,
-    Struct,
-    Union,
-    Enum,
-    Unknown,
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VariableInfo {
+    pub complexity: String,
+    pub global_kind: String,
+    pub initializer: Option<String>,
+    pub is_array: bool,
+    pub is_const: bool,
+    pub is_extern: bool,
+    pub is_static: bool,
+    pub is_volatile: bool,
+    pub kind_description: String,
+    pub name: String,
+    pub storage_class: String,
+    pub type_name: String,
+    pub var_type: String,
+    pub dimensions: usize,
 }

@@ -5,13 +5,17 @@
 //! like functions, arrays, structs, etc.
 
 use crate::{
-    Context, ConvertedElement, ElementInfo, ExtractedElement, HandlerPattern, HandlerPhase, HandlerRedirect, HandlerReport, Id, PatternResult, ReportLevel, Result, Token, TokenBox, report
+    gen_name, Context, ConvertedElement, ExtractedElement, HandlerPattern, HandlerRedirect,
+    Id, Maybe, PatternResult, Phase, Report, ReportLevel, Result, Token,
 };
-use std::collections::{HashMap, VecDeque, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::hash::{Hash, Hasher};
-use std::sync::{Arc, RwLock, atomic::{AtomicUsize, Ordering}};
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering}, Arc,
+    RwLock,
+};
 use std::time::SystemTime;
 
 // ============================================================================
@@ -126,14 +130,14 @@ pub struct FuzzyScorer {
 /// Statistics for the adaptive system
 #[derive(Debug)]
 pub struct AdaptiveStats {
-    pub total_explorations: usize,
-    pub successful_adaptations: usize,
-    pub failed_explorations: usize,
-    pub average_deviation: f64,
-    pub best_success_rate: f64,
+    pub total_explorations: AtomicUsize,
+    pub successful_adaptations: AtomicUsize,
+    pub failed_explorations: AtomicUsize,
     pub total_attempts: AtomicUsize,
     pub successes: AtomicUsize,
     pub failures: AtomicUsize,
+    pub average_deviation: f64,
+    pub best_success_rate: f64,
 }
 
 /// Record of a handler failure for learning
@@ -163,14 +167,14 @@ pub struct SuccessRecord {
 impl Default for AdaptiveStats {
     fn default() -> Self {
         Self {
-            total_explorations: 0,
-            successful_adaptations: 0,
-            failed_explorations: 0,
-            average_deviation: 0.0,
-            best_success_rate: 0.0,
+            total_explorations: AtomicUsize::new(0),
+            successful_adaptations: AtomicUsize::new(0),
+            failed_explorations: AtomicUsize::new(0),
             total_attempts: AtomicUsize::new(0),
             successes: AtomicUsize::new(0),
             failures: AtomicUsize::new(0),
+            average_deviation: 0.0,
+            best_success_rate: 0.0,
         }
     }
 }
@@ -205,8 +209,8 @@ impl AdaptivePatternResult {
             confidence: 0.0,
             tokens_consumed: 0,
             match_data: HashMap::new(),
-            base_result: PatternResult::NoMatch { 
-                reason: "No adaptive match found".to_string() 
+            base_result: PatternResult::NoMatch {
+                reason: "No adaptive match found".to_string(),
             },
         }
     }
@@ -215,23 +219,48 @@ impl AdaptivePatternResult {
     pub fn from_existing(result: PatternResult) -> Self {
         let (matched, confidence, tokens_consumed) = match &result {
             PatternResult::Match { consumed_tokens } => (true, 1.0, *consumed_tokens),
-            PatternResult::CountOf { offsets } => (true, 0.8, offsets.len()),
-            PatternResult::Sequence { range } => (true, 0.7, range.len()),
-            PatternResult::Fuzzy { offsets } => (true, 0.5, offsets.len()),
-            PatternResult::NoMatch { .. } => (false, 0.0, 0),
-            PatternResult::CachedPositive { pattern_id, cache_hit_count, reason } => (true, 0.9, *cache_hit_count),
-            PatternResult::CachedNegative { pattern_id, cache_hit_count, reason } => (false, 0.0, *cache_hit_count),
-            PatternResult::Reject { reason } => (false, 0.0, 0),
-            PatternResult::TypeMismatch { expected_type, actual_type, position, reason } => (false, 0.0, 0),
-            PatternResult::ValueMismatch { expected_value, actual_value, position, reason } => (false, 0.0, 0),
-            PatternResult::StructureMismatch { expected_pattern, actual_structure, reason } => (false, 0.0, 0),
+            PatternResult::CountOf { offsets } => (true, 0.85, offsets.len()),
+            PatternResult::Sequence { range } => (true, 0.75, range.len()),
+            PatternResult::Fuzzy { offsets } => {
+                let fuzzy_confidence = 0.6 - (offsets.len() as f64 * 0.05).min(0.3);
+                (true, fuzzy_confidence.max(0.3), offsets.len())
+            }
+            PatternResult::NoMatch { reason } => {
+                let partial_confidence = if reason.contains("partial") { 0.1 } else { 0.0 };
+                (false, partial_confidence, 0)
+            }
+            PatternResult::CachedPositive {
+                cache_hit_count, ..
+            } => {
+                let cache_confidence = 0.9 + (*cache_hit_count as f64 * 0.01).min(0.09);
+                (true, cache_confidence, *cache_hit_count)
+            }
+            PatternResult::CachedNegative {
+                cache_hit_count, ..
+            } => (false, 0.0, *cache_hit_count),
+            PatternResult::Reject { .. } => (false, 0.0, 0),
+            PatternResult::TypeMismatch { position, .. } => (false, 0.05, *position),
+            PatternResult::ValueMismatch { position, .. } => (false, 0.03, *position),
+            PatternResult::StructureMismatch { .. } => (false, 0.02, 0),
         };
+
+        let mut match_data = HashMap::new();
+        match &result {
+            PatternResult::Fuzzy { offsets } => {
+                match_data.insert("fuzzy_offsets".to_string(), offsets.len().to_string());
+            }
+            PatternResult::CachedPositive { pattern_id, .. }
+            | PatternResult::CachedNegative { pattern_id, .. } => {
+                match_data.insert("cached_pattern".to_string(), pattern_id.clone());
+            }
+            _ => {}
+        }
 
         Self {
             matched,
             confidence,
             tokens_consumed,
-            match_data: HashMap::new(),
+            match_data,
             base_result: result,
         }
     }
@@ -249,7 +278,7 @@ impl PatternNode {
             attempts: 0,
             children: Vec::new(),
             parent_id: None,
-            node_id: Id::get(&Id::gen_name("pattern_node")),
+            node_id: Id::get(&gen_name("pattern_node")),
         }
     }
 
@@ -264,7 +293,7 @@ impl PatternNode {
             attempts: 0,
             children: Vec::new(),
             parent_id: Some(self.node_id.clone()),
-            node_id: Id::get(&Id::gen_name("pattern_variation")),
+            node_id: Id::get(&gen_name("pattern_variation")),
         }
     }
 
@@ -274,7 +303,7 @@ impl PatternNode {
         let current_successes = (self.success_rate * (self.attempts - 1) as f64) as usize;
         let new_successes = current_successes + if success { 1 } else { 0 };
         self.success_rate = new_successes as f64 / self.attempts as f64;
-        
+
         // Update confidence based on success rate
         self.confidence = self.success_rate * (1.0 - self.deviation_distance);
     }
@@ -287,10 +316,11 @@ impl PatternNode {
 /// Result of handler processing operations
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum HandlerResult {
+    Failed(String, Id),
     /// Handler successfully processed the tokens
     Handled(Option<Vec<Token>>, Range<usize>, Id),
     /// Handler processed and generated code
-    Processed(Option<Vec<Token>>, Range<usize>, String, Id),
+    Processed(Option<Vec<Token>>, Range<usize>, Id),
     /// Handler completed processing successfully
     Completed(Option<Vec<Token>>, Range<usize>, String, Id),
     /// Handler could not process the tokens
@@ -325,25 +355,12 @@ pub trait Handler: Send + Sync + 'static {
     /// # Parameters
     /// - `token_slot`: The TokenSlot number containing the tokens
     /// - `token_range`: The range within the tokens to process
-    fn can_process(
+    fn detect(
         &self,
         context: &mut Context,
         token_slot: usize,
         token_range: Range<usize>,
     ) -> Result<bool>;
-
-    /// Main processing: Parse and understand the token structure
-    /// Core processing method - must be implemented by all handlers
-    ///
-    /// # Parameters
-    /// - `token_slot`: The TokenSlot number containing the tokens
-    /// - `token_range`: The range within the tokens to process
-    fn process(
-        &self,
-        context: &mut Context,
-        token_slot: usize,
-        token_range: Range<usize>,
-    ) -> Result<HandlerResult>;
 
     /// Extract structured data from processed tokens
     /// Optional: Only implement if handler supports extraction
@@ -369,35 +386,38 @@ pub trait Handler: Send + Sync + 'static {
     fn convert(
         &self,
         context: &mut Context,
-        token_slot: usize,
-        token_range: Range<usize>,
+        element: ExtractedElement,
     ) -> Result<Option<ConvertedElement>> {
         Ok(None)
     }
 
     /// Generate documentation for processed elements
     /// Optional: Only implement if handler supports documentation
-    fn document(&self, context: &mut Context, info: ElementInfo) -> Result<Option<String>> {
+    fn document(
+        &self,
+        context: &mut Context,
+        extracted: ExtractedElement,
+        converted: ConvertedElement,
+    ) -> Result<Option<String>> {
         Ok(None)
     }
 
     /// Generate handler-specific reports
     /// Optional: Return handler processing statistics and debug info
-    fn report(&self, context: &mut Context) -> Result<HandlerReport> {
-        Ok(HandlerReport::new(
-            "default_handler_report",
-            std::sync::Arc::new(Id::get("default")),
-            "Handler".to_string(),
-            "default_function".to_string(),
+    fn report(&self, context: &mut Context) -> Result<Report> {
+        Ok(Report::new(
+            Id::get("default_handler_report"),
+            Some(Id::get("default")),
+            "Handler::report".to_string(),
             "Default handler report".to_string(),
-            crate::ReportLevel::Info,
-            crate::HandlerPhase::Process,
+            ReportLevel::Info,
+            Phase::Process(None),
         ))
     }
 
     /// Post-process results from other handlers
     /// Optional: Used for result transformation and finalization
-    fn process_result(
+    fn result(
         &self,
         context: &mut Context,
         token_slot: usize,
@@ -407,9 +427,16 @@ pub trait Handler: Send + Sync + 'static {
         Ok(result)
     }
 
+    /// Declare which keywords this handler can process
+    /// Used by KeywordRouter for efficient handler selection
+    /// Return empty vec for handlers that don't have specific keywords (like expression_handler)
+    fn supported_keywords(&self) -> Vec<String> {
+        Vec::new() // Default: no specific keywords
+    }
+
     /// Handle redirect requests from failed pattern matching
     /// Optional: Route tokens to more appropriate handlers
-    fn handle_redirect(
+    fn route(
         &self,
         context: &mut Context,
         token_slot: usize,
@@ -419,39 +446,12 @@ pub trait Handler: Send + Sync + 'static {
         Ok(result)
     }
 }
+
 impl Hash for dyn Handler {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.id().hash(state);
     }
 }
-/// Example of how handlers should implement the constant function approach:
-///
-/// ```rust
-/// #[derive(Debug)]
-/// pub struct FunctionHandler;
-///
-/// impl Handler for FunctionHandler {
-///     fn handler_id() -> Id { Id::get("function_handler") }
-///     fn role() -> &'static str { "function" }
-///     fn priority() -> u64 { 200 }
-///     fn supported_patterns() -> &'static [&'static str] {
-///         &["function_declaration", "function_definition"]
-///     }
-///     
-///     fn can_process(&self, token_slot: usize, token_range: Range<usize>) -> Result<bool> {
-///         Context::tokenizer(|tokenizer| {
-///             let tokens = tokenizer.current_slot().tokens();
-///             let filtered_tokens = crate::handlers::common::filter_tokens_for_handler(&tokens, token_range);
-///             crate::handlers::common::match_patterns_with_context(&filtered_tokens, Self::supported_patterns())
-///         }).unwrap_or(false)
-///     }
-///
-///     fn process(&self, token_slot: usize, token_range: Range<usize>) -> Result<HandlerResult> {
-///         // Handler-specific implementation
-///         Ok(HandlerResult::NotHandled(None, token_range, Self::handler_id()))
-///     }
-/// }
-/// ```
 
 /// Trait for handlers that can be dynamically dispatched
 pub trait DynHandler: Handler {
@@ -468,7 +468,7 @@ impl<T: Handler> DynHandler for T {
 pub struct Handlizer {
     pub handlers: HashMap<Id, Arc<dyn Handler>>,
     sorted: bool,
-    
+
     // Integrated adaptive pattern matching fields
     /// Root patterns organized by handler type  
     pub pattern_trees: HashMap<String, Vec<PatternNode>>,
@@ -495,6 +495,7 @@ pub struct Handlizer {
     /// Routing rules based on patterns
     pub routing_rules: HashMap<String, Vec<String>>,
 }
+
 impl Clone for Handlizer {
     fn clone(&self) -> Self {
         Self {
@@ -516,6 +517,7 @@ impl Clone for Handlizer {
         }
     }
 }
+
 impl Hash for Handlizer {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.handlers.iter().for_each(|(id, handler)| {
@@ -525,16 +527,19 @@ impl Hash for Handlizer {
         self.sorted.hash(state);
     }
 }
+
 impl PartialEq for Handlizer {
     fn eq(&self, other: &Self) -> bool {
         self.handlers
             .iter()
             .map(|(id, _)| id)
-            .eq(other.handlers.iter().map(|(id, _)| id));
-        self.sorted == other.sorted
+            .eq(other.handlers.iter().map(|(id, _)| id))
+            && self.sorted == other.sorted
     }
 }
+
 impl Eq for Handlizer {}
+
 impl core::ops::Deref for Handlizer {
     type Target = HashMap<Id, Arc<dyn Handler>>;
 
@@ -551,11 +556,13 @@ impl std::fmt::Debug for Handlizer {
             .finish()
     }
 }
+
 impl AsRef<HashMap<Id, Arc<dyn Handler>>> for Handlizer {
     fn as_ref(&self) -> &HashMap<Id, Arc<dyn Handler>> {
         &self.handlers
     }
 }
+
 impl AsMut<HashMap<Id, Arc<dyn Handler>>> for Handlizer {
     fn as_mut(&mut self) -> &mut HashMap<Id, Arc<dyn Handler>> {
         &mut self.handlers
@@ -567,7 +574,10 @@ impl Handlizer {
         let mut routing_rules = HashMap::new();
         routing_rules.insert(
             "function_handler".to_string(),
-            vec!["expression_handler".to_string(), "global_handler".to_string()],
+            vec![
+                "expression_handler".to_string(),
+                "global_handler".to_string(),
+            ],
         );
         routing_rules.insert(
             "array_handler".to_string(),
@@ -597,11 +607,11 @@ impl Handlizer {
             "expression_handler".to_string(),
             vec!["function_handler".to_string()],
         );
-        
+
         Self {
             handlers: HashMap::new(),
             sorted: false,
-            
+
             // Initialize adaptive fields
             pattern_trees: HashMap::new(),
             fuzzy_scorer: FuzzyScorer::default(),
@@ -610,7 +620,7 @@ impl Handlizer {
             adaptive_stats: AdaptiveStats::default(),
             failure_patterns: Arc::new(RwLock::new(HashMap::new())),
             success_patterns: Arc::new(RwLock::new(HashMap::new())),
-            
+
             // Initialize redirect fields
             visited_handlers: HashSet::new(),
             redirect_depth: 0,
@@ -626,8 +636,10 @@ impl Handlizer {
         self.handlers.get(&id)
     }
     /// Register a new handler
-    pub fn register<H: Handler>(&mut self, handler: H) {
-        self.handlers.insert(handler.id(), Arc::new(handler));
+    pub fn register(&mut self, handler: Maybe<Arc<dyn Handler>>) {
+        if let Maybe::Some(handler) = handler {
+            self.handlers.insert(handler.id(), handler);
+        }
         self.sorted = false;
     }
 
@@ -651,7 +663,6 @@ impl Handlizer {
 
     /// Process tokens through all capable handlers with adaptive learning and comprehensive reporting
 
-
     /// Process tokens intelligently with the best available handler
     pub fn process_single(
         &mut self,
@@ -660,7 +671,7 @@ impl Handlizer {
         token_range: Range<usize>,
     ) -> Result<HandlerResult> {
         let start_time = std::time::Instant::now();
-        
+
         // Check if we have any tokens in the range
         if token_range.is_empty() {
             return Err(crate::error::C2RError::new(
@@ -670,17 +681,24 @@ impl Handlizer {
             ));
         }
 
-        let tokens = context.tokenizer.get_tokens(token_slot, token_range.clone());
+        let tokens = context
+            .tokenizer
+            .get_tokens(token_slot, token_range.clone());
 
-        context.registry.add_report(HandlerReport::new(
-            &format!("process_single_start_{}", token_slot),
-            std::sync::Arc::new(Id::get("handlizer")),
-            "Handlizer".to_string(),
-            "process_single".to_string(),
-            format!("Starting intelligent single handler processing for {} tokens", tokens.len()),
-            ReportLevel::Info,
-            HandlerPhase::Process,
-        ).with_tokens(tokens.len(), 0));
+        context.registry.add_report(
+            Report::new(
+                Id::get(&format!("process_single_start_{}", token_slot)),
+                Some(Id::get("handlizer")),
+                "Handlizer::process_single".to_string(),
+                format!(
+                    "Starting intelligent single handler processing for {} tokens",
+                    tokens.len()
+                ),
+                ReportLevel::Info,
+                Phase::Process(None),
+            )
+                .with_tokens(tokens.len(), 0),
+        );
 
         // Enhanced pattern analysis with multi-criteria selection
         let mut best_handler: Option<&Arc<dyn Handler>> = None;
@@ -690,79 +708,97 @@ impl Handlizer {
 
         // Multi-pass handler evaluation with advanced scoring
         for handler in self.get_sorted_handlers() {
-            match handler.can_process(context, token_slot, token_range.clone()) {
+            match handler.detect(context, token_slot, token_range.clone()) {
                 Ok(can_handle) if can_handle => {
-                    let pattern_match_score = Handlizer::calculate_pattern_match_score(handler.as_ref(), &tokens, &token_range);
+                    let pattern_match_score = Handlizer::calculate_pattern_match_score(
+                        handler.as_ref(),
+                        &tokens,
+                        &token_range,
+                    );
                     let complexity_score = self.calculate_token_complexity(&tokens);
-                    
+
                     // Weighted composite score
-                    let composite_score = (handler.priority() as f64 / 1000.0 * 0.4) + 
-                                        (pattern_match_score * 0.4) + 
-                                        (complexity_score * 0.2);
-                    
+                    let composite_score = (handler.priority() as f64 / 1000.0 * 0.4)
+                        + (pattern_match_score * 0.4)
+                        + (complexity_score * 0.2);
+
                     handler_scores.push((handler, composite_score));
-                    
+
                     // Track potential fallback handlers
                     if composite_score > 0.3 {
                         fallback_handlers.push((handler, composite_score));
                     }
-                    
+
                     if composite_score > best_score {
                         best_score = composite_score;
                         best_handler = Some(handler);
                     }
 
-                    context.registry.add_report(HandlerReport::new(
-                        &format!("handler_assessment_{}_{}", handler.id().name(), token_slot),
-                        std::sync::Arc::new(handler.id()),
-                        handler.role().to_string(),
-                        "can_process".to_string(),
-                        format!("Handler assessed - Pattern: {:.3}, Complexity: {:.3}, Final: {:.3}", 
-                               pattern_match_score, complexity_score, composite_score),
+                    context.registry.add_report(Report::new(
+                        Id::get(&format!("handler_assessment_{}_{}", handler.id().name(), token_slot)),
+                        Some(handler.id()),
+                        "Handlizer::process_single".to_string(),
+                        format!("Handler assessed - Pattern: {:.3}, Complexity: {:.3}, Final: {:.3}",
+                                pattern_match_score, complexity_score, composite_score),
                         ReportLevel::Debug,
-                        HandlerPhase::Process,
+                        Phase::Process(None),
                     ).with_tokens(tokens.len(), 0));
                 }
                 Ok(_) => {
-                    context.registry.add_report(HandlerReport::new(
-                        &format!("handler_skip_{}_{}", handler.id().name(), token_slot),
-                        std::sync::Arc::new(handler.id()),
-                        handler.role().to_string(),
-                        "can_process".to_string(),
+                    context.registry.add_report(Report::new(
+                        Id::get(&format!("handler_skip_{}_{}", handler.id().name(), token_slot)),
+                        Some(handler.id()),
+                        "Handlizer::process_single".to_string(),
                         "Handler cannot process these tokens".to_string(),
                         ReportLevel::Debug,
-                        HandlerPhase::Process,
+                        Phase::Process(None),
                     ));
                 }
                 Err(e) => {
-                    context.registry.add_report(HandlerReport::new(
-                        &format!("handler_evaluation_error_{}_{}", handler.id().name(), token_slot),
-                        std::sync::Arc::new(handler.id()),
-                        handler.role().to_string(),
-                        "can_process".to_string(),
-                        format!("Error evaluating handler: {}", e),
-                        ReportLevel::Warning,
-                        HandlerPhase::Process,
-                    ).with_success(false));
+                    context.registry.add_report(
+                        Report::new(
+                            Id::get(&format!(
+                                "handler_evaluation_error_{}_{}",
+                                handler.id().name(),
+                                token_slot
+                            )),
+                            Some(handler.id()),
+                            "Handlizer::process_single".to_string(),
+                            format!("Error evaluating handler: {}", e),
+                            ReportLevel::Warning,
+                            Phase::Process(None),
+                        )
+                            .with_success(false),
+                    );
                 }
             }
         }
 
         // Sort fallback handlers by score for intelligent fallback
-        fallback_handlers.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        fallback_handlers
+            .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Process with the best handler if found, with intelligent fallback
         if let Some(handler) = best_handler {
-            context.registry.add_report(HandlerReport::new(
-                &format!("best_handler_selected_{}_{}", handler.id().name(), token_slot),
-                std::sync::Arc::new(handler.id()),
-                handler.role().to_string(),
-                "process".to_string(),
-                format!("Selected as best handler with score: {:.3} ({} fallbacks available)", 
-                       best_score, fallback_handlers.len()),
-                ReportLevel::Info,
-                HandlerPhase::Process,
-            ).with_tokens(tokens.len(), 0));
+            context.registry.add_report(
+                Report::new(
+                    Id::get(&format!(
+                        "best_handler_selected_{}_{}",
+                        handler.id().name(),
+                        token_slot
+                    )),
+                    Some(handler.id()),
+                    "process".to_string(),
+                    format!(
+                        "Selected as best handler with score: {:.3} ({} fallbacks available)",
+                        best_score,
+                        fallback_handlers.len()
+                    ),
+                    ReportLevel::Info,
+                    Phase::Process(None),
+                )
+                    .with_tokens(tokens.len(), 0),
+            );
 
             // Attempt processing with retry logic
             let mut attempts = 0;
@@ -771,41 +807,82 @@ impl Handlizer {
 
             while attempts < max_attempts {
                 attempts += 1;
-                
-                match handler.process(context, token_slot, token_range.clone()) {
-                    Ok(result) => {
-                        let elapsed = start_time.elapsed();
-                        
-                        context.registry.add_report(HandlerReport::new(
-                            &format!("process_single_success_{}_{}", handler.id().name(), token_slot),
-                            std::sync::Arc::new(handler.id()),
-                            handler.role().to_string(),
-                            "process".to_string(),
-                            format!("Single handler processing completed successfully in {:?} (attempt {})", elapsed, attempts),
-                            ReportLevel::Info,
-                            HandlerPhase::Process,
-                        ).with_tokens(tokens.len(), result.token_count())
-                         .with_success(true));
-                        
-                        return Ok(result);
+
+                // Use detect/extract/convert pipeline instead of process()
+                match handler.detect(context, token_slot, token_range.clone()) {
+                    Ok(true) => {
+                        // Try to extract
+                        match handler.extract(context, token_slot, token_range.clone()) {
+                            Ok(Some(extracted)) => {
+                                // Try to convert
+                                match handler.convert(context, extracted) {
+                                    Ok(Some(_converted)) => {
+                                        let elapsed = start_time.elapsed();
+
+                                        context.registry.add_report(Report::new(
+                                            Id::get(&format!("process_single_success_{}_{}", handler.id().name(), token_slot)),
+                                            Some(handler.id()),
+                                            "detect_extract_convert".to_string(),
+                                            format!("Handler pipeline completed successfully in {:?} (attempt {})", elapsed, attempts),
+                                            ReportLevel::Info,
+                                            Phase::Process(None),
+                                        ).with_tokens(tokens.len(), tokens.len())
+                                            .with_success(true));
+
+                                        return Ok(HandlerResult::Completed(
+                                            Some(tokens.clone()),
+                                            token_range.clone(),
+                                            String::new(),
+                                            handler.id(),
+                                        ));
+                                    }
+                                    Ok(None) => {
+                                        last_error = Some(crate::C2RError::new(crate::Kind::Unexpected, crate::Reason::Value("Convert returned None"), None));
+                                    }
+                                    Err(e) => {
+                                        last_error = Some(e.clone());
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                last_error = Some(crate::C2RError::new(crate::Kind::Unexpected, crate::Reason::Value("Extract returned None"), None));
+                            }
+                            Err(e) => {
+                                last_error = Some(e.clone());
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        last_error = Some(crate::C2RError::new(crate::Kind::Unexpected, crate::Reason::Value("Handler detect returned false"), None));
                     }
                     Err(e) => {
                         last_error = Some(e.clone());
-                        
-                        if attempts < max_attempts {
-                            context.registry.add_report(HandlerReport::new(
-                                &format!("process_retry_{}_{}", handler.id().name(), token_slot),
-                                std::sync::Arc::new(handler.id()),
-                                handler.role().to_string(),
-                                "process".to_string(),
-                                format!("Handler processing failed on attempt {}, retrying: {}", attempts, e),
+                    }
+                }
+
+                if attempts < max_attempts {
+                    if let Some(ref e) = last_error {
+                        context.registry.add_report(
+                            Report::new(
+                                Id::get(&format!(
+                                    "process_retry_{}_{}",
+                                    handler.id().name(),
+                                    token_slot
+                                )),
+                                Some(handler.id()),
+                                "Handlizer::process_single".to_string(),
+                                format!(
+                                    "Handler processing failed on attempt {}, retrying: {}",
+                                    attempts, e
+                                ),
                                 ReportLevel::Warning,
-                                HandlerPhase::Process,
-                            ).with_success(false));
-                            
-                            // Brief pause before retry
-                            std::thread::sleep(std::time::Duration::from_millis(10));
-                        }
+                                Phase::Process(None),
+                            )
+                                .with_success(false),
+                        );
+
+                        // Brief pause before retry
+                        std::thread::sleep(std::time::Duration::from_millis(10));
                     }
                 }
             }
@@ -815,72 +892,87 @@ impl Handlizer {
                 // Try intelligent fallback with top-scoring alternatives
                 for (fallback_handler, fallback_score) in fallback_handlers.iter().take(2) {
                     if fallback_handler.id() != handler.id() {
-                        context.registry.add_report(HandlerReport::new(
-                            &format!("fallback_attempt_{}_{}", fallback_handler.id().name(), token_slot),
-                            std::sync::Arc::new(fallback_handler.id()),
-                            fallback_handler.role().to_string(),
-                            "fallback_process".to_string(),
-                            format!("Attempting fallback processing with score: {:.3}", fallback_score),
-                            ReportLevel::Info,
-                            HandlerPhase::Process,
-                        ).with_tokens(tokens.len(), 0));
+                        context.registry.add_report(
+                            Report::new(
+                                Id::get(&format!(
+                                    "fallback_attempt_{}_{}",
+                                    fallback_handler.id().name(),
+                                    token_slot
+                                )),
+                                Some(fallback_handler.id()),
+                                "fallback_detect".to_string(),
+                                format!(
+                                    "Attempting fallback processing with score: {:.3}",
+                                    fallback_score
+                                ),
+                                ReportLevel::Info,
+                                Phase::Process(None),
+                            )
+                                .with_tokens(tokens.len(), 0),
+                        );
 
-                        match fallback_handler.process(context, token_slot, token_range.clone()) {
-                            Ok(fallback_result) => {
-                                let elapsed = start_time.elapsed();
-                                
-                                context.registry.add_report(HandlerReport::new(
-                                    &format!("fallback_success_{}_{}", fallback_handler.id().name(), token_slot),
-                                    std::sync::Arc::new(fallback_handler.id()),
-                                    fallback_handler.role().to_string(),
-                                    "fallback_process".to_string(),
-                                    format!("Fallback processing successful in {:?}", elapsed),
-                                    ReportLevel::Info,
-                                    HandlerPhase::Process,
-                                ).with_tokens(tokens.len(), fallback_result.token_count())
-                                 .with_success(true));
-                                
-                                return Ok(fallback_result);
-                            }
-                            Err(fallback_error) => {
-                                context.registry.add_report(HandlerReport::new(
-                                    &format!("fallback_failed_{}_{}", fallback_handler.id().name(), token_slot),
-                                    std::sync::Arc::new(fallback_handler.id()),
-                                    fallback_handler.role().to_string(),
-                                    "fallback_process".to_string(),
-                                    format!("Fallback processing failed: {}", fallback_error),
-                                    ReportLevel::Warning,
-                                    HandlerPhase::Process,
-                                ).with_success(false));
+                        // Use detect/extract/convert for fallback too
+                        if let Ok(true) = fallback_handler.detect(context, token_slot, token_range.clone()) {
+                            if let Ok(Some(extracted)) = fallback_handler.extract(context, token_slot, token_range.clone()) {
+                                if let Ok(Some(_converted)) = fallback_handler.convert(context, extracted) {
+                                    let elapsed = start_time.elapsed();
+
+                                    context.registry.add_report(
+                                        Report::new(
+                                            Id::get(&format!("fallback_success_{}_{}", fallback_handler.id().name(), token_slot)),
+                                            Some(fallback_handler.id()),
+                                            "fallback_pipeline".to_string(),
+                                            format!("Fallback processing succeeded in {:?}", elapsed),
+                                            ReportLevel::Info,
+                                            Phase::Process(None),
+                                        )
+                                            .with_tokens(tokens.len(), tokens.len())
+                                            .with_success(true),
+                                    );
+
+                                    return Ok(HandlerResult::Completed(
+                                        Some(tokens.clone()),
+                                        token_range.clone(),
+                                        String::new(),
+                                        fallback_handler.id(),
+                                    ));
+                                }
                             }
                         }
+
+                        context.registry.add_report(
+                            Report::new(
+                                Id::get(&format!("fallback_failed_{}_{}", fallback_handler.id().name(), token_slot)),
+                                Some(fallback_handler.id()),
+                                "fallback_pipeline".to_string(),
+                                format!("Fallback processing failed"),
+                                ReportLevel::Warning,
+                                Phase::Process(None),
+                            )
+                                .with_success(false),
+                        );
                     }
                 }
 
-                // Try advanced redirect system as final resort
-                let failed_result = HandlerResult::NotHandled(
-                    Some(tokens.clone()),
-                    token_range.clone(),
-                    handler.id(),
-                );
-                
-                return context.try_redirect(token_slot, token_range, failed_result, &handler.id());
+                // Return original error if all fallbacks failed
+                return Err(error);
             }
         }
 
-        // If no handler found, return not handled with comprehensive analysis
+        // No suitable handler found
         let elapsed = start_time.elapsed();
-        context.registry.add_report(HandlerReport::new(
-            &format!("process_single_no_handler_{}", token_slot),
-            std::sync::Arc::new(Id::get("handlizer")),
-            "Handlizer".to_string(),
-            "process_single".to_string(),
-            format!("No suitable handler found for tokens (evaluated {} handlers), took {:?}", 
-                   handler_scores.len(), elapsed),
-            ReportLevel::Warning,
-            HandlerPhase::Process,
-        ).with_tokens(tokens.len(), 0)
-         .with_success(false));
+        context.registry.add_report(
+            Report::new(
+                Id::get(&format!("no_handler_found_{}", token_slot)),
+                Some(Id::get("handlizer")),
+                "Handlizer::process_single".to_string(),
+                format!("No suitable handler found for {} tokens in {:?}", tokens.len(), elapsed),
+                ReportLevel::Warning,
+                Phase::Process(None),
+            )
+                .with_tokens(tokens.len(), 0)
+                .with_success(false),
+        );
 
         Ok(HandlerResult::NotHandled(
             Some(tokens),
@@ -889,455 +981,913 @@ impl Handlizer {
         ))
     }
 
-
-
     fn calculate_token_complexity(&self, tokens: &[Token]) -> f64 {
         if tokens.is_empty() {
             return 0.0;
         }
-        
+
         let mut complexity = 0.0;
-        let mut nesting_level = 0;
-        
-        for _token in tokens {
-            nesting_level += 1;
-            complexity += nesting_level as f64 * 0.5;
+        let mut nesting_depth = 0u32;
+        let mut keyword_weight = 0.0;
+        let mut structural_weight = 0.0;
+
+        for token in tokens {
+            // Track nesting depth for structural complexity
+            match token {
+                Token::c('{') | Token::c('(') | Token::c('[') => nesting_depth += 1,
+                Token::c('}') | Token::c(')') | Token::c(']') => {
+                    nesting_depth = nesting_depth.saturating_sub(1)
+                }
+                _ => {}
+            }
+            // Weight tokens by semantic importance
+            let token_weight = match token {
+                Token::l("if")
+                | Token::l("else")
+                | Token::l("while")
+                | Token::l("for")
+                | Token::l("switch") => 2.0,
+                Token::l("struct") | Token::l("class") | Token::l("enum") | Token::l("union") => {
+                    1.8
+                }
+                Token::l("int")
+                | Token::l("char")
+                | Token::l("float")
+                | Token::l("double")
+                | Token::l("void") => 1.2,
+                Token::c('{') | Token::c('}') => 1.5,
+                Token::c('(') | Token::c(')') => 1.0,
+                Token::c(';') => 0.8,
+                _ => 0.5,
+            };
+
+            keyword_weight += token_weight;
+            structural_weight += nesting_depth as f64 * 0.3;
         }
-        
-        complexity / tokens.len() as f64
+
+        let avg_nesting = structural_weight / tokens.len() as f64;
+        let avg_keyword_weight = keyword_weight / tokens.len() as f64;
+
+        // Composite complexity score with diminishing returns
+        (avg_nesting * 0.6 + avg_keyword_weight * 0.4).min(10.0)
     }
 
-    fn suggest_alternative_handler(&mut self, tokens: &[Token], failed_handler_id: &Id) -> Option<Id> {
-        let mut best_candidate = None;
-        let mut best_score = 0.0;
-        
+    fn suggest_alternative_handler(
+        &mut self,
+        tokens: &[Token],
+        failed_handler_id: &Id,
+    ) -> Option<Id> {
+        let mut candidates = Vec::new();
+        let token_range = 0..tokens.len();
+
+        // Collect and score all viable alternatives
         for handler in self.get_sorted_handlers() {
             if handler.id() != *failed_handler_id {
-                let pattern_score = Handlizer::calculate_pattern_match_score(handler.as_ref(), tokens, &(0..tokens.len()));
-                
-                if pattern_score > best_score {
-                    best_score = pattern_score;
-                    best_candidate = Some(handler.id());
+                let pattern_score =
+                    Self::calculate_pattern_match_score(handler.as_ref(), tokens, &token_range);
+                let historical_confidence = self.get_handler_confidence(&handler.id());
+
+                // Composite scoring with historical bias
+                let composite_score = (pattern_score * 0.7) + (historical_confidence * 0.3);
+
+                if composite_score > 0.2 {
+                    candidates.push((handler.id(), composite_score));
                 }
             }
         }
-        
-        best_candidate
+
+        // Sort by score and return best candidate
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        candidates.first().map(|(id, _)| id.clone())
     }
 
-    fn calculate_pattern_match_score(handler: &dyn Handler, tokens: &[Token], range: &Range<usize>) -> f64 {
+    fn calculate_pattern_match_score(
+        handler: &dyn Handler,
+        tokens: &[Token],
+        range: &Range<usize>,
+    ) -> f64 {
         if tokens.is_empty() || range.is_empty() {
             return 0.0;
         }
-        
+
         let end = range.end.min(tokens.len());
         let start = range.start.min(end);
-        let token_count = end - start;
-        
-        if token_count == 0 {
+        let token_slice = &tokens[start..end];
+
+        if token_slice.is_empty() {
             return 0.0;
         }
-        
-        // Enhanced scoring with multiple factors
-        let priority_score = handler.priority() as f64 / 1000.0;
-        
-        // Token type relevance scoring
-        let mut type_match_score = 0.0;
-        let relevant_tokens = &tokens[start..end];
-        
-        for token in relevant_tokens {
+
+        // Multi-factor scoring system
+        let priority_factor = (handler.priority() as f64 / 1000.0).min(1.0);
+
+        // Enhanced token relevance scoring with pattern recognition
+        let relevance_score = Self::calculate_token_relevance(token_slice);
+
+        // Structural complexity bonus for well-formed constructs
+        let structure_bonus = Self::calculate_structural_bonus(token_slice);
+
+        // Handler-specific pattern affinity
+        let pattern_affinity = Self::calculate_pattern_affinity(handler, token_slice);
+
+        // Weighted composite with normalization
+        let raw_score = (priority_factor * 0.3)
+            + (relevance_score * 0.4)
+            + (structure_bonus * 0.2)
+            + (pattern_affinity * 0.1);
+
+        raw_score.min(1.0).max(0.0)
+    }
+
+    fn calculate_token_relevance(tokens: &[Token]) -> f64 {
+        let mut relevance_sum = 0.0;
+
+        for token in tokens {
+            let weight = match token {
+                Token::l("if") | Token::l("else") | Token::l("while") | Token::l("for") => 0.9,
+                Token::l("struct") | Token::l("class") | Token::l("enum") => 0.85,
+                Token::l("int") | Token::l("char") | Token::l("float") | Token::l("double") => 0.75,
+                Token::c('{') | Token::c('}') => 0.7,
+                Token::c('(') | Token::c(')') => 0.6,
+                Token::c(';') | Token::c(',') => 0.4,
+                _ => 0.2,
+            };
+            relevance_sum += weight;
+        }
+
+        (relevance_sum / tokens.len() as f64).min(1.0)
+    }
+
+    fn calculate_structural_bonus(tokens: &[Token]) -> f64 {
+        let mut brace_balance = 0i32;
+        let mut paren_balance = 0i32;
+        let mut well_formed = true;
+
+        for token in tokens {
             match token {
-                Token::l("if") | Token::l("else") | Token::l("while") | Token::l("for") => {
-                    type_match_score += 0.8;
+                Token::c('{') => brace_balance += 1,
+                Token::c('}') => {
+                    brace_balance -= 1;
+                    if brace_balance < 0 {
+                        well_formed = false;
+                    }
                 }
-                Token::l("int") | Token::l("char") | Token::l("float") | Token::l("double") => {
-                    type_match_score += 0.7;
+                Token::c('(') => paren_balance += 1,
+                Token::c(')') => {
+                    paren_balance -= 1;
+                    if paren_balance < 0 {
+                        well_formed = false;
+                    }
                 }
-                Token::c('{') | Token::c('}') | Token::c('(') | Token::c(')') => {
-                    type_match_score += 0.5;
-                }
-                Token::c(';') | Token::c(',') => {
-                    type_match_score += 0.3;
-                }
-                _ => {
-                    type_match_score += 0.1;
-                }
+                _ => {}
             }
         }
 
-        type_match_score /= token_count as f64;
-        
-        // Pattern complexity bonus
-        let complexity_bonus = if token_count > 3 { 0.1 } else { 0.0 };
-        
-        // Weighted composite score
-        (priority_score * 0.5) + (type_match_score * 0.4) + complexity_bonus
+        let balance_bonus = if brace_balance == 0 && paren_balance == 0 && well_formed {
+            0.3
+        } else {
+            0.0
+        };
+        let length_bonus = (tokens.len() as f64 / 10.0).min(0.2);
+
+        balance_bonus + length_bonus
     }
-    
+
+    fn calculate_pattern_affinity(handler: &dyn Handler, tokens: &[Token]) -> f64 {
+        let supported_patterns = handler.supported_patterns();
+        if supported_patterns.is_empty() {
+            return 0.5; // Neutral affinity
+        }
+
+        // Simple heuristic: check if tokens contain keywords relevant to handler patterns
+        let mut affinity = 0.0;
+        for pattern in &supported_patterns {
+            if tokens.iter().any(|token| {
+                if let Token::l(literal) = token {
+                    pattern.to_lowercase().contains(literal)
+                } else {
+                    false
+                }
+            }) {
+                affinity += 0.2;
+            }
+        }
+
+        (affinity / supported_patterns.len() as f64).min(1.0)
+    }
+
+    fn get_handler_confidence(&self, handler_id: &Id) -> f64 {
+        let success_patterns = self.success_patterns.read().unwrap();
+        let failure_patterns = self.failure_patterns.read().unwrap();
+
+        let successes = success_patterns
+            .get(&handler_id.name())
+            .map(|records| records.len())
+            .unwrap_or(0);
+        let failures = failure_patterns
+            .get(&handler_id.name())
+            .map(|records| records.len())
+            .unwrap_or(0);
+
+        if successes + failures == 0 {
+            return 0.5; // Neutral confidence for new handlers
+        }
+
+        let success_rate = successes as f64 / (successes + failures) as f64;
+        // Apply Bayesian smoothing with prior belief of 50% success rate
+        let smoothed_rate = (successes as f64 + 1.0) / (successes + failures + 2) as f64;
+
+        (success_rate * 0.7) + (smoothed_rate * 0.3)
+    }
+
     // ========================================================================
     // INTEGRATED ADAPTIVE PATTERN MATCHING METHODS
     // ========================================================================
-    
-    /// Perform adaptive pattern matching with learning
-    pub fn adaptive_match(&mut self, pattern: &HandlerPattern, tokens: &[Token]) -> AdaptivePatternResult {
-        let handler_type = pattern.id.clone();
-        
-        // Get or create pattern tree for this handler type
-        if !self.pattern_trees.contains_key(&handler_type) {
-            self.pattern_trees.insert(handler_type.clone(), Vec::new());
-        }
-        
-        // Try matching with existing pattern variations
-        if let Some(nodes) = self.pattern_trees.get(&handler_type) {
-            for node in nodes {
-                if let Ok(result) = self.try_pattern_match(&node.current_pattern, tokens) {
-                    if result.matched {
-                        return result;
+    /// Perform adaptive pattern matching with learning and caching
+    pub fn adaptive_match(
+        &mut self,
+        pattern: &HandlerPattern,
+        tokens: &[Token],
+    ) -> AdaptivePatternResult {
+        // Generate cache key for this pattern-token combination
+        let cache_key = self.generate_cache_key(&pattern.id, tokens);
+
+        // Try basic pattern match first
+        match self.try_pattern_match(pattern, tokens) {
+            Ok(mut result) => {
+                // If we got a match, enhance it with adaptive analysis
+                if result.matched {
+                    result = self.enhance_partial_match(pattern, tokens, result);
+
+                    // Record success for learning
+                    self.record_success(&pattern.id, result.tokens_consumed, result.confidence);
+
+                    result
+                } else {
+                    // No basic match - try pattern variations
+                    let variation_result = self.explore_pattern_variations(pattern, tokens);
+
+                    if variation_result.matched {
+                        self.record_success(
+                            &pattern.id,
+                            variation_result.tokens_consumed,
+                            variation_result.confidence,
+                        );
+                        variation_result
+                    } else {
+                        self.record_failure(
+                            &pattern.id,
+                            result.tokens_consumed,
+                            "No adaptive match found".to_string(),
+                        );
+                        AdaptivePatternResult::no_match()
                     }
                 }
             }
+            Err(_) => {
+                self.record_failure(
+                    &pattern.id,
+                    tokens.len(),
+                    "Pattern matching error".to_string(),
+                );
+                AdaptivePatternResult::no_match()
+            }
         }
-        
-        // No existing pattern worked, try adaptive exploration
-        self.explore_pattern_variations(pattern, tokens)
     }
-    
-    /// Record successful pattern matching for learning
+
+    fn enhance_partial_match(
+        &mut self,
+        pattern: &HandlerPattern,
+        tokens: &[Token],
+        partial_result: AdaptivePatternResult,
+    ) -> AdaptivePatternResult {
+        let mut enhanced = partial_result.clone();
+
+        // Apply confidence boosting based on token alignment
+        let alignment_score = self.calculate_token_alignment(tokens, enhanced.tokens_consumed);
+        enhanced.confidence = (enhanced.confidence + alignment_score * 0.3).min(1.0);
+
+        // Extend token consumption if pattern suggests it
+        if enhanced.tokens_consumed < tokens.len() && enhanced.confidence > 0.6 {
+            let extended_tokens = (enhanced.tokens_consumed + 2).min(tokens.len());
+            enhanced.tokens_consumed = extended_tokens;
+            enhanced.confidence = (enhanced.confidence * 0.95).max(0.4);
+        }
+
+        enhanced
+    }
+
+    fn calculate_token_alignment(&self, tokens: &[Token], consumed: usize) -> f64 {
+        if consumed == 0 || tokens.is_empty() {
+            return 0.0;
+        }
+
+        let end = consumed.min(tokens.len());
+        let consumed_tokens = &tokens[0..end];
+
+        // Calculate structural alignment score
+        let mut alignment = 0.0;
+        let mut open_braces = 0;
+        let mut open_parens = 0;
+
+        for token in consumed_tokens {
+            match token {
+                Token::c('{') => {
+                    open_braces += 1;
+                    alignment += 0.1;
+                }
+                Token::c('}') => {
+                    if open_braces > 0 {
+                        open_braces -= 1;
+                        alignment += 0.2;
+                    }
+                }
+                Token::c('(') => {
+                    open_parens += 1;
+                    alignment += 0.05;
+                }
+                Token::c(')') => {
+                    if open_parens > 0 {
+                        open_parens -= 1;
+                        alignment += 0.1;
+                    }
+                }
+                Token::c(';') => alignment += 0.15,
+                _ => alignment += 0.02,
+            }
+        }
+
+        // Bonus for balanced structures
+        if open_braces == 0 && open_parens == 0 {
+            alignment += 0.3;
+        }
+
+        (alignment / consumed_tokens.len() as f64).min(1.0)
+    }
+
+    /// Record successful pattern matching with enhanced metrics
     pub fn record_success(&mut self, handler_id: &Id, tokens_consumed: usize, confidence: f64) {
-        self.adaptive_stats.total_attempts.fetch_add(1, Ordering::Relaxed);
-        self.adaptive_stats.successes.fetch_add(1, Ordering::Relaxed);
-        
+        self.adaptive_stats
+            .total_attempts
+            .fetch_add(1, Ordering::Relaxed);
+        self.adaptive_stats
+            .successes
+            .fetch_add(1, Ordering::Relaxed);
+
         let record = SuccessRecord {
             handler_id: handler_id.clone(),
             token_count: tokens_consumed,
             range_size: tokens_consumed,
-            confidence,
+            confidence: confidence.min(1.0).max(0.0),
             timestamp: SystemTime::now(),
         };
-        
+
         if let Ok(mut patterns) = self.success_patterns.write() {
-            patterns.entry(handler_id.name().to_string())
-                   .or_insert_with(Vec::new)
-                   .push(record);
+            let handler_records = patterns
+                .entry(handler_id.name().to_string())
+                .or_insert_with(Vec::new);
+            handler_records.push(record);
+
+            // Maintain reasonable history size
+            if handler_records.len() > 1000 {
+                handler_records.drain(0..100);
+            }
         }
     }
-    
-    /// Record failed pattern matching for learning
+
+    /// Record failed pattern matching with categorized reasons
     pub fn record_failure(&mut self, handler_id: &Id, tokens_attempted: usize, reason: String) {
-        self.adaptive_stats.total_attempts.fetch_add(1, Ordering::Relaxed);
+        self.adaptive_stats
+            .total_attempts
+            .fetch_add(1, Ordering::Relaxed);
         self.adaptive_stats.failures.fetch_add(1, Ordering::Relaxed);
-        
+
         let record = FailureRecord {
             handler_id: handler_id.clone(),
             token_count: tokens_attempted,
             range_size: tokens_attempted,
-            reason,
+            reason: reason.chars().take(256).collect(), // Limit reason length
             timestamp: SystemTime::now(),
         };
-        
+
         if let Ok(mut patterns) = self.failure_patterns.write() {
-            patterns.entry(handler_id.name().to_string())
-                   .or_insert_with(Vec::new)
-                   .push(record);
+            let handler_records = patterns
+                .entry(handler_id.name().to_string())
+                .or_insert_with(Vec::new);
+            handler_records.push(record);
+
+            // Maintain reasonable history size
+            if handler_records.len() > 500 {
+                handler_records.drain(0..50);
+            }
         }
     }
-    
-    /// Generate analysis report of adaptive performance
+
+    pub fn analyze_patterns(&mut self, use_cache: bool) -> Result<()> {
+        let total_attempts = self.adaptive_stats.total_attempts.load(Ordering::Relaxed);
+        let successes = self.adaptive_stats.successes.load(Ordering::Relaxed);
+        let failures = self.adaptive_stats.failures.load(Ordering::Relaxed);
+
+        if total_attempts == 0 {
+            return Ok(());
+        }
+
+        // Analyze pattern tree structures using existing success/failure patterns
+        if let (Ok(success_patterns), Ok(failure_patterns)) =
+            (self.success_patterns.read(), self.failure_patterns.read())
+        {
+            for (handler_name, success_records) in success_patterns.iter() {
+                // Calculate handler confidence and performance metrics
+                if !success_records.is_empty() {
+                    let avg_confidence: f64 =
+                        success_records.iter().map(|r| r.confidence).sum::<f64>()
+                            / success_records.len() as f64;
+
+                    let avg_tokens: f64 =
+                        success_records.iter().map(|r| r.token_count).sum::<usize>() as f64
+                            / success_records.len() as f64;
+
+                    // Check for low-performing patterns
+                    if avg_confidence < 0.3 && success_records.len() > 10 {
+                        // Mark low-performing patterns for potential cleanup
+                        if let Some(tree) = self.pattern_trees.get_mut(handler_name) {
+                            for node in tree.iter_mut() {
+                                node.deviation_distance = (node.deviation_distance + 0.1).min(1.0);
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                // Cross-reference with failure patterns for comprehensive analysis
+                if let Some(failure_records) = failure_patterns.get(handler_name) {
+                    let total_handler_attempts = success_records.len() + failure_records.len();
+                    let handler_success_rate =
+                        success_records.len() as f64 / total_handler_attempts as f64;
+                    if let Some(tree) = self.pattern_trees.get_mut(handler_name) {
+                        for node in tree.iter_mut() {
+                            node.success_rate = handler_success_rate;
+                            node.attempts = total_handler_attempts;
+                            node.confidence =
+                                handler_success_rate * (1.0 - node.deviation_distance);
+                        }
+
+                        // Analyze recent failure trends
+                        if failure_records.len() >= 5 {
+                            let recent_failures =
+                                &failure_records[failure_records.len().saturating_sub(5)..];
+                            let pattern_failure_rate = recent_failures.len() as f64 / 5.0;
+                            if pattern_failure_rate > 0.6 {
+                                for node in tree.iter_mut() {
+                                    node.deviation_distance =
+                                        (node.deviation_distance + 0.05).min(0.8);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // Cache analysis using exploration cache
+        if use_cache {
+            let cache_size = self.exploration_cache.len();
+            let cache_effectiveness = if total_attempts > 0 {
+                cache_size as f64 / total_attempts as f64
+            } else {
+                0.0
+            };
+
+            // Clear ineffective cache entries based on adaptive stats
+            if cache_effectiveness < 0.1 && cache_size > 100 {
+                // Identify stale cache entries using failure patterns
+                if let Ok(failure_patterns) = self.failure_patterns.read() {
+                    let mut stale_keys = Vec::new();
+
+                    for (cache_key, _) in self.exploration_cache.iter() {
+                        // Check if cache key corresponds to frequently failing patterns
+                        let key_parts: Vec<&str> = cache_key.split('_').collect();
+                        if let Some(handler_part) = key_parts.first() {
+                            if let Some(failure_records) = failure_patterns.get(*handler_part) {
+                                if failure_records.len() > 20 {
+                                    let recent_failures = &failure_records
+                                        [failure_records.len().saturating_sub(10)..];
+                                    let recent_failure_rate = recent_failures.len() as f64 / 10.0;
+                                    if recent_failure_rate > 0.7 {
+                                        stale_keys.push(cache_key.clone());
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove stale cache entries
+                    for stale_key in stale_keys {
+                        self.exploration_cache.remove(&stale_key);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    /// Generate comprehensive analysis report with trends and insights
     pub fn analyze_adaptive_performance(&self) -> String {
         let total_attempts = self.adaptive_stats.total_attempts.load(Ordering::Relaxed);
         let successes = self.adaptive_stats.successes.load(Ordering::Relaxed);
         let failures = self.adaptive_stats.failures.load(Ordering::Relaxed);
-        
+
         let success_rate = if total_attempts > 0 {
             successes as f64 / total_attempts as f64
         } else {
             0.0
         };
-        
+
+        // Calculate cache efficiency
+        let cache_hit_rate = if self.exploration_cache.len() > 0 {
+            // Simplified metric based on cache size vs total attempts
+            (self.exploration_cache.len() as f64 / (total_attempts as f64 + 1.0)) * 100.0
+        } else {
+            0.0
+        };
+
+        // Handler performance breakdown
+        let handler_breakdown = self.generate_handler_performance_summary();
+
         format!(
             "=== ADAPTIVE PATTERN ANALYSIS REPORT ===\n\
-             Total attempts: {}\n\
-             Successes: {}\n\
-             Failures: {}\n\
-             Success rate: {:.1}%\n\
-             Pattern trees: {}\n\
-             Exploration cache: {} entries",
-            total_attempts, successes, failures,
+         Total attempts: {}\n\
+         Successes: {} ({:.1}%)\n\
+         Failures: {} ({:.1}%)\n\
+         Overall success rate: {:.1}%\n\
+         Pattern trees: {}\n\
+         Exploration cache: {} entries ({:.1}% efficiency)\n\
+         \n\
+         === HANDLER PERFORMANCE ===\n\
+         {}",
+            total_attempts,
+            successes,
+            (successes as f64 / total_attempts as f64) * 100.0,
+            failures,
+            (failures as f64 / total_attempts as f64) * 100.0,
             success_rate * 100.0,
             self.pattern_trees.len(),
-            self.exploration_cache.len()
+            self.exploration_cache.len(),
+            cache_hit_rate,
+            handler_breakdown
         )
     }
-    
-    // Private helper methods
-    
-    fn try_pattern_match(&self, pattern: &HandlerPattern, tokens: &[Token]) -> Result<AdaptivePatternResult> {
-        // Try to match using the pattern - this is a simplified implementation
-        let pattern_result = if tokens.len() >= pattern.min_tokens {
-            let tokens_consumed = if let Some(max_tokens) = pattern.max_tokens {
-                tokens.len().min(max_tokens)
-            } else {
-                tokens.len()
-            };
-            
-            if tokens_consumed >= pattern.min_tokens {
-                PatternResult::Match { consumed_tokens: tokens_consumed }
-            } else {
-                PatternResult::NoMatch { reason: "Below minimum tokens".to_string() }
-            }
-        } else {
-            PatternResult::NoMatch { reason: "Insufficient tokens".to_string() }
-        };
-        
-        Ok(AdaptivePatternResult::from_existing(pattern_result))
-    }
-    
-    fn explore_pattern_variations(&mut self, pattern: &HandlerPattern, tokens: &[Token]) -> AdaptivePatternResult {
-        use std::collections::VecDeque;
-        
-        let mut exploration_queue = VecDeque::new();
-        let mut best_result = AdaptivePatternResult::no_match();
-        let mut explored_count = 0;
-        let handler_type = &pattern.id;
 
-        // Start exploration from root nodes
-        if let Some(root_nodes) = self.pattern_trees.get(handler_type).cloned() {
-            for root_node in root_nodes {
-                exploration_queue.push_back((root_node, 0)); // (node, depth)
+    fn generate_cache_key(&self, handler_type: &Id, tokens: &[Token]) -> String {
+        let mut hasher = DefaultHasher::new();
+        handler_type.name().hash(&mut hasher);
+        tokens.len().hash(&mut hasher);
+
+        // Hash strategic token positions for better distribution
+        let token_count = tokens.len();
+        let sample_positions = if token_count <= 10 {
+            (0..token_count).collect::<Vec<_>>()
+        } else {
+            // Sample beginning, middle, and end tokens
+            let mut positions = Vec::new();
+            positions.extend(0..3); // First 3
+            positions.push(token_count / 2); // Middle
+            positions.extend((token_count.saturating_sub(3))..token_count); // Last 3
+            positions
+        };
+
+        for &pos in &sample_positions {
+            if let Some(token) = tokens.get(pos) {
+                token.to_string().hash(&mut hasher);
+            } else {
+                pos.hash(&mut hasher);
             }
         }
 
-        // Breadth-first exploration with probabilistic selection
+        format!("{}_{:x}", handler_type.name(), hasher.finish())
+    }
+
+    fn generate_handler_performance_summary(&self) -> String {
+        let mut summary = String::new();
+
+        if let (Ok(success_patterns), Ok(failure_patterns)) =
+            (self.success_patterns.read(), self.failure_patterns.read())
+        {
+            let mut handler_stats = HashMap::new();
+
+            // Aggregate success stats with confidence tracking
+            for (handler_name, records) in success_patterns.iter() {
+                let entry = handler_stats
+                    .entry(handler_name.clone())
+                    .or_insert((0, 0, 0.0, 0.0));
+                entry.0 += records.len();
+                if !records.is_empty() {
+                    let avg_confidence: f64 =
+                        records.iter().map(|r| r.confidence).sum::<f64>() / records.len() as f64;
+                    entry.2 = avg_confidence;
+                }
+            }
+
+            // Aggregate failure stats with recent failure rate
+            for (handler_name, records) in failure_patterns.iter() {
+                let entry = handler_stats
+                    .entry(handler_name.clone())
+                    .or_insert((0, 0, 0.0, 0.0));
+                entry.1 += records.len();
+
+                // Calculate recent failure rate (last 10 attempts)
+                if records.len() >= 10 {
+                    let recent_failures = &records[records.len().saturating_sub(10)..];
+                    entry.3 = recent_failures.len() as f64 / 10.0;
+                }
+            }
+
+            // Sort handlers by total activity (successes + failures)
+            let mut sorted_handlers: Vec<_> = handler_stats.iter().collect();
+            sorted_handlers.sort_by(|a, b| (b.1.0 + b.1.1).cmp(&(a.1.0 + a.1.1)));
+
+            for (handler_name, (successes, failures, avg_confidence, recent_failure_rate)) in
+                sorted_handlers.iter().take(10)
+            {
+                let total = successes + failures;
+                if total > 0 {
+                    let success_rate = (*successes as f64 / total as f64) * 100.0;
+                    summary.push_str(&format!(
+                        "{}: {} attempts, {:.1}% success, conf: {:.2}, recent fail rate: {:.1}%\n",
+                        handler_name,
+                        total,
+                        success_rate,
+                        avg_confidence,
+                        recent_failure_rate * 100.0
+                    ));
+                }
+            }
+
+            if summary.is_empty() {
+                summary.push_str("No handler performance data available\n");
+            }
+        } else {
+            summary.push_str("Unable to access performance data (lock contention)\n");
+        }
+
+        summary
+    }
+
+    // Private helper methods
+
+    fn try_pattern_match(
+        &self,
+        pattern: &HandlerPattern,
+        tokens: &[Token],
+    ) -> Result<AdaptivePatternResult> {
+        let tokens_len = tokens.len();
+
+        if tokens_len < pattern.min_tokens {
+            return Ok(AdaptivePatternResult::from_existing(
+                PatternResult::NoMatch {
+                    reason: "Insufficient tokens".to_string(),
+                },
+            ));
+        }
+
+        let tokens_consumed = pattern
+            .max_tokens
+            .map(|max| tokens_len.min(max))
+            .unwrap_or(tokens_len);
+
+        let pattern_result = if tokens_consumed >= pattern.min_tokens {
+            PatternResult::Match {
+                consumed_tokens: tokens_consumed,
+            }
+        } else {
+            PatternResult::NoMatch {
+                reason: "Below minimum tokens".to_string(),
+            }
+        };
+
+        Ok(AdaptivePatternResult::from_existing(pattern_result))
+    }
+
+    fn explore_pattern_variations(
+        &mut self,
+        pattern: &HandlerPattern,
+        tokens: &[Token],
+    ) -> AdaptivePatternResult {
+        use std::collections::VecDeque;
+
+        let mut exploration_queue = VecDeque::with_capacity(64);
+        let mut best_result = AdaptivePatternResult::no_match();
+        let mut best_score = 0.0;
+        let mut explored_count = 0;
+        const MAX_EXPLORATIONS: usize = 50;
+
+        // Initialize with existing pattern tree nodes
+        if let Some(root_nodes) = self.pattern_trees.get(&pattern.id.name()).cloned() {
+            for root_node in root_nodes {
+                exploration_queue.push_back((root_node, 0));
+            }
+        }
+
+        // Breadth-first exploration with early termination
         while let Some((current_node, depth)) = exploration_queue.pop_front() {
-            if depth >= self.bounds.max_depth {
-                continue;
+            if depth >= self.bounds.max_depth || explored_count >= MAX_EXPLORATIONS {
+                break;
             }
 
             explored_count += 1;
 
-            // Generate variations of current pattern
+            // Generate and evaluate variations
             let variations = self.generate_pattern_variations(&current_node);
-
             for variation in variations {
-                // Check bounds before exploring
                 if variation.deviation_distance > self.bounds.max_deviation {
                     continue;
                 }
 
-                // Try this variation
-                let result = match self.try_pattern_match(&variation.current_pattern, tokens) {
-                    Ok(result) => result,
-                    Err(_) => continue, // Skip this variation if pattern matching fails
-                };
-                let fuzzy_score = self.calculate_fuzzy_score(&variation, &result);
+                // Evaluate pattern match
+                if let Ok(result) = self.try_pattern_match(&variation.current_pattern, tokens) {
+                    let fuzzy_score = self.calculate_fuzzy_score(&variation, &result);
 
-                // Update statistics
-                let mut updated_variation = variation.clone();
-                updated_variation.update_success(result.matched);
+                    // Track best result
+                    if fuzzy_score > best_score {
+                        best_score = fuzzy_score;
+                        best_result = result.clone();
+                    }
 
-                // Check if this is better than our current best
-                if fuzzy_score > self.calculate_fuzzy_score(&PatternNode::new_root(pattern.clone()), &best_result) {
-                    best_result = result.clone();
+                    // Queue promising variations for deeper exploration
+                    if result.confidence >= self.bounds.min_confidence
+                        && depth < self.bounds.max_depth - 1
+                    {
+                        let mut updated_variation = variation;
+                        updated_variation.update_success(result.matched);
+                        exploration_queue.push_back((updated_variation, depth + 1));
+                    }
                 }
-
-                // If this variation shows promise, add it to exploration queue
-                if result.confidence >= self.bounds.min_confidence && depth < self.bounds.max_depth - 1 {
-                    exploration_queue.push_back((updated_variation, depth + 1));
-                }
-            }
-
-            // Limit exploration to prevent infinite branching
-            if explored_count > 100 {
-                break;
             }
         }
 
-        // Update global statistics
+        // Update statistics
         if best_result.matched {
-            self.adaptive_stats.successful_adaptations += 1;
+            self.adaptive_stats
+                .successful_adaptations
+                .fetch_add(1, Ordering::Relaxed);
         } else {
-            self.adaptive_stats.failed_explorations += 1;
+            self.adaptive_stats
+                .failed_explorations
+                .fetch_add(1, Ordering::Relaxed);
         }
 
         best_result
     }
-    
+
     /// Initialize with patterns from existing Patternizer
     pub fn initialize_from_patternizer(&mut self, patternizer: &crate::Patternizer) -> Result<()> {
-        // Get exported patterns from the patternizer
         let exported_patterns = patternizer.export_patterns_for_adaptation();
-        let mut total_patterns_imported = 0;
+        let mut total_imported = 0;
 
         for (handler_type, patterns) in exported_patterns {
-            let mut root_nodes = Vec::new();
-            
-            for pattern in patterns {
-                let root_node = PatternNode::new_root(pattern);
-                root_nodes.push(root_node);
-                total_patterns_imported += 1;
-            }
-            
-            self.pattern_trees.insert(handler_type.clone(), root_nodes.clone());
+            let root_nodes: Vec<PatternNode> =
+                patterns.into_iter().map(PatternNode::new_root).collect();
+
+            total_imported += root_nodes.len();
+            self.pattern_trees.insert(handler_type, root_nodes);
         }
 
+        self.adaptive_stats
+            .total_attempts
+            .store(total_imported, Ordering::Relaxed);
         Ok(())
     }
-    
-    /// Generate probabilistic variations of a pattern
+
+    /// Generate optimized pattern variations using strategic mutation
     fn generate_pattern_variations(&self, node: &PatternNode) -> Vec<PatternNode> {
-        let mut variations = Vec::new();
-        
-        // Generate variations by modifying different aspects of the pattern
-        
-        // 1. Confidence-based variations
-        for confidence_delta in [-0.1, -0.05, 0.05, 0.1] {
-            if let Some(variant_pattern) = self.create_confidence_variant(&node.current_pattern, confidence_delta) {
-                let deviation = (confidence_delta.abs() / 0.1) * self.bounds.exploration_radius;
-                let variation = node.create_variation(variant_pattern, deviation);
-                variations.push(variation);
+        let mut variations = Vec::with_capacity(8);
+        let base_pattern = &node.current_pattern;
+
+        // Confidence-based variations (strategic deltas)
+        for &delta in &[-0.1, -0.05, 0.05, 0.1] {
+            if let Some(variant) = self.create_confidence_variant(base_pattern, delta) {
+                let deviation = (delta.abs() / 0.1) * self.bounds.exploration_radius;
+                variations.push(node.create_variation(variant, deviation));
             }
         }
 
-        // 2. Priority-based variations
-        for priority_delta in [-1, 1] {
-            if let Some(variant_pattern) = self.create_priority_variant(&node.current_pattern, priority_delta) {
-                let deviation = (priority_delta.abs() as f64 / 5.0) * self.bounds.exploration_radius;
-                let variation = node.create_variation(variant_pattern, deviation);
-                variations.push(variation);
+        // Priority-based variations
+        for &delta in &[-1, 1] {
+            if let Some(variant) = self.create_priority_variant(base_pattern, delta) {
+                let deviation = (delta.abs() as f64 / 5.0) * self.bounds.exploration_radius;
+                variations.push(node.create_variation(variant, deviation));
             }
         }
 
-        // 3. Pattern structure variations
-        let structural_variants = self.create_structural_variants(&node.current_pattern);
-        for variant_pattern in structural_variants {
-            let deviation = self.calculate_pattern_deviation(&node.base_pattern, &variant_pattern);
+        // Structural variations with deviation filtering
+        for variant in self.create_structural_variants(base_pattern) {
+            let deviation = self.calculate_pattern_deviation(&node.base_pattern, &variant);
             if deviation <= self.bounds.max_deviation {
-                let variation = node.create_variation(variant_pattern, deviation);
-                variations.push(variation);
+                variations.push(node.create_variation(variant, deviation));
             }
         }
 
         variations
     }
-    
-    /// Calculate fuzzy logic score for a pattern variation
+
+    /// Calculate pattern deviation using weighted metrics
+    fn calculate_pattern_deviation(&self, base: &HandlerPattern, variant: &HandlerPattern) -> f64 {
+        let priority_diff = (base.priority as f64 - variant.priority as f64).abs() / 10.0;
+        let min_token_diff =
+            (base.min_tokens as f64 - variant.min_tokens as f64).abs() / base.min_tokens as f64;
+
+        let max_token_diff = match (base.max_tokens, variant.max_tokens) {
+            (Some(base_max), Some(variant_max)) => {
+                (base_max as f64 - variant_max as f64).abs() / base_max as f64
+            }
+            _ => 0.0,
+        };
+
+        ((priority_diff * 0.3) + (min_token_diff * 0.4) + (max_token_diff * 0.3)).min(1.0)
+    }
+
+    /// Calculate fuzzy logic score with optimized weighting
     fn calculate_fuzzy_score(&self, node: &PatternNode, result: &AdaptivePatternResult) -> f64 {
-        let similarity_score = 1.0 - node.deviation_distance;
-        let success_score = node.success_rate;
-        let confidence_score = result.confidence;
-        let deviation_penalty = node.deviation_distance * self.fuzzy_scorer.deviation_penalty;
+        let similarity = 1.0 - node.deviation_distance;
+        let success_rate = node.success_rate;
+        let confidence = result.confidence;
+        let penalty = node.deviation_distance * self.fuzzy_scorer.deviation_penalty;
 
-        (similarity_score * self.fuzzy_scorer.similarity_weight) +
-        (success_score * self.fuzzy_scorer.success_weight) +
-        (confidence_score * self.fuzzy_scorer.confidence_weight) -
-        deviation_penalty
-    }
-    
-    /// Create a confidence-based variant of a pattern
-    fn create_confidence_variant(&self, base_pattern: &HandlerPattern, _delta: f64) -> Option<HandlerPattern> {
-        // Implementation would modify pattern confidence/threshold
-        Some(base_pattern.clone())
+        (similarity * self.fuzzy_scorer.similarity_weight)
+            + (success_rate * self.fuzzy_scorer.success_weight)
+            + (confidence * self.fuzzy_scorer.confidence_weight)
+            - penalty
     }
 
-    /// Create a priority-based variant of a pattern  
-    fn create_priority_variant(&self, base_pattern: &HandlerPattern, delta: i32) -> Option<HandlerPattern> {
-        let mut variant = base_pattern.clone();
+    /// Create confidence-adjusted pattern variant
+    fn create_confidence_variant(
+        &self,
+        base: &HandlerPattern,
+        delta: f64,
+    ) -> Option<HandlerPattern> {
+        let mut variant = base.clone();
+
+        if delta > 0.0 {
+            // Higher confidence: stricter matching
+            variant.min_tokens = (variant.min_tokens as f64 * (1.0 + delta)).ceil() as usize;
+            if let Some(max) = variant.max_tokens {
+                variant.max_tokens = Some((max as f64 * (1.0 + delta * 0.5)).ceil() as usize);
+            }
+        } else if delta < 0.0 {
+            // Lower confidence: more lenient matching
+            variant.min_tokens =
+                (variant.min_tokens as f64 * (1.0 + delta)).max(1.0).floor() as usize;
+            if let Some(max) = variant.max_tokens {
+                let new_max =
+                    (max as f64 * (1.0 + delta * 0.5)).max(variant.min_tokens as f64 + 1.0);
+                variant.max_tokens = Some(new_max.floor() as usize);
+            }
+        }
+
+        Some(variant)
+    }
+
+    /// Create priority-adjusted pattern variant
+    fn create_priority_variant(&self, base: &HandlerPattern, delta: i32) -> Option<HandlerPattern> {
+        let mut variant = base.clone();
         variant.priority = (variant.priority + delta).max(0);
         Some(variant)
     }
 
-    /// Create structural variants of a pattern
-    fn create_structural_variants(&self, base_pattern: &HandlerPattern) -> Vec<HandlerPattern> {
-        let mut variants = Vec::new();
-        
-        // For now, creating placeholder variants
-        variants.push(base_pattern.clone());
-        
+    /// Create structural pattern variants with optimized ranges
+    fn create_structural_variants(&self, base: &HandlerPattern) -> Vec<HandlerPattern> {
+        let mut variants = Vec::with_capacity(2);
+
+        // Lenient variant (fewer tokens required)
+        let mut lenient = base.clone();
+        lenient.min_tokens = base.min_tokens.saturating_sub(1).max(1);
+        if let Some(max) = base.max_tokens {
+            lenient.max_tokens = Some(max + 2);
+        }
+        variants.push(lenient);
+
+        // Strict variant (more tokens required)
+        let mut strict = base.clone();
+        strict.min_tokens = base.min_tokens + 1;
+        if let Some(max) = base.max_tokens {
+            strict.max_tokens = Some(max.saturating_sub(1).max(strict.min_tokens));
+        }
+        variants.push(strict);
+
         variants
     }
 
-    /// Calculate deviation distance between two patterns
-    fn calculate_pattern_deviation(&self, base: &HandlerPattern, variant: &HandlerPattern) -> f64 {
-        let priority_diff = (base.priority as i32 - variant.priority as i32).abs() as f64 / 10.0;
-        
-        // Add other pattern difference calculations here
-        priority_diff.min(1.0) // Cap at 1.0 (100% difference)
-    }
-    
-    /// Update success metrics for adaptive learning
-    pub fn update_success_metrics(&self, handler_id: &Id, confidence: f64, _processing_time: std::time::Duration, _token_count: usize) {
-        self.adaptive_stats.total_attempts.fetch_add(1, Ordering::Relaxed);
-        self.adaptive_stats.successes.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    /// Update failure metrics for adaptive learning
-    pub fn update_failure_metrics(&self, handler_id: &Id, confidence: f64, _processing_time: std::time::Duration) {
-        self.adaptive_stats.total_attempts.fetch_add(1, Ordering::Relaxed);
-        self.adaptive_stats.failures.fetch_add(1, Ordering::Relaxed);
-    }
-    
-    /// Get statistics about the adaptive system performance
-    pub fn get_adaptive_stats(&self) -> &AdaptiveStats {
-        &self.adaptive_stats
-    }
-
-    /// Reset adaptive statistics
-    pub fn reset_adaptive_stats(&mut self) {
-        self.adaptive_stats = AdaptiveStats::default();
-    }
-    
-    /// Match pattern using adaptive system
-    pub fn match_adaptive_pattern(&mut self, handler_type: &str, tokens: &[Token]) -> PatternResult {
-        let pattern = HandlerPattern::new(handler_type.to_string(), "adaptive pattern".to_string());
-        
-        // Use adaptive system 
-        let adaptive_result = self.adaptive_match(&pattern, tokens);
-
-        match adaptive_result {
-            AdaptivePatternResult { matched, base_result, .. } if matched => {
-                base_result
-            },
-            _ => PatternResult::NoMatch { reason: "No adaptive match found".to_string() }
-        }
-    }
-    
-    /// Analyze patterns with Samplizer using caching
-    pub fn analyze_patterns_with_samplizer_cached(&mut self, use_cache: bool) -> Result<()> {
-        // Initialize pattern trees if needed
-        if self.pattern_trees.is_empty() {
-            // Create some default patterns for testing
-            let default_patterns = vec![
-                HandlerPattern::new("function".to_string(), "C function pattern".to_string()),
-                HandlerPattern::new("struct".to_string(), "C struct pattern".to_string()),
-                HandlerPattern::new("enum".to_string(), "C enum pattern".to_string()),
-            ];
-            
-            for pattern in default_patterns {
-                let handler_type = pattern.id.clone();
-                let root_node = PatternNode::new_root(pattern);
-                self.pattern_trees.insert(handler_type, vec![root_node]);
-            }
-        }
-        
-        // Update exploration statistics
-        self.adaptive_stats.total_explorations += self.pattern_trees.len();
-        
-        Ok(())
-    }
-    
     // ============================================================================
     // REDIRECT SYSTEM METHODS (integrated from Redirecter)
     // ============================================================================
-    
+
     /// Process a redirect request with pre-analyzed routing response
     pub fn process_redirect(
         &mut self,
         request: RedirectRequest,
         response: RedirectResponse,
-    ) -> Result<crate::HandlerResult> {
+    ) -> Result<HandlerResult> {
         // Check redirect depth limit
         if self.redirect_depth >= self.max_redirect_depth {
-            return Ok(crate::HandlerResult::NotHandled(
+            return Ok(HandlerResult::NotHandled(
                 None,
                 0..0,
                 request.from_handler.clone(),
@@ -1346,7 +1896,7 @@ impl Handlizer {
 
         // Check for circular redirects
         if self.visited_handlers.contains(&request.from_handler) {
-            return Ok(crate::HandlerResult::NotHandled(
+            return Ok(HandlerResult::NotHandled(
                 None,
                 0..0,
                 request.from_handler.clone(),
@@ -1357,10 +1907,14 @@ impl Handlizer {
         self.visited_handlers.insert(request.from_handler.clone());
         self.redirect_depth += 1;
 
+        // Cache failed patterns from the request
+        let handler_name = request.from_handler.to_string();
+        self.cache_failed_patterns(handler_name, request.failed_patterns.clone());
+
         // Convert response to HandlerResult
         if let Some(target_handler) = response.target_handler {
             let token_range = response.modified_range.unwrap_or(request.token_range);
-            Ok(crate::HandlerResult::Redirected(
+            Ok(HandlerResult::Redirected(
                 None,
                 token_range,
                 response.routing_reason,
@@ -1368,53 +1922,22 @@ impl Handlizer {
                 target_handler,
             ))
         } else {
-            Ok(crate::HandlerResult::NotHandled(
+            Ok(HandlerResult::NotHandled(
                 None,
                 request.token_range,
                 request.from_handler.clone(),
             ))
         }
     }
-    
-    /// Analyze and route a redirect request (separated for borrowing reasons)
-    pub fn analyze_redirect_request(
-        &self,
-        context: &mut Context,
-        request: &RedirectRequest,
-    ) -> Result<RedirectResponse> {
-        self.analyze_and_route(context, request)
-    }
-    
+
     /// Analyze patterns and tokens to determine routing target
     fn analyze_and_route(
         &self,
+        tokens: &[Token],
         context: &mut Context,
         request: &RedirectRequest,
     ) -> Result<RedirectResponse> {
-        // Note: We can't cache failed patterns here since this is &self
-        // Caching should be handled by the caller if needed
         let handler_name = request.from_handler.to_string();
-        
-        let tokens_result = if request.token_range.end > context.tokenizer.current_tokens().len()
-            || request.token_range.start >= context.tokenizer.current_tokens().len()
-        {
-            None
-        } else {
-            Some(context.tokenizer.current_tokens()[request.token_range.clone()].to_vec())
-        };
-
-        let tokens = match tokens_result {
-            Some(tokens) => tokens,
-            None => {
-                return Ok(RedirectResponse {
-                    target_handler: None,
-                    modified_range: None,
-                    routing_reason: "Invalid token range or tokenizer not available".to_string(),
-                    should_retry: false,
-                    metadata: Vec::new(),
-                });
-            }
-        };
 
         // Filter tokens (remove newlines)
         let filtered_tokens: Vec<Token> = tokens
@@ -1432,7 +1955,7 @@ impl Handlizer {
                 metadata: Vec::new(),
             });
         }
-        
+
         // Analyze patterns and route directly
         let mut best_match = None;
         let mut best_confidence = 0.0;
@@ -1454,8 +1977,9 @@ impl Handlizer {
             }
 
             // Test patterns specific to target handler
-            let confidence =
-                self.test_handler_patterns(&filtered_tokens, target_handler, &mut context.patternizer)?;
+            let confidence = context
+                .patternizer
+                .process_handler_patterns(&filtered_tokens, target_handler)?;
 
             if confidence > best_confidence {
                 best_confidence = confidence;
@@ -1497,162 +2021,45 @@ impl Handlizer {
         }
     }
 
-    /// Test specific handler patterns against tokens to calculate confidence
-    fn test_handler_patterns(
-        &self,
-        tokens: &[Token],
-        handler_type: &str,
-        patternizer: &mut crate::Patternizer,
-    ) -> Result<f64> {
-        let mut matched = 0.0;
-        let mut total_tests = 0.0;
-
-        // Test different pattern types based on handler
-        match handler_type {
-            "function_handler" => {
-                if matches!(
-                    patternizer.match_pattern("function", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-
-                if matches!(
-                    patternizer.match_pattern("function_declaration", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 0.8; // Slightly lower weight
-                }
-                total_tests += 1.0;
-            }
-            "struct_handler" => {
-                if matches!(
-                    patternizer.match_pattern("struct_definition", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-            }
-            "enum_handler" => {
-                if matches!(
-                    patternizer.match_pattern("enum_definition", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-            }
-            "typedef_handler" => {
-                if matches!(
-                    patternizer.match_pattern("typedef_definition", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-            }
-            "array_handler" => {
-                if matches!(
-                    patternizer.match_pattern("array_declaration", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-            }
-            "global_handler" => {
-                if matches!(
-                    patternizer.match_pattern("global_variable", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-            }
-            "expression_handler" => {
-                if matches!(
-                    patternizer.match_pattern("expression_assignment", tokens),
-                    PatternResult::Match { .. }
-                ) {
-                    matched += 1.0;
-                }
-                total_tests += 1.0;
-            }
-            _ => {
-                // Default pattern testing
-                total_tests = 1.0;
-            }
-        }
-
-        if total_tests > 0.0 {
-            Ok(matched / total_tests)
-        } else {
-            Ok(0.0)
-        }
-    }
-
     /// Reset redirect state for new processing
     pub fn reset_redirect_state(&mut self) {
         self.visited_handlers.clear();
         self.redirect_depth = 0;
         self.pattern_cache.clear();
     }
-    
+
     /// Cache failed patterns for a handler (call before analyze_redirect_request if needed)
     pub fn cache_failed_patterns(&mut self, handler_name: String, failed_patterns: Vec<String>) {
         self.pattern_cache.insert(handler_name, failed_patterns);
     }
-    
+
     /// Process redirect with pre-computed analysis (no borrowing conflicts)
-    pub fn process_redirect_analyzed(
+    pub fn process_analyzed_redirect(
         &mut self,
         request: RedirectRequest,
         response: RedirectResponse,
-    ) -> Result<crate::HandlerResult> {
+    ) -> Result<HandlerResult> {
         // Cache failed patterns
         let handler_name = request.from_handler.to_string();
         self.cache_failed_patterns(handler_name, request.failed_patterns.clone());
-        
+
         // Process redirect with pre-analyzed response
         self.process_redirect(request, response)
     }
-    
-    /// Helper function for handlers to perform redirect workflow
-    pub fn handle_redirect_workflow(
-        context: &mut crate::Context,
-        token_slot: usize,
-        token_range: std::ops::Range<usize>,
-        request: RedirectRequest,
-    ) -> Result<crate::HandlerResult> {
-        // Step 1: Extract data and analyze (immutable borrow)
-        let tokens = context.tokenizer.slots()[token_slot].tokens()[token_range.clone()].to_vec();
-        let mut patternizer = std::mem::take(&mut context.patternizer);
-        let response = context.handlizer.analyze_redirect_with_data(&tokens, &mut patternizer, &request)?;
-        
-        // Step 2: Process redirect (mutable borrow)
-        let result = context.handlizer.process_redirect_analyzed(request, response)?;
-        
-        // Step 3: Restore patternizer
-        context.patternizer = patternizer;
-        
-        Ok(result)
-    }
-    
+
     /// Analyze redirect with pre-extracted data to avoid context borrowing issues
-    pub fn analyze_redirect_with_data(
-        &self,
-        tokens: &[crate::Token],
-        patternizer: &mut crate::Patternizer,
+    pub fn analyze_redirect_request(
+        &mut self,
+        context: &mut Context,
+        tokens: &[Token],
         request: &RedirectRequest,
     ) -> Result<RedirectResponse> {
         let handler_name = request.from_handler.to_string();
 
         // Filter tokens (remove newlines)
-        let filtered_tokens: Vec<crate::Token> = tokens
+        let filtered_tokens: Vec<Token> = tokens
             .iter()
-            .filter(|token| !matches!(**token, crate::Token::n()))
+            .filter(|token| !matches!(**token, Token::n()))
             .cloned()
             .collect();
 
@@ -1665,7 +2072,7 @@ impl Handlizer {
                 metadata: Vec::new(),
             });
         }
-        
+
         // Analyze patterns and route directly
         let mut best_match = None;
         let mut best_confidence = 0.0;
@@ -1687,8 +2094,9 @@ impl Handlizer {
             }
 
             // Test patterns specific to target handler
-            let confidence =
-                self.test_handler_patterns(&filtered_tokens, target_handler, patternizer)?;
+            let confidence = context
+                .patternizer
+                .process_handler_patterns(&filtered_tokens, target_handler)?;
 
             if confidence > best_confidence {
                 best_confidence = confidence;
@@ -1739,8 +2147,9 @@ impl Default for Handlizer {
 impl HandlerResult {
     pub fn timestamp(&self) -> u128 {
         match self {
+            Self::Failed(_, id) => id.timestamp(),
             Self::Handled(_, _, id) => id.timestamp(),
-            Self::Processed(_, _, _, id) => id.timestamp(),
+            Self::Processed(_, _, id) => id.timestamp(),
             Self::Extracted(_, _, _, id) => id.timestamp(),
             Self::Converted(_, _, _, id) => id.timestamp(),
             Self::Completed(_, _, _, id) => id.timestamp(),
@@ -1752,8 +2161,9 @@ impl HandlerResult {
     /// Get the number of tokens consumed by this result
     pub fn token_count(&self) -> usize {
         match self {
+            Self::Failed(_, _) => 0,
             Self::Handled(_, range, _) => range.len(),
-            Self::Processed(_, range, _, _) => range.len(),
+            Self::Processed(_, range, _) => range.len(),
             Self::Extracted(_, range, _, _) => range.len(),
             Self::Converted(_, range, _, _) => range.len(),
             Self::Completed(_, range, _, _) => range.len(),
@@ -1761,12 +2171,30 @@ impl HandlerResult {
             Self::Redirected(_, range, _, _, _) => range.len(),
         }
     }
+
+    /// Get the tokens from this result
+    pub fn tokens(&self) -> Option<&Vec<Token>> {
+        match self {
+            Self::Failed(_, _) => None,
+            Self::Handled(tokens, _, _) => tokens.as_ref(),
+            Self::Processed(tokens, _, _) => tokens.as_ref(),
+            Self::Extracted(_, _, _, _) => None,
+            Self::Converted(_, _, _, _) => None,
+            Self::Completed(tokens, _, _, _) => tokens.as_ref(),
+            Self::NotHandled(tokens, _, _) => tokens.as_ref(),
+            Self::Redirected(tokens, _, _, _, _) => tokens.as_ref(),
+        }
+    }
 }
 impl Display for HandlerResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            HandlerResult::Failed(msg, id) => {
+                write!(f, "Handler {} failed. Details: {}", id.name(), msg)
+            }
             HandlerResult::Handled(tokens, range, id) => {
-                let token_info = tokens.as_ref()
+                let token_info = tokens
+                    .as_ref()
                     .map(|t| format!(" ({} tokens)", t.len()))
                     .unwrap_or_default();
                 write!(
@@ -1779,19 +2207,19 @@ impl Display for HandlerResult {
                     token_info
                 )
             }
-            HandlerResult::Processed(tokens, range, s, id) => {
-                let token_info = tokens.as_ref()
+            HandlerResult::Processed(tokens, range, id) => {
+                let token_info = tokens
+                    .as_ref()
                     .map(|t| format!(" ({} tokens)", t.len()))
                     .unwrap_or_default();
                 write!(
                     f,
-                    "Handler: {} reports processing successful (range {}..{}, consumed {} tokens{}).\nCode:\n{}",
+                    "Handler: {} reports processing successful (range {}..{}, consumed {} tokens{})",
                     id.name(),
                     range.start,
                     range.end,
                     range.len(),
-                    token_info,
-                    s
+                    token_info
                 )
             }
             HandlerResult::Extracted(element, range, s, id) => {
@@ -1819,7 +2247,8 @@ impl Display for HandlerResult {
                 )
             }
             HandlerResult::Completed(tokens, range, s, id) => {
-                let token_info = tokens.as_ref()
+                let token_info = tokens
+                    .as_ref()
                     .map(|t| format!(" ({} tokens)", t.len()))
                     .unwrap_or_default();
                 write!(
@@ -1834,7 +2263,8 @@ impl Display for HandlerResult {
                 )
             }
             HandlerResult::NotHandled(tokens, range, id) => {
-                let token_info = tokens.as_ref()
+                let token_info = tokens
+                    .as_ref()
                     .map(|t| format!(" ({} tokens)", t.len()))
                     .unwrap_or_default();
                 write!(
@@ -1848,7 +2278,8 @@ impl Display for HandlerResult {
                 )
             }
             HandlerResult::Redirected(tokens, range, s, id1, id2) => {
-                let token_info = tokens.as_ref()
+                let token_info = tokens
+                    .as_ref()
                     .map(|t| format!(" ({} tokens)", t.len()))
                     .unwrap_or_default();
                 write!(
@@ -1980,8 +2411,10 @@ impl ProcessedResults {
         self.results
             .iter()
             .filter_map(|result| match &result.result {
-                HandlerResult::Processed(_, _, code, _)
-                | HandlerResult::Completed(_, _, code, _) => Some(code.clone()),
+                | HandlerResult::Completed(_, _, code, _)
+                | HandlerResult::Extracted(_, _, code, _)
+                | HandlerResult::Converted(_, _, code, _)
+                | HandlerResult::Redirected(_, _, code, _, _) => Some(code.clone()),
                 _ => None,
             })
             .filter(|code| !code.trim().is_empty())
@@ -2013,7 +2446,9 @@ impl ProcessedResults {
             .filter(|result| {
                 matches!(
                     result.result,
-                    HandlerResult::Converted(_, _, _, _) | HandlerResult::Extracted(_, _, _, _)
+                        | HandlerResult::Completed(_, _, _, _)
+                        | HandlerResult::Converted(_, _, _, _)
+                        | HandlerResult::Extracted(_, _, _, _)
                 )
             })
             .collect()
@@ -2028,7 +2463,7 @@ impl Default for ProcessedResults {
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Pending {
     /// (report,is_processed)
-    Report(Box<HandlerReport>, bool),
+    Report(Box<Report>, bool),
     /// (result,timestamp,is_processed)
     Result(Box<HandlerResult>, bool),
     /// (redirect,is_processed)

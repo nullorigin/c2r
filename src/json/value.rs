@@ -1,4 +1,11 @@
-use crate::{json::{iterators, DumpGenerator, Generator, Node, Number, Object, PrettyGenerator, PrettyWriterGenerator, Short, WriterGenerator}, number_to_signed, number_to_unsigned, C2RError, Kind, Reason, Result};
+use crate::{
+    json::{
+        iterators, DumpGenerator, Generator, Node, Number, Object, PrettyGenerator,
+        PrettyWriterGenerator, Short, WriterGenerator,
+    }, number_to_signed, number_to_unsigned, C2RError,
+    Kind,
+    Reason, Result,
+};
 
 pub const NULL: Value = Value::Null;
 
@@ -93,11 +100,7 @@ impl Value {
     }
 
     /// Writes the JSON as byte stream into an implementor of `std::io::Write`.
-    pub fn write_pretty<W: std::io::Write>(
-        &self,
-        writer: &mut W,
-        spaces: u16,
-    ) -> Result<()> {
+    pub fn write_pretty<W: std::io::Write>(&self, writer: &mut W, spaces: u16) -> Result<()> {
         let mut generator = PrettyWriterGenerator::new(writer, spaces);
         generator.write_json(self)
     }
@@ -680,8 +683,6 @@ where
     value.into()
 }
 pub type Array = Vec<Value>;
-
-
 
 /// Pretty prints out the value as JSON string.
 pub fn stringify<T>(root: T) -> String

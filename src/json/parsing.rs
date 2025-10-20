@@ -1,6 +1,13 @@
 use core::{debug_assert, option::Option::None};
 
-use crate::{expect, expect_byte, expect_byte_ignore_whitespace, expect_eof, expect_sequence, expect_string, json::{allow_number_extensions, allow_number_extensions_zero, expect_fraction, Number, Object, Value, MAX_PRECISION}, C2RError, Kind, Reason, Result};
+use crate::{
+    expect, expect_byte, expect_byte_ignore_whitespace, expect_eof, expect_sequence, expect_string, json::{
+        allow_number_extensions, allow_number_extensions_zero, expect_fraction, Number, Object,
+        Value, MAX_PRECISION,
+    }, C2RError,
+    Kind, Reason,
+    Result,
+};
 
 const QU: u8 = b'"';
 const BS: u8 = b'\\';
@@ -41,7 +48,7 @@ const X: bool = false;
 const O: bool = true;
 
 pub static ALLOWED: [bool; 256] = [
- // 0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F
+    // 0  1  2  3  4  5  6  7  8  9  A  B  C  D  E  F
     X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, // 0
     X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, X, // 1
     O, O, X, O, O, O, O, O, O, O, O, O, O, O, O, O, // 2
@@ -81,7 +88,7 @@ impl<'a> Parser<'a> {
     pub fn new(source: &'a str) -> Self {
         Parser {
             buffer: Vec::with_capacity(30),
-            source: source,
+            source,
             byte_ptr: source.as_ptr(),
             index: 0,
             length: source.len(),
@@ -135,7 +142,7 @@ impl<'a> Parser<'a> {
         Err(C2RError::new(
             Kind::Json,
             Reason::Unexpected("character"),
-            Some(format!("Unexpected character: {}", ch))
+            Some(format!("Unexpected character: {}", ch)),
         ))
     }
 
@@ -174,14 +181,14 @@ impl<'a> Parser<'a> {
                 match std::char::decode_utf16(
                     [codepoint, self.read_hexdec_codepoint()?].iter().copied(),
                 )
-                .next()
+                    .next()
                 {
                     Some(Ok(code)) => code,
                     _ => {
                         return Err(C2RError::new(
                             Kind::Json,
                             Reason::Failed("utf8 parsing"),
-                            Some("Failed to parse UTF-8 codepoint".to_string())
+                            Some("Failed to parse UTF-8 codepoint".to_string()),
                         ));
                     }
                 }
@@ -291,8 +298,8 @@ impl<'a> Parser<'a> {
                             e = e.checked_add(1).ok_or_else(|| {
                                 C2RError::new(
                                     Kind::Json,
-                                    Reason::Depth("limit exceeded"),
-                                    Some(e.to_string())
+                                    Reason::Exceeded("depth limit"),
+                                    Some(e.to_string()),
                                 )
                             })?
                         }
@@ -365,8 +372,8 @@ impl<'a> Parser<'a> {
                         if stack.len() == DEPTH_LIMIT {
                             return Err(C2RError::new(
                                 Kind::Json,
-                                Reason::Depth("limit exceeded"),
-                                Some("Exceeded depth limit".to_string())
+                                Reason::Exceeded("depth limit"),
+                                Some("Exceeded depth limit".to_string()),
                             ));
                         }
 
@@ -375,7 +382,7 @@ impl<'a> Parser<'a> {
                     }
 
                     Value::Array(Vec::new())
-                }   
+                }
                 b'{' => {
                     ch = expect_byte_ignore_whitespace!(self);
 
@@ -383,8 +390,8 @@ impl<'a> Parser<'a> {
                         if stack.len() == DEPTH_LIMIT {
                             return Err(C2RError::new(
                                 Kind::Json,
-                                Reason::Depth("limit exceeded"),
-                                Some("Exceeded depth limit".to_string())
+                                Reason::Exceeded("depth limit"),
+                                Some("Exceeded depth limit".to_string()),
                             ));
                         }
 
@@ -530,12 +537,12 @@ impl<'a> Parser<'a> {
                     }
 
                     _ => {
-    return Err(C2RError::new(
-        Kind::Json,
-        Reason::Internal("invariant"),
-        Some("Parsing failed".to_string())
-    ));
-}
+                        return Err(C2RError::new(
+                            Kind::Json,
+                            Reason::Internal("invariant"),
+                            Some("Parsing failed".to_string()),
+                        ));
+                    }
                 }
 
                 value = match stack.pop() {

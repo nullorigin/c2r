@@ -12,37 +12,37 @@ const PANICKED: u32 = 3;
 impl<T> MaybeLock<T> {
     #[inline(always)]
     pub const fn new() -> Self {
-        Self { 
-            futex: Futex::new(), 
-            data: Maybe::None
+        Self {
+            futex: Futex::new(),
+            data: Maybe::None,
         }
     }
-    
+
     #[inline]
     pub fn is_some(&self) -> bool {
         self.futex.get() == COMPLETE && self.data.is_some()
     }
-    
+
     #[inline]
     pub fn is_none(&self) -> bool {
         self.futex.get() != COMPLETE || self.data.is_none()
     }
-    
+
     #[inline]
     pub fn is_uninit(&self) -> bool {
         self.futex.get() != COMPLETE
     }
-    
+
     #[inline]
     pub fn some(value: T) -> Self {
-        let lock = Self { 
-            futex: Futex::new(), 
-            data: Maybe::Some(value) 
+        let lock = Self {
+            futex: Futex::new(),
+            data: Maybe::Some(value),
         };
         lock.futex.set(COMPLETE);
         lock
     }
-    
+
     #[inline]
     pub fn none() -> Self {
         Self::new()
@@ -52,12 +52,12 @@ impl<T> MaybeLock<T> {
     pub fn preinit(value: T) -> Self {
         Self::some(value)
     }
-    
+
     #[inline]
     pub fn is_initialized(&self) -> bool {
         self.futex.get() == COMPLETE
     }
-    
+
     #[inline]
     pub fn try_get(&self) -> Maybe<&T> {
         if self.futex.get() == COMPLETE {
@@ -66,7 +66,7 @@ impl<T> MaybeLock<T> {
             Maybe::None
         }
     }
-    
+
     #[inline]
     pub fn try_get_mut(&mut self) -> Maybe<&mut T> {
         if self.futex.get() == COMPLETE {
@@ -75,7 +75,7 @@ impl<T> MaybeLock<T> {
             Maybe::None
         }
     }
-    
+
     #[inline]
     pub fn get_or_init<F>(&self, f: F) -> &T
     where
@@ -85,14 +85,16 @@ impl<T> MaybeLock<T> {
         if self.futex.get() == COMPLETE {
             return self.data.get();
         }
-        
+
         self.call_once(|| {
             let ptr = self as *const Self as *mut Self;
-            unsafe {(*ptr).data = Maybe::Some(f());}
+            unsafe {
+                (*ptr).data = Maybe::Some(f());
+            }
         });
         self.data.get()
     }
-    
+
     #[inline]
     pub fn get_or_try_init<F, E>(&self, f: F) -> Result<&T, E>
     where
@@ -102,48 +104,48 @@ impl<T> MaybeLock<T> {
         thread_local! {
             static ERROR: Cell<Option<*const ()>> = Cell::new(None);
         }
-        
+
         let mut error: Option<E> = None;
         let error_ref = &mut error as *mut Option<E> as *const ();
-        
+
         ERROR.with(|e| e.set(Some(error_ref)));
-        
-        self.call_once(|| {
-            match f() {
-                Ok(value) => {
-                        let ptr = self as *const Self as *mut Self;
-                        unsafe {(*ptr).data = Maybe::Some(value);}
-                }
-                Err(err) => {
-                    ERROR.with(|e| {
-                        if let Some(ptr) = e.get() {
-                            unsafe {
-                                let error_ptr = ptr as *mut Option<E>;
-                                *error_ptr = Some(err);
-                            }
-                        }
-                    });
+
+        self.call_once(|| match f() {
+            Ok(value) => {
+                let ptr = self as *const Self as *mut Self;
+                unsafe {
+                    (*ptr).data = Maybe::Some(value);
                 }
             }
+            Err(err) => {
+                ERROR.with(|e| {
+                    if let Some(ptr) = e.get() {
+                        unsafe {
+                            let error_ptr = ptr as *mut Option<E>;
+                            *error_ptr = Some(err);
+                        }
+                    }
+                });
+            }
         });
-        
+
         match error {
             Some(e) => Err(e),
-            None => Ok(self.data.get())
+            None => Ok(self.data.get()),
         }
     }
-    
+
     #[inline]
     pub fn force(&self) -> &T {
         self.get_or_init(|| panic!("MaybeLock is not initialized"))
     }
-    
+
     #[inline]
     pub fn force_mut(&mut self) -> &mut T {
         self.call_once_mut(|| {});
         self.data.get_mut()
     }
-    
+
     fn call_once<F>(&self, f: F)
     where
         F: FnOnce(),
@@ -152,11 +154,14 @@ impl<T> MaybeLock<T> {
             return;
         }
 
-        use core::sync::atomic::{AtomicU32, Ordering::{Acquire, Relaxed}};
-        
+        use core::sync::atomic::{
+            AtomicU32,
+            Ordering::{Acquire, Relaxed},
+        };
+
         let futex_ptr = &self.futex.inner as *const AtomicU32 as *mut AtomicU32;
         let futex_atomic = unsafe { &*futex_ptr };
-        
+
         match futex_atomic.compare_exchange_weak(INCOMPLETE, RUNNING, Acquire, Relaxed) {
             Ok(_) => {
                 f();
@@ -167,7 +172,8 @@ impl<T> MaybeLock<T> {
             Err(PANICKED) => panic!("MaybeLock instance has previously panicked"),
             Err(RUNNING) => {
                 while self.futex.get() == RUNNING {
-                    self.futex.futex_wait(RUNNING, Some(core::time::Duration::from_millis(100)));
+                    self.futex
+                        .futex_wait(RUNNING, Some(core::time::Duration::from_millis(100)));
                 }
                 match self.futex.get() {
                     COMPLETE => return,
@@ -178,7 +184,7 @@ impl<T> MaybeLock<T> {
             Err(_) => unreachable!(),
         }
     }
-    
+
     fn call_once_mut<F>(&mut self, f: F)
     where
         F: FnOnce(),
@@ -186,20 +192,20 @@ impl<T> MaybeLock<T> {
         if self.futex.get() == COMPLETE {
             return;
         }
-        
+
         self.futex.set(RUNNING);
         f();
         self.futex.set(COMPLETE);
         self.futex.futex_wake_all();
     }
-    
+
     #[inline]
     pub fn read(&self) -> MaybeLockReadGuard<'_, T> {
         // Ensure initialization with poison recovery
         self.force();
         MaybeLockReadGuard { lock: self }
     }
-    
+
     #[inline]
     pub fn try_read(&self) -> Maybe<MaybeLockReadGuard<'_, T>> {
         if self.is_initialized() {
@@ -208,13 +214,13 @@ impl<T> MaybeLock<T> {
             Maybe::None
         }
     }
-    
+
     #[inline]
     pub fn write(&'_ mut self) -> MaybeLockWriteGuard<'_, T> {
         self.force_mut();
         MaybeLockWriteGuard { lock: self }
     }
-    
+
     #[inline]
     pub fn try_write(&'_ mut self) -> Maybe<MaybeLockWriteGuard<'_, T>> {
         if self.is_initialized() {
@@ -269,7 +275,7 @@ pub struct MaybeLockReadGuard<'a, T> {
 
 impl<'a, T> core::ops::Deref for MaybeLockReadGuard<'a, T> {
     type Target = T;
-    
+
     #[inline(always)]
     fn deref(&self) -> &T {
         self.lock.data.get()
@@ -289,7 +295,7 @@ pub struct MaybeLockWriteGuard<'a, T> {
 
 impl<'a, T> core::ops::Deref for MaybeLockWriteGuard<'a, T> {
     type Target = T;
-    
+
     #[inline(always)]
     fn deref(&self) -> &T {
         self.lock.data.get()
@@ -319,7 +325,7 @@ impl<T> AsRef<T> for MaybeLockWriteGuard<'_, T> {
 
 impl<T> core::ops::Deref for MaybeLock<T> {
     type Target = T;
-    
+
     #[inline(always)]
     fn deref(&self) -> &T {
         self.force()
@@ -353,11 +359,13 @@ impl<T> From<T> for MaybeLock<T> {
 impl<T: core::fmt::Debug> core::fmt::Debug for MaybeLock<T> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self.try_get() {
-            Maybe::Some(value) => f.debug_struct("MaybeLock")
+            Maybe::Some(value) => f
+                .debug_struct("MaybeLock")
                 .field("initialized", &true)
                 .field("value", value)
                 .finish(),
-            Maybe::None => f.debug_struct("MaybeLock")
+            Maybe::None => f
+                .debug_struct("MaybeLock")
                 .field("initialized", &false)
                 .finish_non_exhaustive(),
         }

@@ -2,8 +2,8 @@ use core::clone::Clone;
 use core::ops::FnOnce;
 use core::option::Option::{self, None, Some};
 use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::hash::Hasher;
 use std::collections::HashMap;
+use std::hash::Hasher;
 use std::mem::MaybeUninit;
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -45,7 +45,7 @@ fn counters() -> &'static Mutex<CounterMap> {
 fn get_shared_counter_for<T>(raw_ptr: *const T) -> Arc<AtomicUsize> {
     let key = raw_ptr as usize;
     let mut map = counters().lock().unwrap();
-    
+
     // Clean up expired weak references while we have the lock
     if let Some(weak) = map.get(&key) {
         if let Some(strong) = weak.upgrade() {
@@ -54,7 +54,7 @@ fn get_shared_counter_for<T>(raw_ptr: *const T) -> Arc<AtomicUsize> {
             map.remove(&key);
         }
     }
-    
+
     let counter = Arc::new(AtomicUsize::new(0));
     map.insert(key, Arc::downgrade(&counter));
     counter
@@ -65,7 +65,7 @@ fn remove_shared_counter_for<T>(raw_ptr: *const T) {
     let key = raw_ptr as usize;
     if let Some(m) = COUNTERS.get() {
         let mut map = m.lock().unwrap();
-        map.remove(&key); 
+        map.remove(&key);
     }
     // Also clean up reentrant lock info
     if let Some(r) = REENTRANT_LOCKS.get() {
@@ -91,8 +91,9 @@ impl WaitNode {
         loop {
             let head = WAIT_QUEUE.load(Ordering::Acquire);
             unsafe { (*node).next.store(head, Ordering::Relaxed) };
-            
-            match WAIT_QUEUE.compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed) {
+
+            match WAIT_QUEUE.compare_exchange_weak(head, node, Ordering::Release, Ordering::Relaxed)
+            {
                 Ok(_) => break,
                 Err(_) => {
                     attempts += 1;
@@ -142,8 +143,13 @@ impl WaitNode {
         loop {
             let head = WAIT_QUEUE.load(Ordering::Acquire);
             unsafe { (*node_ptr).next.store(head, Ordering::Relaxed) };
-            
-            match WAIT_QUEUE.compare_exchange_weak(head, node_ptr, Ordering::Release, Ordering::Relaxed) {
+
+            match WAIT_QUEUE.compare_exchange_weak(
+                head,
+                node_ptr,
+                Ordering::Release,
+                Ordering::Relaxed,
+            ) {
                 Ok(_) => break,
                 Err(_) => {
                     attempts += 1;
@@ -219,7 +225,7 @@ impl<T> OptionLock<T> {
             if let Some(guard) = self.try_lock_write() {
                 return guard;
             }
-            
+
             // Exponential backoff before parking
             if backoff <= 64 {
                 for _ in 0..backoff {
@@ -239,7 +245,7 @@ impl<T> OptionLock<T> {
             if let Some(guard) = self.try_lock_read() {
                 return guard;
             }
-            
+
             // Exponential backoff before parking
             if backoff <= 64 {
                 for _ in 0..backoff {
@@ -292,7 +298,15 @@ impl<T> OptionLock<T> {
                             return None;
                         }
                         // Try to increment reader count
-                        if counter.compare_exchange_weak(current, current + 1, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                        if counter
+                            .compare_exchange_weak(
+                                current,
+                                current + 1,
+                                Ordering::AcqRel,
+                                Ordering::Relaxed,
+                            )
+                            .is_ok()
+                        {
                             return Some(ReadGuard::new_with_counter(raw_ptr, counter));
                         }
                         // Avoid infinite retry loops
@@ -319,7 +333,7 @@ impl<T> OptionLock<T> {
                 if !raw_ptr.is_null() {
                     let key = raw_ptr as usize;
                     let current_thread = std::thread::current().id();
-                    
+
                     // Check if current thread already owns this lock (reentrant case)
                     {
                         let reentrant_map = reentrant_locks().lock().ok()?;
@@ -332,21 +346,31 @@ impl<T> OptionLock<T> {
                                     *count += 1;
                                 }
                                 let counter = get_shared_counter_for(raw_ptr);
-                                return Some(WriteGuard { inner: raw_ptr as *mut T, counter });
+                                return Some(WriteGuard {
+                                    inner: raw_ptr as *mut T,
+                                    counter,
+                                });
                             }
                         }
                     }
-                    
+
                     // Try to acquire new write lock
                     let counter = get_shared_counter_for(raw_ptr);
                     let current = counter.load(Ordering::Acquire);
                     // Can only acquire write lock if no readers and no writer (counter == 0)
-                    if current == 0 && counter.compare_exchange(0, 0x80000000, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                    if current == 0
+                        && counter
+                        .compare_exchange(0, 0x80000000, Ordering::AcqRel, Ordering::Relaxed)
+                        .is_ok()
+                    {
                         // Record this thread as owner
                         if let Ok(mut reentrant_map) = reentrant_locks().lock() {
                             reentrant_map.insert(key, (current_thread, 1));
                         }
-                        Some(WriteGuard { inner: raw_ptr as *mut T, counter })
+                        Some(WriteGuard {
+                            inner: raw_ptr as *mut T,
+                            counter,
+                        })
                     } else {
                         None
                     }
@@ -477,23 +501,23 @@ impl<T> OptionLock<T> {
     {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         match self {
-            OptionLock::Some(_) => {
-                self.try_lock_read().and_then(|guard| {
-                    match catch_unwind(AssertUnwindSafe(|| f(&*guard))) {
-                        Ok(result) => Some(result),
-                        Err(_) => {
-                            eprintln!("OptionLock.try_with_catch: closure panicked; recovered");
-                            None
-                        }
+            OptionLock::Some(_) => self.try_lock_read().and_then(|guard| {
+                match catch_unwind(AssertUnwindSafe(|| f(&*guard))) {
+                    Ok(result) => Some(result),
+                    Err(_) => {
+                        eprintln!("OptionLock.try_with_catch: closure panicked; recovered");
+                        None
                     }
-                })
-            }
+                }
+            }),
             OptionLock::Maybe(maybe) => unsafe {
                 maybe.as_ptr().as_ref().and_then(|v| {
                     match catch_unwind(AssertUnwindSafe(|| f(v))) {
                         Ok(result) => Some(result),
                         Err(_) => {
-                            eprintln!("OptionLock.try_with_catch(Maybe): closure panicked; recovered");
+                            eprintln!(
+                                "OptionLock.try_with_catch(Maybe): closure panicked; recovered"
+                            );
                             None
                         }
                     }
@@ -521,23 +545,23 @@ impl<T> OptionLock<T> {
     {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         match self {
-            OptionLock::Some(_) => {
-                self.try_lock_write().and_then(|mut guard| {
-                    match catch_unwind(AssertUnwindSafe(|| f(&mut *guard))) {
-                        Ok(result) => Some(result),
-                        Err(_) => {
-                            eprintln!("OptionLock.try_with_mut_catch: closure panicked; recovered");
-                            None
-                        }
+            OptionLock::Some(_) => self.try_lock_write().and_then(|mut guard| {
+                match catch_unwind(AssertUnwindSafe(|| f(&mut *guard))) {
+                    Ok(result) => Some(result),
+                    Err(_) => {
+                        eprintln!("OptionLock.try_with_mut_catch: closure panicked; recovered");
+                        None
                     }
-                })
-            }
+                }
+            }),
             OptionLock::Maybe(maybe) => unsafe {
                 maybe.as_mut_ptr().as_mut().and_then(|v| {
                     match catch_unwind(AssertUnwindSafe(|| f(v))) {
                         Ok(result) => Some(result),
                         Err(_) => {
-                            eprintln!("OptionLock.try_with_mut_catch(Maybe): closure panicked; recovered");
+                            eprintln!(
+                                "OptionLock.try_with_mut_catch(Maybe): closure panicked; recovered"
+                            );
                             None
                         }
                     }
@@ -554,17 +578,15 @@ impl<T> OptionLock<T> {
     {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         match self {
-            OptionLock::Some(_) => {
-                self.try_lock_read().map_or(OptionLock::None, |guard| {
-                    match catch_unwind(AssertUnwindSafe(|| f(&*guard))) {
-                        Ok(result) => OptionLock::maybe(result),
-                        Err(_) => {
-                            eprintln!("OptionLock.map_catch: closure panicked; recovered");
-                            OptionLock::None
-                        }
+            OptionLock::Some(_) => self.try_lock_read().map_or(OptionLock::None, |guard| {
+                match catch_unwind(AssertUnwindSafe(|| f(&*guard))) {
+                    Ok(result) => OptionLock::maybe(result),
+                    Err(_) => {
+                        eprintln!("OptionLock.map_catch: closure panicked; recovered");
+                        OptionLock::None
                     }
-                })
-            }
+                }
+            }),
             OptionLock::Maybe(maybe) => {
                 let val = unsafe { maybe.as_ptr().as_ref().unwrap_unchecked() };
                 match catch_unwind(AssertUnwindSafe(|| f(val))) {
@@ -586,17 +608,15 @@ impl<T> OptionLock<T> {
     {
         use std::panic::{catch_unwind, AssertUnwindSafe};
         match self {
-            OptionLock::Some(_) => {
-                self.try_lock_read().map_or(OptionLock::None, |guard| {
-                    match catch_unwind(AssertUnwindSafe(|| f(&*guard))) {
-                        Ok(result) => result,
-                        Err(_) => {
-                            eprintln!("OptionLock.and_then_catch: closure panicked; recovered");
-                            OptionLock::None
-                        }
+            OptionLock::Some(_) => self.try_lock_read().map_or(OptionLock::None, |guard| {
+                match catch_unwind(AssertUnwindSafe(|| f(&*guard))) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        eprintln!("OptionLock.and_then_catch: closure panicked; recovered");
+                        OptionLock::None
                     }
-                })
-            }
+                }
+            }),
             OptionLock::Maybe(maybe) => {
                 let val = unsafe { maybe.as_ptr().as_ref().unwrap_unchecked() };
                 match catch_unwind(AssertUnwindSafe(|| f(val))) {
@@ -705,7 +725,7 @@ impl<T> OptionLock<T> {
     pub fn replace(&mut self, value: T) -> OptionLock<T> {
         std::mem::replace(self, OptionLock::maybe(value))
     }
-    
+
     /// Takes the value out of the OptionLock, leaving None in its place.
     pub fn take(&mut self) -> OptionLock<T> {
         match std::mem::replace(self, OptionLock::None) {
@@ -743,7 +763,7 @@ impl<T> OptionLock<T> {
             OptionLock::None => OptionLock::None,
         }
     }
-    
+
     /// Returns None if self is None, otherwise returns optb.
     pub fn and<U>(&self, optb: &OptionLock<U>) -> OptionLock<U>
     where
@@ -837,7 +857,7 @@ impl<T> OptionLock<T> {
             },
         }
     }
-    
+
     /// Returns Some if exactly one of self or other is Some, otherwise returns None.
     pub fn xor(&self, other: &OptionLock<T>) -> OptionLock<T>
     where
@@ -845,7 +865,7 @@ impl<T> OptionLock<T> {
     {
         let self_some = self.is_some();
         let other_some = other.is_some();
-        
+
         match (self_some, other_some) {
             (true, false) => match self {
                 OptionLock::Some(_) => {
@@ -1060,7 +1080,7 @@ impl<T> OptionLock<T> {
     pub fn is_none(&self) -> bool {
         matches!(self, OptionLock::None)
     }
-    
+
     #[inline]
     pub fn is_none_and<F>(&self, f: F) -> bool
     where
@@ -1068,7 +1088,7 @@ impl<T> OptionLock<T> {
     {
         matches!(self, OptionLock::None) && f()
     }
-    
+
     #[inline]
     pub fn is_none_and_then<F, U>(&self, f: F) -> OptionLock<U>
     where
@@ -1088,7 +1108,7 @@ impl<T> OptionLock<T> {
     {
         matches!(self, OptionLock::None) || f()
     }
-    
+
     #[inline]
     pub fn is_none_or_else<F>(&self, f: F) -> bool
     where
@@ -1102,7 +1122,7 @@ impl<T> OptionLock<T> {
     pub fn is_maybe(&self) -> bool {
         matches!(self, OptionLock::Maybe(_))
     }
-    
+
     #[inline]
     pub fn is_maybe_and<F>(&self, f: F) -> bool
     where
@@ -1116,7 +1136,7 @@ impl<T> OptionLock<T> {
             _ => false,
         }
     }
-    
+
     #[inline]
     pub fn is_maybe_and_then<F, U>(&self, f: F) -> OptionLock<U>
     where
@@ -1130,7 +1150,7 @@ impl<T> OptionLock<T> {
             _ => OptionLock::None,
         }
     }
-    
+
     #[inline]
     pub fn is_maybe_or<F>(&self, f: F) -> bool
     where
@@ -1138,7 +1158,7 @@ impl<T> OptionLock<T> {
     {
         matches!(self, OptionLock::Maybe(_)) || f()
     }
-    
+
     #[inline]
     pub fn is_maybe_or_else<F>(&self, f: F) -> bool
     where
@@ -1163,7 +1183,7 @@ impl<T> OptionLock<T> {
     {
         self.try_with(f).unwrap_or(false)
     }
-    
+
     #[inline]
     pub fn is_some_and_then<F, U>(&self, f: F) -> OptionLock<U>
     where
@@ -1171,7 +1191,7 @@ impl<T> OptionLock<T> {
     {
         self.try_with(f).unwrap_or(OptionLock::None)
     }
-    
+
     #[inline]
     pub fn is_some_or<F>(&self, f: F) -> bool
     where
@@ -1179,7 +1199,7 @@ impl<T> OptionLock<T> {
     {
         self.is_some() || f()
     }
-    
+
     #[inline]
     pub fn is_some_or_else<F>(&self, f: F) -> bool
     where
@@ -1260,7 +1280,7 @@ impl<T> OptionLock<T> {
             OptionLock::None => f(),
         }
     }
-    
+
     /// Unwraps the value, panicking with a custom message if None.
     #[inline]
     pub fn expect(self, msg: &str) -> T {
@@ -1310,7 +1330,8 @@ impl<T: PartialEq> PartialEq for OptionLock<T> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (OptionLock::Some(_), OptionLock::Some(_)) => {
-                if let (Some(guard1), Some(guard2)) = (self.try_lock_read(), other.try_lock_read()) {
+                if let (Some(guard1), Some(guard2)) = (self.try_lock_read(), other.try_lock_read())
+                {
                     *guard1 == *guard2
                 } else {
                     false
@@ -1477,7 +1498,7 @@ impl<T> From<Box<T>> for OptionLock<T> {
 
 impl<T> TryFrom<OptionLock<T>> for Arc<T> {
     type Error = OptionLock<T>;
-    
+
     fn try_from(value: OptionLock<T>) -> Result<Arc<T>, Self::Error> {
         match value {
             OptionLock::Some(ptr) => {
@@ -1499,7 +1520,7 @@ impl<T> TryFrom<OptionLock<T>> for Arc<T> {
 }
 impl<T> TryFrom<OptionLock<T>> for *mut T {
     type Error = OptionLock<T>;
-    
+
     fn try_from(value: OptionLock<T>) -> Result<*mut T, Self::Error> {
         match value {
             OptionLock::Some(ptr) => {
@@ -1511,7 +1532,7 @@ impl<T> TryFrom<OptionLock<T>> for *mut T {
         }
     }
 }
-    
+
 unsafe impl<T: Send> Send for OptionLock<T> {}
 unsafe impl<T: Send + Sync> Sync for OptionLock<T> {}
 
@@ -1638,7 +1659,7 @@ impl<T> SyncLock<T> {
             value: Lock { value },
         }
     }
-    
+
     #[inline]
     pub fn into_inner(self) -> T {
         self.value.into_inner()
@@ -1728,9 +1749,12 @@ impl<T> WriteGuard<T> {
     #[inline]
     pub fn new_const(ptr: *const T, counter: Arc<AtomicUsize>) -> Self {
         // Counter already set to 0x80000000 by try_lock_write
-        WriteGuard { inner: ptr as *mut T, counter }
+        WriteGuard {
+            inner: ptr as *mut T,
+            counter,
+        }
     }
-    
+
     pub fn wait_for_readers(&self) {
         let counter = &self.counter;
         let mut backoff = 1u32;
@@ -1749,12 +1773,12 @@ impl<T> WriteGuard<T> {
             }
         }
     }
-    
+
     pub fn try_wait_for_readers(&self, timeout: std::time::Duration) -> bool {
         let counter = &self.counter;
         let start = std::time::Instant::now();
         let mut backoff = 1u32;
-        
+
         loop {
             let current = counter.load(Ordering::Acquire);
             if current & 0x7FFFFFFF == 0 {
@@ -1773,12 +1797,12 @@ impl<T> WriteGuard<T> {
             }
         }
     }
-    
+
     #[inline]
     pub fn reader_count(&self) -> usize {
         self.counter.load(Ordering::Acquire) & 0x7FFFFFFF
     }
-    
+
     pub fn downgrade(self) -> ReadGuard<T> {
         let ptr = self.inner;
         let counter = self.counter.clone();
@@ -1786,7 +1810,7 @@ impl<T> WriteGuard<T> {
         counter.store(1, Ordering::Release);
         ReadGuard::new_with_counter(ptr, counter)
     }
-    
+
     #[inline]
     fn ptr(&self) -> *const T {
         self.inner
@@ -1795,7 +1819,7 @@ impl<T> WriteGuard<T> {
 
 impl<T> Deref for WriteGuard<T> {
     type Target = T;
-    
+
     #[inline]
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.inner }
@@ -1815,10 +1839,10 @@ impl<T> Drop for WriteGuard<T> {
         if std::thread::panicking() {
             eprintln!("WriteGuard::drop: recovering from panic; releasing writer lock");
         }
-        
+
         let key = self.inner as usize;
         let current_thread = thread::current().id();
-        
+
         let should_release = {
             let mut reentrant_map = reentrant_locks().lock().unwrap();
             if let Some((owner_thread, recursion_count)) = reentrant_map.get_mut(&key) {
@@ -1837,7 +1861,7 @@ impl<T> Drop for WriteGuard<T> {
                 true // No reentrant info, release
             }
         };
-        
+
         if should_release {
             self.counter.store(0, Ordering::Release);
             WaitNode::wake_waiters();
@@ -1899,41 +1923,53 @@ impl<T> ReadGuard<T> {
     pub const fn new(ptr: *const T) -> Self {
         ReadGuard { ptr, counter: None }
     }
-    
+
     #[inline]
     pub fn new_with_counter(ptr: *const T, counter: Arc<AtomicUsize>) -> Self {
         // Counter already incremented by try_lock_read, don't double-increment
-        ReadGuard { ptr, counter: Some(counter) }
+        ReadGuard {
+            ptr,
+            counter: Some(counter),
+        }
     }
-    
+
     #[inline]
     pub const fn ptr(&self) -> *const T {
         self.ptr
     }
-    
+
     pub fn upgrade(self) -> Result<WriteGuard<T>, Self> {
         if let Some(counter) = &self.counter {
             let current = counter.load(Ordering::Acquire);
             // Can only upgrade if we're the only reader (count == 1)
-            if current == 1 && counter.compare_exchange(1, 0x80000000, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+            if current == 1
+                && counter
+                .compare_exchange(1, 0x80000000, Ordering::AcqRel, Ordering::Relaxed)
+                .is_ok()
+            {
                 let ptr = self.ptr as *mut T;
                 let counter = counter.clone();
                 std::mem::forget(self);
-                return Ok(WriteGuard { inner: ptr, counter });
+                return Ok(WriteGuard {
+                    inner: ptr,
+                    counter,
+                });
             }
         }
         Err(self)
     }
-    
+
     #[inline]
     pub fn reader_count(&self) -> Option<usize> {
-        self.counter.as_ref().map(|c| c.load(Ordering::Acquire) & 0x7FFFFFFF)
+        self.counter
+            .as_ref()
+            .map(|c| c.load(Ordering::Acquire) & 0x7FFFFFFF)
     }
 }
 
 impl<T> Deref for ReadGuard<T> {
     type Target = T;
-    
+
     #[inline]
     fn deref(&self) -> &Self::Target {
         unsafe { &*self.ptr }
@@ -1947,11 +1983,14 @@ impl<T> Drop for ReadGuard<T> {
             let old = counter.fetch_sub(1, Ordering::AcqRel);
             let was_last_reader = (old & 0x7FFFFFFF) == 1;
             let writer_waiting = (old & 0x80000000) != 0;
-            
+
             if std::thread::panicking() {
-                eprintln!("ReadGuard::drop: recovering from panic; readers left before drop: {}", (old & 0x7FFFFFFF));
+                eprintln!(
+                    "ReadGuard::drop: recovering from panic; readers left before drop: {}",
+                    (old & 0x7FFFFFFF)
+                );
             }
-            
+
             if was_last_reader && writer_waiting {
                 WaitNode::wake_waiters();
                 std::thread::yield_now();

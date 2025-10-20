@@ -3,8 +3,12 @@
 //! Handles: int x = 5; char* name = "test"; float values[10]; etc.
 
 use crate::{
-    report, Context, ConvertedElement, ConvertedGlobal, ExtractedElement, ExtractedGlobal, GlobalInfo, Handler, HandlerPhase, HandlerReport, HandlerResult, Handlizer, Id, RedirectRequest, ReportLevel, Result
+    gen_name, C2RError, Context, ConvertedElement,
+    ConvertedVariable, ExtractedElement, ExtractedVariable,
+    Handler, HandlerResult, Id, Phase, Reason, RedirectRequest,
+    Report, ReportLevel, Result, VariableInfo,
 };
+use crate::{Token, TYPE_CONVERSION_MAP};
 use std::collections::HashMap;
 use std::ops::Range;
 
@@ -34,21 +38,29 @@ impl VariableHandler {
     }
 
     /// Detect variable patterns with caller-aware adaptive learning
-    fn detect_variable_pattern(
+    fn detect_pattern(
         &self,
         context: &mut Context,
-        tokens: &[crate::Token],
+        tokens: &[Token],
         token_range: Range<usize>,
         caller_id: Option<&str>,
     ) -> Result<(bool, f64, VariablePattern)> {
-        // First use Patternizer for structural detection
-        let pattern_match = context.patternizer.match_pattern("variable", tokens);
+        // Try multiple registered patterns for variable declarations
+        let mut pattern_success = false;
+        let pattern_names = vec!["variable", "global_variable", "static_variable"];
 
-        // Then use Samplizer for confidence scoring
+        for pattern_name in &pattern_names {
+            let pattern_match = context.patternizer.match_pattern(pattern_name, tokens);
+            if !matches!(pattern_match, crate::PatternResult::NoMatch { .. }) {
+                pattern_success = true;
+                break;
+            }
+        }
+
+        // Use Samplizer for confidence scoring with available patterns
         let patterns = vec![
-            "variable_declaration".to_string(),
-            "variable_assignment".to_string(),
-            "array_declaration".to_string(),
+            "variable".to_string(),
+            "global_variable".to_string(),
         ];
         let confidence = context
             .samplizer
@@ -65,120 +77,272 @@ impl VariableHandler {
             confidence
         };
 
-        // Combined heuristics for variable detection
-        let (has_variable_structure, var_pattern) = self.analyze_variable_structure(tokens);
-        let enhanced_confidence = if has_variable_structure {
-            (adjusted_confidence * 1.3).min(0.95)
-        } else {
-            adjusted_confidence * 0.6
-        };
+        // Determine if processing is viable based on pattern match and confidence
+        let can_process = pattern_success || adjusted_confidence > 0.6;
 
-        let pattern_success = !matches!(pattern_match, crate::PatternResult::NoMatch { .. });
-        let can_process = pattern_success || (has_variable_structure && enhanced_confidence > 0.6);
+        // Determine actual pattern from token analysis
+        let detected_pattern = self.detect_pattern_type(tokens);
 
-        Ok((can_process, enhanced_confidence, var_pattern))
+        Ok((can_process, adjusted_confidence, detected_pattern))
     }
 
-    /// Analyze tokens for variable declaration/assignment patterns
-    fn analyze_variable_structure(&self, tokens: &[crate::Token]) -> (bool, VariablePattern) {
+    /// Determine variable pattern from tokens and extract complete variable info
+    fn detect_pattern_type(&self, tokens: &[Token]) -> VariablePattern {
         if tokens.len() < 2 {
-            return (false, VariablePattern::Unknown);
+            return VariablePattern::Unknown;
         }
 
+        // Reject if first token is a number (not a type or keyword)
+        let first_token = tokens[0].to_string();
+        if first_token.chars().all(|c| c.is_numeric()) {
+            return VariablePattern::Unknown;
+        }
+
+        // Reject common non-variable keywords
+        if matches!(first_token.as_str(), "return" | "if" | "while" | "for" | "switch" | "case") {
+            return VariablePattern::Unknown;
+        }
+
+        // Check for pointer
+        if tokens.iter().any(|t| t.to_string() == "*") {
+            return VariablePattern::PointerDeclaration;
+        }
+
+        // Check for array
+        if tokens.iter().any(|t| t.to_string() == "[") {
+            return VariablePattern::ArrayDeclaration;
+        }
+
+        // Check for initialization vs declaration
+        if tokens.iter().any(|t| t.to_string() == "=") {
+            // Check if first token looks like a type (indicates declaration with init)
+            if tokens.len() >= 3 {
+                return VariablePattern::Initialization;
+            } else {
+                return VariablePattern::Assignment;
+            }
+        }
+
+        VariablePattern::Declaration
+    }
+
+    /// Extract comprehensive variable information from tokens
+    pub fn extract_info(&self, context: &mut Context, tokens: &[Token]) -> Result<VariableInfo> {
+        if tokens.is_empty() {
+            return Err(C2RError::new(
+                crate::Kind::Empty,
+                Reason::Input("token slice"),
+                Some("No tokens provided for variable extraction".to_string()),
+            ));
+        }
+
+        let pattern = self.detect_pattern_type(tokens);
         let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
-        // Look for C type keywords at start
-        for (i, token_str) in token_strings.iter().enumerate() {
-            match token_str.as_str() {
-                // C type declarations
-                "int" | "long" | "short" | "char" | "float" | "double" | "void" | "unsigned"
-                | "signed" | "const" | "static" | "extern" => {
-                    if i + 1 < token_strings.len() {
-                        let next_token = &token_strings[i + 1];
+        let mut var_info = VariableInfo::default();
 
-                        // Check for pointer declaration: int* ptr
-                        if next_token == "*" && i + 2 < token_strings.len() {
-                            return (true, VariablePattern::PointerDeclaration);
-                        }
+        // Extract variable name with improved pattern matching
+        var_info.name = match pattern {
+            VariablePattern::Declaration | VariablePattern::Initialization => {
+                if let Some(eq_pos) = token_strings.iter().position(|t| t == "=") {
+                    // Initialization: name is before =
+                    token_strings.get(eq_pos.saturating_sub(1))
+                        .unwrap_or(&"unknown".to_string())
+                        .clone()
+                } else {
+                    // Declaration: name is last meaningful token
+                    token_strings.last()
+                        .unwrap_or(&"unknown".to_string())
+                        .replace(";", "")
+                }
+            }
+            VariablePattern::Assignment => {
+                token_strings.first()
+                    .unwrap_or(&"unknown".to_string())
+                    .clone()
+            }
+            VariablePattern::ArrayDeclaration => {
+                if let Some(bracket_pos) = token_strings.iter().position(|t| t == "[") {
+                    token_strings.get(bracket_pos.saturating_sub(1))
+                        .unwrap_or(&"unknown".to_string())
+                        .clone()
+                } else {
+                    "unknown".to_string()
+                }
+            }
+            VariablePattern::PointerDeclaration => {
+                token_strings.last()
+                    .unwrap_or(&"unknown".to_string())
+                    .replace(";", "")
+            }
+            _ => {
+                token_strings.get(1)
+                    .unwrap_or(&"unknown".to_string())
+                    .clone()
+            }
+        };
 
-                        // Check for identifier
-                        if next_token.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                            // Check what comes after identifier
-                            if i + 2 < token_strings.len() {
-                                match token_strings[i + 2].as_str() {
-                                    "[" => return (true, VariablePattern::ArrayDeclaration),
-                                    "=" => return (true, VariablePattern::Initialization),
-                                    ";" => return (true, VariablePattern::Declaration),
-                                    _ => {}
-                                }
-                            }
-                            return (true, VariablePattern::Declaration);
-                        }
+        // Extract type information with better error handling
+        var_info.var_type = match pattern {
+            VariablePattern::Declaration | VariablePattern::Initialization => {
+                if let Some(eq_pos) = token_strings.iter().position(|t| t == "=") {
+                    if eq_pos >= 2 {
+                        let type_tokens = &tokens[0..eq_pos - 1];
+                        self.convert_type(type_tokens)
+                    } else {
+                        "i32".to_string() // Default fallback
                     }
-                }
-                _ => {}
-            }
-        }
-
-        // Look for assignments (no type keyword)
-        for (i, token_str) in token_strings.iter().enumerate() {
-            if token_str == "=" && i > 0 && i + 1 < token_strings.len() {
-                // Check if previous token is identifier
-                let prev_token = &token_strings[i - 1];
-                if prev_token.chars().all(|c| c.is_alphanumeric() || c == '_') {
-                    return (true, VariablePattern::Assignment);
+                } else if tokens.len() >= 2 {
+                    let type_tokens = &tokens[0..tokens.len() - 1];
+                    self.convert_type(type_tokens)
+                } else {
+                    "i32".to_string()
                 }
             }
-        }
+            VariablePattern::ArrayDeclaration => {
+                if let Some(bracket_pos) = token_strings.iter().position(|t| t == "[") {
+                    if bracket_pos > 1 {
+                        let type_tokens = &tokens[0..bracket_pos - 1];
+                        format!("[{}; N]", self.convert_type(type_tokens))
+                    } else {
+                        "[i32; N]".to_string()
+                    }
+                } else {
+                    "[i32; N]".to_string()
+                }
+            }
+            VariablePattern::PointerDeclaration => {
+                if tokens.len() >= 2 {
+                    let type_tokens = &tokens[0..tokens.len() - 1];
+                    format!("*mut {}", self.convert_type(type_tokens).replace("*", "").trim())
+                } else {
+                    "*mut i32".to_string()
+                }
+            }
+            _ => {
+                if !tokens.is_empty() {
+                    self.convert_type(&tokens[0..1])
+                } else {
+                    "i32".to_string()
+                }
+            }
+        };
 
-        (false, VariablePattern::Unknown)
+        // Set boolean flags
+        var_info.is_const = token_strings.contains(&"const".to_string());
+        var_info.is_static = token_strings.contains(&"static".to_string());
+        var_info.is_extern = token_strings.contains(&"extern".to_string());
+        var_info.is_volatile = token_strings.contains(&"volatile".to_string());
+        var_info.is_array = matches!(pattern, VariablePattern::ArrayDeclaration);
+
+        // Extract initializer value
+        var_info.initializer = if let Some(eq_pos) = token_strings.iter().position(|t| t == "=") {
+            if eq_pos + 1 < token_strings.len() {
+                Some(token_strings[eq_pos + 1..].join(" ").replace(";", ""))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Set metadata fields
+        var_info.kind_description = format!("{:?}", pattern);
+        var_info.complexity = if tokens.len() > 5 { "complex" } else { "simple" }.to_string();
+        var_info.storage_class = if var_info.is_static {
+            "static"
+        } else if var_info.is_extern {
+            "extern"
+        } else {
+            "auto"
+        }.to_string();
+        var_info.global_kind = "variable".to_string();
+
+        Ok(var_info)
     }
 
+
     /// Convert C variable construct to Rust
-    fn convert_variable_to_rust(
+    fn convert_tokens(
         &self,
         pattern: &VariablePattern,
-        tokens: &[crate::Token],
+        tokens: &[Token],
     ) -> Result<String> {
-        match pattern {
+        if tokens.is_empty() {
+            return Err(C2RError::new(
+                crate::Kind::Empty,
+                Reason::Input("tokens"),
+                Some("No tokens provided for variable conversion".to_string()),
+            ));
+        }
+
+        let result = match pattern {
             VariablePattern::Declaration => self.convert_declaration(tokens),
             VariablePattern::Initialization => self.convert_initialization(tokens),
             VariablePattern::Assignment => self.convert_assignment(tokens),
             VariablePattern::ArrayDeclaration => self.convert_array_declaration(tokens),
             VariablePattern::PointerDeclaration => self.convert_pointer_declaration(tokens),
             VariablePattern::Unknown => {
+                eprintln!("⚠️  Unknown variable pattern for tokens: {:?}",
+                          tokens.iter().map(|t| t.to_string()).collect::<Vec<_>>());
                 Ok("// Unknown variable pattern - manual conversion needed".to_string())
             }
+        };
+
+        // Log the conversion for debugging
+        if let Ok(ref code) = result {
+            eprintln!("   🔄 Pattern {:?} converted to: {}", pattern, code);
         }
+
+        result
     }
 
     /// Convert C declaration: int x; -> let x: i32;
-    fn convert_declaration(&self, tokens: &[crate::Token]) -> Result<String> {
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-
-        if token_strings.len() >= 2 {
-            let c_type = &token_strings[0];
-            let var_name = &token_strings[1];
-            let rust_type = self.convert_c_type_to_rust(c_type);
-            Ok(format!("let {}: {};", var_name, rust_type))
-        } else {
-            Ok("let variable: i32; // Conversion needs manual review".to_string())
+    fn convert_declaration(&self, tokens: &[Token]) -> Result<String> {
+        // Need at least type + name + semicolon (3 tokens minimum)
+        if tokens.len() < 3 {
+            return Err(C2RError::new(
+                crate::Kind::Invalid,
+                Reason::Input("tokens"),
+                Some(format!("Insufficient tokens for variable declaration: {}", tokens.len())),
+            ));
         }
+
+        // Filter out semicolons and get actual tokens
+        let actual_tokens: Vec<Token> = tokens.iter()
+            .filter(|t| t.to_string() != ";")
+            .cloned()
+            .collect();
+
+        if actual_tokens.len() < 2 {
+            return Err(C2RError::new(
+                crate::Kind::Invalid,
+                Reason::Input("tokens"),
+                Some("Need at least type and name".to_string()),
+            ));
+        }
+
+        let c_type = &actual_tokens[0..actual_tokens.len() - 1];
+        let var_name = &actual_tokens[actual_tokens.len() - 1];
+        let rust_type = self.convert_type(c_type);
+        Ok(format!("let {}: {};", var_name, rust_type))
     }
 
     /// Convert C initialization: int x = 5; -> let x: i32 = 5;
-    fn convert_initialization(&self, tokens: &[crate::Token]) -> Result<String> {
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-
-        if let Some(eq_pos) = token_strings.iter().position(|t| t == "=") {
+    fn convert_initialization(&self, tokens: &[Token]) -> Result<String> {
+        if let Some(eq_pos) = tokens.iter().position(|t| t.to_string() == "=") {
             if eq_pos >= 2 {
-                let c_type = &token_strings[0];
-                let var_name = &token_strings[1];
-                let rust_type = self.convert_c_type_to_rust(c_type);
+                let c_type = &tokens[0..eq_pos - 1];
+                let var_name = &tokens[eq_pos - 1];
+                let rust_type = self.convert_type(c_type);
 
                 // Extract value after =
-                let value_tokens = &token_strings[eq_pos + 1..];
-                let value = value_tokens.join(" ").replace(";", "");
+                let value_tokens = &tokens[eq_pos + 1..];
+                let value = value_tokens.iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .replace(";", "");
 
                 Ok(format!("let {}: {} = {};", var_name, rust_type, value))
             } else {
@@ -190,25 +354,48 @@ impl VariableHandler {
     }
 
     /// Convert C assignment: x = 5; -> x = 5;
-    fn convert_assignment(&self, tokens: &[crate::Token]) -> Result<String> {
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        let assignment = token_strings.join(" ").replace(";", "");
-        Ok(format!("{};", assignment))
+    fn convert_assignment(&self, tokens: &[Token]) -> Result<String> {
+        if tokens.is_empty() {
+            return Ok("// Empty assignment - manual conversion needed".to_string());
+        }
+
+        // Find the assignment operator
+        if let Some(eq_pos) = tokens.iter().position(|t| t == &Token::l("=")) {
+            if eq_pos > 0 && eq_pos + 1 < tokens.len() {
+                let var_name = &tokens[0];
+                let value_tokens = &tokens[eq_pos + 1..];
+                let value = value_tokens.iter()
+                    .map(|t| t.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+                    .replace(";", "");
+
+                Ok(format!("{} = {};", var_name, value))
+            } else {
+                Ok("// Invalid assignment - manual conversion needed".to_string())
+            }
+        } else {
+            // No assignment operator found
+            let assignment = tokens.iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(" ")
+                .replace(";", "");
+            Ok(format!("{};", assignment))
+        }
     }
 
     /// Convert C array: int arr[10]; -> let arr: [i32; 10] = [0; 10];
-    fn convert_array_declaration(&self, tokens: &[crate::Token]) -> Result<String> {
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+    fn convert_array_declaration(&self, tokens: &[Token]) -> Result<String> {
+        if tokens.len() >= 4 {
+            // Find the variable name (token before the opening bracket)
+            if let Some(bracket_pos) = tokens.iter().position(|t| t.to_string() == "[") {
+                if bracket_pos > 0 && bracket_pos + 2 < tokens.len() {
+                    let c_type = &tokens[0..bracket_pos];
+                    let var_name = &tokens[bracket_pos - 1];
+                    let size = &tokens[bracket_pos + 1];
+                    let rust_type = self.convert_type(c_type);
 
-        if token_strings.len() >= 4 {
-            let c_type = &token_strings[0];
-            let var_name = &token_strings[1];
-            let rust_type = self.convert_c_type_to_rust(c_type);
-
-            // Extract array size from [size]
-            if let Some(bracket_pos) = token_strings.iter().position(|t| t == "[") {
-                if bracket_pos + 1 < token_strings.len() {
-                    let size = &token_strings[bracket_pos + 1];
                     return Ok(format!(
                         "let {}: [{}; {}] = [Default::default(); {}];",
                         var_name, rust_type, size, size
@@ -221,61 +408,39 @@ impl VariableHandler {
     }
 
     /// Convert C pointer: int* ptr; -> let ptr: *mut i32;
-    fn convert_pointer_declaration(&self, tokens: &[crate::Token]) -> Result<String> {
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-
-        if token_strings.len() >= 3 {
-            let c_type = &token_strings[0];
-            let var_name = &token_strings[2]; // Skip the * token
-            let rust_type = self.convert_c_type_to_rust(c_type);
-            Ok(format!("let {}: *mut {};", var_name, rust_type))
+    fn convert_pointer_declaration(&self, tokens: &[Token]) -> Result<String> {
+        if tokens.len() >= 3 {
+            let var_name = &tokens[tokens.len() - 1];
+            let c_type = &tokens[0..tokens.len() - 2];
+            let rust_type = self.convert_type(c_type);
+            Ok(format!("let {}: {} = std::ptr::null_mut();", var_name, rust_type))
         } else {
             Ok("let ptr: *mut i32; // Pointer conversion needs manual review".to_string())
         }
     }
 
-    /// Convert C types to Rust types
-    fn convert_c_type_to_rust(&self, c_type: &str) -> String {
-        match c_type {
-            "int" => "i32".to_string(),
-            "long" => "i64".to_string(),
-            "short" => "i16".to_string(),
-            "char" => "i8".to_string(),
-            "float" => "f32".to_string(),
-            "double" => "f64".to_string(),
-            "unsigned int" => "u32".to_string(),
-            "unsigned long" => "u64".to_string(),
-            "unsigned short" => "u16".to_string(),
-            "unsigned char" => "u8".to_string(),
-            "void" => "()".to_string(),
-            _ => "i32".to_string(), // Default fallback
+    /// Convert C types to Rust types using comprehensive type map
+    fn convert_type(&self, tokens: &[Token]) -> String {
+        // Use the comprehensive type conversion map from common.rs
+        let mut c_type = "".to_string();
+        for token in tokens {
+            let c_string = token.to_string();
+            match c_string.as_str() {
+                "*" | "**" | "&" | "&&" => c_type.push_str(&c_string),
+                _ => if !c_string.is_empty() {
+                    c_type.push_str(&c_string);
+                    c_type.push(' ');
+                } else {
+                    continue;
+                },
+            }
         }
-    }
-
-    /// Update success rate for specific caller
-    pub fn update_caller_success(&mut self, caller_id: &str, success: bool) {
-        let current_rate = self
-            .caller_success_rates
-            .get(caller_id)
-            .copied()
-            .unwrap_or(0.5);
-
-        // Exponential moving average for adaptive learning
-        let new_rate = if success {
-            current_rate * 0.9 + 0.1 // Move toward 1.0 if successful
-        } else {
-            current_rate * 0.9 // Move toward 0.0 if failed
-        };
-
-        self.caller_success_rates
-            .insert(caller_id.to_string(), new_rate);
-
-        println!(
-            "🧠 VariableHandler learning: {} success rate with {} = {:.2}",
-            if success { "✅" } else { "❌" },
-            caller_id,
-            new_rate
-        );
+        let c_type = c_type.trim();
+        TYPE_CONVERSION_MAP.convert_type(c_type)
+            .unwrap_or_else(|| {
+                eprintln!("⚠️  Unknown C type '{}', defaulting to i32", c_type);
+                "i32".to_string()
+            })
     }
 }
 
@@ -302,7 +467,22 @@ impl Handler for VariableHandler {
         ]
     }
 
-    fn can_process(
+    fn supported_keywords(&self) -> Vec<String> {
+        vec![
+            "int".to_string(),
+            "char".to_string(),
+            "float".to_string(),
+            "double".to_string(),
+            "long".to_string(),
+            "short".to_string(),
+            "unsigned".to_string(),
+            "signed".to_string(),
+            "auto".to_string(),
+            "register".to_string(),
+        ]
+    }
+
+    fn detect(
         &self,
         context: &mut Context,
         token_slot: usize,
@@ -311,24 +491,28 @@ impl Handler for VariableHandler {
         let tokens = context
             .tokenizer
             .get_tokens(token_slot, token_range.clone());
+
         if tokens.is_empty() {
             return Ok(false);
         }
-        let tokens = tokens;
-        let (can_process, confidence, pattern) =
-            self.detect_variable_pattern(context, &tokens, token_range, None)?;
 
-        report!(
-            context,
-            "variable_handler",
-            "can_process",
-            ReportLevel::Info,
-            HandlerPhase::Process,
-            &format!(
-                "Variable detection: {} ({:?}, confidence: {:.2})",
-                can_process, pattern, confidence
-            ),
-            can_process
+        let (can_process, confidence, pattern) =
+            self.detect_pattern(context, &tokens, token_range.clone(), None)?;
+
+        context.registry.add_report(
+            Report::new(
+                Id::get(&format!("variable_handler_can_process_{}", token_slot)),
+                Some(self.id()),
+                "can_process".to_string(),
+                format!(
+                    "Variable detection: {} ({:?}, confidence: {:.2})",
+                    can_process, pattern, confidence
+                ),
+                ReportLevel::Info,
+                Phase::Process(None),
+            )
+                .with_tokens(tokens.len(), if can_process { tokens.len() } else { 0 })
+                .with_success(can_process),
         );
 
         Ok(can_process)
@@ -340,119 +524,127 @@ impl Handler for VariableHandler {
         token_slot: usize,
         token_range: Range<usize>,
     ) -> Result<Option<ExtractedElement>> {
+        eprintln!("📦 variable_handler::extract called! slot={}, range={:?}", token_slot, token_range);
+
         let tokens = context
             .tokenizer
             .get_tokens(token_slot, token_range.clone());
         if tokens.is_empty() {
+            eprintln!("   ❌ No tokens for extraction");
             return Ok(None);
         }
-        let (_, _, pattern) =
-            self.detect_variable_pattern(context, &tokens, token_range.clone(), None)?;
 
-        // Extract variable information from tokens
-        let token_strings: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        let var_name = token_strings.get(1).unwrap_or(&"unknown".to_string()).clone();
-        let c_type = token_strings.get(0).unwrap_or(&"int".to_string()).clone();
-        let rust_type = self.convert_c_type_to_rust(&c_type);
-        
-        // Generate Rust code based on pattern
-        let rust_code = self.convert_variable_to_rust(&pattern, &tokens)?;
+        let var_info = self.extract_info(context, &tokens)?;
+        let (_, _, pattern) = self.detect_pattern(context, &tokens, token_range.clone(), None)?;
 
-        let extracted_var = ExtractedGlobal {
-            id: Id::get(Id::gen_name(&self.id().name()).as_str()),
-            code: rust_code,
-            info: GlobalInfo {
-                name: var_name.clone(),
-                var_type: rust_type.clone(),
-                is_extern: false,
-                is_static: false,
-                is_const: matches!(pattern, VariablePattern::Declaration) && token_strings.contains(&"const".to_string()),
-                storage_class: "auto".to_string(),
-                initializer: if matches!(pattern, VariablePattern::Initialization | VariablePattern::Assignment) {
-                    Some("value".to_string())
-                } else {
-                    None
-                },
-                complexity: "simple".to_string(),
-                global_kind: "variable".to_string(),
-                is_array: matches!(pattern, VariablePattern::ArrayDeclaration),
-                is_volatile: token_strings.contains(&"volatile".to_string()),
-                kind_description: format!("{:?}", pattern),
-                type_name: c_type.clone(),
-                dimensions: if matches!(pattern, VariablePattern::ArrayDeclaration) {
-                    1
-                } else {
-                    0
-                },
-            },
+        let extracted_var = ExtractedVariable {
+            id: Id::get(&gen_name(&self.id().name()).as_str()),
+            info: var_info,
             tokens: tokens.clone(),
             token_range,
             metadata: vec![
                 ("handler".to_string(), "variable_handler".to_string()),
                 ("pattern_type".to_string(), format!("{:?}", pattern)),
-                ("original_c_type".to_string(), c_type),
-                ("rust_type".to_string(), rust_type),
                 ("adaptive_learning".to_string(), "enabled".to_string()),
             ],
         };
 
-        Ok(Some(ExtractedElement::Global(extracted_var)))
+        eprintln!("   ✅ Extraction complete: variable '{}'", extracted_var.info.name);
+        Ok(Some(ExtractedElement::Variable(extracted_var)))
     }
 
     fn convert(
         &self,
         context: &mut Context,
-        token_slot: usize,
-        token_range: Range<usize>,
+        element: ExtractedElement,
     ) -> Result<Option<ConvertedElement>> {
-        let tokens = context
-            .tokenizer
-            .get_tokens(token_slot, token_range.clone());
-        if tokens.is_empty() {
-            return Ok(None);
+        eprintln!("🔄 variable_handler::convert called!");
+
+        if let ExtractedElement::Variable(extracted) = element {
+            let tokens = extracted.tokens.clone();
+            if tokens.is_empty() {
+                return Ok(None);
+            }
+
+            let (_, _, pattern) = self.detect_pattern(
+                context,
+                &tokens,
+                extracted.token_range.clone(),
+                None,
+            )?;
+
+            let rust_code = self.convert_tokens(&pattern, &tokens)?;
+            eprintln!("   ✅ Conversion complete: {}", rust_code);
+
+            let converted_var = ConvertedVariable {
+                code: rust_code,
+                metadata: vec![
+                    ("original_c_type".to_string(), extracted.info.type_name.clone()),
+                    ("rust_type".to_string(), extracted.info.var_type.clone()),
+                    ("pattern_type".to_string(), format!("{:?}", pattern)),
+                ],
+            };
+
+            Ok(Some(ConvertedElement::Variable(converted_var)))
+        } else {
+            Ok(None)
         }
-        let (_, _, pattern) =
-            self.detect_variable_pattern(context, &tokens, token_range.clone(), None)?;
-
-        if tokens.is_empty() {
-            return Ok(None);
-        }
-        let tokens = tokens;
-        let (_, _, pattern) = self.detect_variable_pattern(context, &tokens, token_range, None)?;
-        let rust_code = self.convert_variable_to_rust(&pattern, &tokens)?;
-
-        let converted_var = ConvertedGlobal {
-            var_type: format!("{:?}", pattern),
-            initializer: Some("value".to_string()),
-            code: rust_code,
-            is_const: false,
-            is_static: false,
-            is_public: false,
-            metadata: Vec::new(),
-        };
-
-        Ok(Some(ConvertedElement::Global(converted_var)))
     }
 
-    fn report(&self, context: &mut Context) -> Result<HandlerReport> {
+    fn report(&self, context: &mut Context) -> Result<Report> {
+        let reports = context.registry.get_reports_by_handler(&self.id().name());
+
+        if reports.is_empty() {
+            return Ok(Report::new(
+                Id::get("variable_handler_report"),
+                Some(self.id()),
+                "report".to_string(),
+                "No variable processing reports found".to_string(),
+                ReportLevel::Info,
+                Phase::Report(None),
+            )
+                .with_success(true));
+        }
+
+        let (info_count, warning_count, error_count) =
+            reports
+                .iter()
+                .fold((0, 0, 0), |(info, warn, err), report| match report.level {
+                    ReportLevel::Info => (info + 1, warn, err),
+                    ReportLevel::Warning => (info, warn + 1, err),
+                    ReportLevel::Error => (info, warn, err + 1),
+                    ReportLevel::Debug => (info + 1, warn, err),
+                });
+
+        let total_tokens_processed = reports.iter().map(|r| r.tokens_processed).sum::<usize>();
         let caller_count = self.caller_success_rates.len();
 
-        Ok(HandlerReport::new(
-            "variable_handler_report",
-            self.id().into(),
-            "variable_handler".to_string(),
+        Ok(Report::new(
+            Id::get("variable_handler_report"),
+            Some(self.id()),
             "report".to_string(),
             format!(
-                "Variable handler with adaptive learning from {} callers",
+                "Variable handler processed {} variables: {} info, {} warnings, {} errors (adaptive learning from {} callers)",
+                reports.len(),
+                info_count,
+                warning_count,
+                error_count,
                 caller_count
             ),
-            ReportLevel::Info,
-            HandlerPhase::Report,
+            if error_count > 0 {
+                ReportLevel::Error
+            } else if warning_count > 0 {
+                ReportLevel::Warning
+            } else {
+                ReportLevel::Info
+            },
+            Phase::Report(None),
         )
-        .with_success(true))
+            .with_success(error_count == 0)
+            .with_tokens(total_tokens_processed, total_tokens_processed))
     }
 
-    fn handle_redirect(
+    fn route(
         &self,
         context: &mut Context,
         token_slot: usize,
@@ -471,74 +663,9 @@ impl Handler for VariableHandler {
         // Return the result as-is to avoid deadlock in redirect workflow
         Ok(result)
     }
-
-    fn process(
-        &self,
-        context: &mut Context,
-        token_slot: usize,
-        token_range: Range<usize>,
-    ) -> Result<HandlerResult> {
-        // Specialized variable processing with caller-aware adaptive learning
-        let tokens = context
-            .tokenizer
-            .get_tokens(token_slot, token_range.clone());
-        if tokens.is_empty() {
-            return Ok(HandlerResult::NotHandled(
-                None,
-                token_range.clone(),
-                self.id(),
-            ));
-        }
-        let (can_process, confidence, pattern) = self.detect_variable_pattern(
-            context,
-            &tokens,
-            token_range.clone(),
-            Some("hierarchical_caller"),
-        )?;
-
-        if can_process {
-            // Process the variable construct
-            let extracted = self.extract(context, token_slot, token_range.clone())?;
-            let converted = self.convert(context, token_slot, token_range.clone())?;
-
-            // Log successful processing for adaptive learning
-            println!(
-                "🧠 VariableHandler successfully processed {:?} pattern with {:.2} confidence",
-                pattern, confidence
-            );
-
-            // Generate rust code from the converted element
-            let rust_code = if let Some(ConvertedElement::Global(var_element)) = converted {
-                var_element.code
-            } else {
-                "// Variable conversion failed".to_string()
-            };
-
-            Ok(HandlerResult::Processed(
-                Some(tokens),
-                token_range,
-                rust_code,
-                self.id(),
-            ))
-        } else {
-            // Redirect to fallback handler
-            self.handle_redirect(
-                context,
-                token_slot,
-                token_range.clone(),
-                HandlerResult::NotHandled(None, token_range.clone(), self.id()),
-            )
-        }
-    }
 }
-
 impl Default for VariableHandler {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Factory function to create a variable handler
-pub fn create_variable_handler() -> VariableHandler {
-    VariableHandler::new()
 }

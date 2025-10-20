@@ -9,29 +9,54 @@
 )]
 
 use crate::{
-    Entry, Handler, HandlerResult, Handlizer, Id, Maybe, MaybeLock, OptionLock, Pattern,
-    PatternResult, Patternizer, ReadGuard, Registry, ReportLevel, Result, Samplizer, Table, Token,
-    TokenBox, Tokenizer, WriteGuard, array_handler::ArrayHandler, comment_handler::CommentHandler,
-    enum_handler::EnumHandler, expression_handler::ExpressionHandler,
-    function_handler::FunctionHandler, global_handler::GlobalHandler, handlers, logging,
-    loop_handler::LoopHandler, macro_handler::MacroHandler, maybe::lock::MaybeLockWriteGuard,
-    registry, struct_handler::StructHandler, token, typedef_handler::TypedefHandler,
+    array_handler::ArrayHandler
+    ,
+    comment_handler::CommentHandler,
+    enum_handler::EnumHandler,
+    expression_handler::ExpressionHandler,
+    function_handler::FunctionHandler,
+    gen_name,
+    global_handler::GlobalHandler,
+    loop_handler::LoopHandler,
+    macro_handler::MacroHandler,
+    maybe::lock::MaybeLockWriteGuard,
+    routing::KeywordRouter,
+    struct_handler::StructHandler,
+    time,
+    typedef_handler::TypedefHandler,
     variable_handler::VariableHandler,
+    ConvertedElement,
+    Entry,
+    ExtractedElement,
+    Handler,
+    HandlerResult,
+    Handlizer,
+    Id,
+    Maybe,
+    MaybeLock
+
+    ,
+    Patternizer,
+    RedirectRequest,
+    RedirectResponse,
+    Registry,
+    ReportLevel,
+    Result,
+    Samplizer,
+    Token,
+    TokenBox,
+    Tokenizer,
 };
-use core::{
-    ops::FnOnce,
-    option::Option::{None, Some},
-};
+use core::option::Option::{None, Some};
 use std::{
     cmp::Ordering,
     collections::HashMap,
-    fmt::Debug,
+    fmt::{Debug, Display},
     hash::{Hash, Hasher},
     ops::Range,
     path::PathBuf,
-    result,
-    sync::LazyLock,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::Arc
+    ,
 };
 
 const TOKEN_MAX: usize = 8192;
@@ -119,6 +144,16 @@ impl Context {
 
         // Shutdown global thread pool
         crate::thread::shutdown_global_pool();
+    }
+
+    /// Mark tokens as consumed by setting them to Token::n()
+    /// Handlers should call this after successfully extracting tokens
+    pub fn mark_tokens_consumed(&mut self, token_slot: usize, token_range: Range<usize>) {
+        for pos in token_range {
+            if let Some(_) = self.tokenizer.slots()[token_slot].get(pos) {
+                self.tokenizer.slots()[token_slot].insert(pos, Token::n());
+            }
+        }
     }
 
     /// Get the current verbosity level
@@ -209,67 +244,57 @@ impl Context {
         self.registry.insert(id, entry);
     }
     pub fn initialize(&mut self) {
-        // Clear any existing handlers to ensure clean initialization
         self.handlizer.handlers.clear();
-        
+
         let start_time = std::time::Instant::now();
-        let mut handler_count = 0;
-        
-        // Register handlers with proper priority ordering
-        // Core language construct handlers - highest priority
-        self.handlizer.register(FunctionHandler::new()); // Priority: 200
-        self.handlizer.register(StructHandler::new());   // Priority: 180
-        self.handlizer.register(EnumHandler::new());     // Priority: 160
-        handler_count += 3;
 
-        // Specialized pattern handlers - high priority for specific constructs
-        self.handlizer.register(LoopHandler::new());     // Priority: 150
-        self.handlizer.register(TypedefHandler::new());  // Priority: 140
-        self.handlizer.register(VariableHandler::new()); // Priority: 140
-        handler_count += 3;
+        // STEP 1: Initialize Patternizer with common patterns for all handlers
+        self.patternizer.initialize_common_patterns();
 
-        // Expression and syntax handlers - medium-high priority
-        self.handlizer.register(ExpressionHandler::new()); // Priority: 120
-        self.handlizer.register(ArrayHandler::new());      // Priority: 110
-        self.handlizer.register(MacroHandler::new());      // Priority: 100
-        handler_count += 3;
+        // STEP 2: Initialize Samplizer patterns (if needed)
+        // The Samplizer will automatically learn patterns as handlers use it
 
-        // Documentation and metadata handlers - lower priority
-        self.handlizer.register(CommentHandler::new());  // Priority: 170
-        self.handlizer.register(GlobalHandler::new());   // Priority: 60
-        handler_count += 2;
+        // STEP 3: Register handlers in priority order using batch registration
+        let handlers: Vec<Arc<dyn Handler>> = vec![
+            Arc::new(FunctionHandler::new()),   // Priority: 200
+            Arc::new(StructHandler::new()),     // Priority: 180
+            Arc::new(CommentHandler::new()),    // Priority: 170
+            Arc::new(EnumHandler::new()),       // Priority: 160
+            Arc::new(LoopHandler::new()),       // Priority: 150
+            Arc::new(TypedefHandler::new()),    // Priority: 140
+            Arc::new(VariableHandler::new()),   // Priority: 140
+            Arc::new(ExpressionHandler::new()), // Priority: 120
+            Arc::new(ArrayHandler::new()),      // Priority: 110
+            Arc::new(MacroHandler::new()),      // Priority: 100
+            Arc::new(GlobalHandler::new()),     // Priority: 60
+        ];
+
+        let handler_count = handlers.len();
+        for handler in handlers {
+            self.handlizer.register(Maybe::Some(handler));
+        }
+
+        // STEP 4: Initialize Handlizer's adaptive pattern system from Patternizer
+        if let Err(e) = self.handlizer.initialize_from_patternizer(&self.patternizer) {
+            eprintln!("Warning: Failed to initialize adaptive patterns: {}", e);
+        }
 
         let elapsed = start_time.elapsed();
-        
-        // Create comprehensive initialization report
-        let init_report = HandlerReport::new(
-            "handler_initialization",
-            std::sync::Arc::new(Id::get("initialize_handlers")),
-            "Context".to_string(),
-            "initialize".to_string(),
+
+        let report = Report::new(
+            Id::get(&gen_name("handler_initialization")),
+            Some(Id::get("Context Initialize")),
+            "Context::initialize".to_string(),
             format!(
-                "Successfully initialized {} handlers in {:?} with priority ordering",
-                handler_count, elapsed
+                "Initialized {} handlers with Patternizer and Samplizer in {:?}ms",
+                handler_count,
+                elapsed.as_millis()
             ),
             ReportLevel::Info,
-            HandlerPhase::Initialize,
-        )
-        .with_tokens(0, 0)
-        .with_success(true)
-        .with_metadata("handler_count".to_string(), handler_count.to_string())
-        .with_metadata("initialization_time_ms".to_string(), elapsed.as_millis().to_string());
-
-        self.registry.add_report(init_report);
-        
-        // Log initialization success
-        self.report(
-            "context",
-            "initialize",
-            ReportLevel::Info,
-            HandlerPhase::Initialize,
-            &format!("Handler initialization completed with {} registered handlers", handler_count),
-            true,
+            Phase::Initialize(None),
         );
+
+        self.registry.add_report(report);
     }
     pub fn process(
         &mut self,
@@ -277,51 +302,18 @@ impl Context {
         token_range: Range<usize>,
     ) -> Result<Vec<HandlerResult>> {
         let mut results = Vec::new();
-        let start_time = std::time::Instant::now();
-        
-        // Initial validation and reporting
+
+        // Fast path for empty ranges
         if token_range.is_empty() {
-            self.report(
-                "handlizer",
-                "process",
-                ReportLevel::Warning,
-                HandlerPhase::Process,
-                "Empty token range provided",
-                false,
-            );
             return Ok(results);
         }
 
         let tokens = self.tokenizer.get_tokens(token_slot, token_range.clone());
         if tokens.is_empty() {
-            self.report(
-                "handlizer",
-                "process",
-                ReportLevel::Warning,
-                HandlerPhase::Process,
-                "No tokens found in range",
-                false,
-            );
             return Ok(results);
         }
 
-        self.report_with_tokens(
-            "handlizer",
-            "process",
-            ReportLevel::Info,
-            HandlerPhase::Process,
-            &format!(
-                "Starting token processing for {} tokens in range {:?}",
-                tokens.len(),
-                token_range
-            ),
-            true,
-            tokens.len(),
-            0,
-        );
-
-        let mut handlers_attempted = 0;
-        let mut handlers_successful = 0;
+        let token_count = tokens.len();
         let sorted_handlers: Vec<_> = self
             .handlizer
             .get_sorted_handlers()
@@ -329,243 +321,379 @@ impl Context {
             .cloned()
             .collect();
 
-        for handler in sorted_handlers {
-            handlers_attempted += 1;
+        // INCREMENTAL PROCESSING: Process tokens incrementally without window size limits
+        let token_count = token_range.len();
+        let mut results: Vec<HandlerResult> = Vec::new();
 
-            match handler.can_process(self, token_slot, token_range.clone()) {
-                Ok(can_process) => {
-                    if can_process {
-                        self.report_with_tokens(
-                            &handler.id().name(),
-                            "process",
-                            ReportLevel::Info,
-                            HandlerPhase::Process,
-                            "Attempting processing",
-                            true,
-                            tokens.len(),
-                            0,
-                        );
+        // Cycle-based processing: 
+        // Cycle 0: positions 0, 10, 20, 30, ...
+        // Cycle 1: positions 1, 11, 21, 31, ...
+        // ... continue until all positions covered
+        const OFFSET_INCREMENT: usize = 10;
 
-                        match handler.process(self, token_slot, token_range.clone()) {
-                            Ok(result) => {
-                                handlers_successful += 1;
+        // Build keyword router once from all handlers
+        let router = KeywordRouter::from_handlers(&sorted_handlers);
+        eprintln!("🧭 KeywordRouter initialized with {} keyword mappings", router.stats().total_keywords);
 
-                                self.report_with_tokens(
-                                    &handler.id().name(),
-                                    "process",
-                                    ReportLevel::Info,
-                                    HandlerPhase::Process,
-                                    &format!("Successfully processed tokens: {:?}", result),
-                                    true,
-                                    tokens.len(),
-                                    result.token_count(),
-                                );
+        // === PHASE 1: DETECTION ===
+        // Find all potential patterns without extracting yet
+        #[derive(Debug, Clone)]
+        struct DetectedPattern {
+            handler_id: Id,
+            range: Range<usize>,
+            window: Range<usize>,
+        }
+        let mut detected_patterns: Vec<DetectedPattern> = Vec::new();
 
-                                results.push(result.clone());
+        eprintln!("\n🔍 === PHASE 1: DETECTION ===");
 
-                                // Stop processing if a handler completed successfully
-                                if matches!(result, HandlerResult::Completed(_, _, _, _)) {
-                                    self.report(
-                                        "handlizer",
-                                        "process",
-                                        ReportLevel::Info,
-                                        HandlerPhase::Process,
-                                        "Processing completed successfully, stopping further attempts",
-                                        true,
-                                    );
-                                    break;
-                                }
-                            }
-                            Err(e) => {
-                                self.report(
-                                    &handler.id().name(),
-                                    "process",
-                                    ReportLevel::Warning,
-                                    HandlerPhase::Process,
-                                    &format!("Handler processing failed: {}", e),
-                                    false,
-                                );
+        for cycle_offset in 0..OFFSET_INCREMENT {
+            let mut current_pos = token_range.start + cycle_offset;
 
-                                // Try redirect on processing failure
-                                if let Ok(redirect_result) = self.try_redirect(
-                                    token_slot,
-                                    token_range.clone(),
-                                    HandlerResult::NotHandled(
-                                        Some(tokens.clone()),
-                                        token_range.clone(),
-                                        handler.id(),
-                                    ),
-                                    &handler.id(),
-                                ) {
-                                    if !matches!(
-                                        redirect_result,
-                                        HandlerResult::NotHandled(_, _, _)
-                                    ) {
-                                        results.push(redirect_result);
-                                        handlers_successful += 1;
-                                    }
-                                }
-                            }
+            if current_pos >= token_range.end {
+                break; // This cycle offset exceeds range
+            }
+
+            eprintln!("\n🔄 Detection cycle {} (offset {})", cycle_offset, cycle_offset);
+
+            // Process positions at OFFSET_INCREMENT intervals (0,10,20... or 1,11,21... etc.)
+            while current_pos < token_range.end {
+                let current_token = self.tokenizer.slots()[token_slot].get(current_pos);
+
+                // Check if token is Token::n() (already processed) or missing
+                if matches!(current_token, Some(Token::n())) || current_token.is_none() {
+                    eprintln!("   ⏭️  Skipping Token::n() or missing token at position {}", current_pos);
+                    current_pos += OFFSET_INCREMENT;
+                    continue;
+                }
+
+                eprintln!("\n📍 Position {} of {}", current_pos, token_range.end);
+
+                // Try progressively larger windows: 5, 10, 20, 50, 100, rest
+                // This prevents handlers from consuming the entire file
+                let remaining = token_range.end - current_pos;
+                let window_sizes = vec![5, 10, 20, 50, 100, 200, remaining];
+
+                let mut handled = false;
+                for window_size in window_sizes {
+                    if window_size > remaining {
+                        continue;
+                    }
+
+                    let test_range = current_pos..(current_pos + window_size).min(token_range.end);
+
+                    // SKIP ranges that contain already processed tokens (Token::n())
+                    let has_consumed = test_range.clone().any(|pos| {
+                        matches!(self.tokenizer.slots()[token_slot].get(pos), Some(Token::n()))
+                    });
+                    if has_consumed {
+                        eprintln!("   ⏩ Skipping range {:?} - contains Token::n() tokens", test_range);
+                        break; // No point trying larger windows if this one has consumed tokens
+                    }
+
+                    let range_len = test_range.len();
+                    eprintln!("   🔬 Testing range {:?} ({} tokens)", test_range, range_len);
+
+                    // Get tokens for routing
+                    let test_tokens = self.tokenizer.slots()[token_slot].tokens()[test_range.clone()].to_vec();
+
+                    // Use keyword routing to get prioritized handler list
+                    let routed_handler_ids = router.route(&test_tokens);
+
+                    eprintln!("   🧭 Keyword routing → {} prioritized handlers", routed_handler_ids.len());
+
+                    // Try handlers in routed order (not all handlers!)
+                    for handler_id in &routed_handler_ids {
+                        // Find handler by ID
+                        let handler = sorted_handlers.iter().find(|h| &h.id() == handler_id);
+
+                        if handler.is_none() {
+                            continue; // Handler not found in registry
+                        }
+
+                        let handler = handler.unwrap();
+                        if let Ok(true) = handler.detect(self, token_slot, test_range.clone()) {
+                            eprintln!("      ✅ Handler {} detected pattern at {:?}", handler.id().name(), test_range);
+
+                            // Just record the detection - we'll extract/convert later
+                            detected_patterns.push(DetectedPattern {
+                                handler_id: handler.id(),
+                                range: test_range.clone(), // Will be updated during extraction
+                                window: test_range.clone(),
+                            });
+
+                            handled = true;
+                            break; // One handler per window
                         }
                     }
-                }
-                Err(e) => {
-                    self.report(
-                        &handler.id().name(),
-                        "can_process",
-                        ReportLevel::Error,
-                        HandlerPhase::Process,
-                        &format!("Error checking handler capability: {}", e),
-                        false,
-                    );
+
+                    if handled {
+                        break; // Break from window size loop
+                    }
+                } // End of window size loop
+
+                // Move to next position
+                current_pos += OFFSET_INCREMENT;
+            } // End of while loop
+        } // End of cycle loop
+
+        eprintln!("\n📊 Detection complete: {} patterns detected", detected_patterns.len());
+
+        // === DEDUPLICATION ===
+        // Remove overlapping patterns - prioritize by handler priority, then by position
+        eprintln!("\n🔀 Deduplicating overlapping patterns...");
+
+        // First, sort by handler priority (higher priority first), then by start position
+        detected_patterns.sort_by(|a, b| {
+            // Find handler priorities
+            let a_handler = sorted_handlers.iter().find(|h| h.id() == a.handler_id);
+            let b_handler = sorted_handlers.iter().find(|h| h.id() == b.handler_id);
+
+            let a_priority = a_handler.map(|h| h.priority()).unwrap_or(0);
+            let b_priority = b_handler.map(|h| h.priority()).unwrap_or(0);
+
+            // Higher priority first, then earlier position
+            b_priority.cmp(&a_priority)
+                .then(a.window.start.cmp(&b.window.start))
+        });
+
+        let original_count = detected_patterns.len();
+        let mut deduplicated: Vec<DetectedPattern> = Vec::new();
+        for pattern in detected_patterns {
+            // Check if this pattern overlaps with any already-kept pattern
+            let overlaps = deduplicated.iter().any(|existing| {
+                // Check if ranges overlap
+                pattern.window.start < existing.window.end && existing.window.start < pattern.window.end
+            });
+
+            if !overlaps {
+                deduplicated.push(pattern);
+            } else {
+                eprintln!("   ⏩ Skipping overlapping pattern at {:?}", pattern.window);
+            }
+        }
+
+        eprintln!("   ✅ Deduplicated: {} → {} patterns", original_count, deduplicated.len());
+        let detected_patterns = deduplicated; // Replace with deduplicated list
+
+        // === PHASE 2: EXTRACTION ===
+        eprintln!("\n🔧 === PHASE 2: EXTRACTION ===");
+
+        #[derive(Debug, Clone)]
+        struct ExtractedData {
+            element: ExtractedElement,
+            handler_id: Id,
+        }
+        let mut extracted_data: Vec<ExtractedData> = Vec::new();
+
+        for detected in &detected_patterns {
+            // Skip if any tokens in this range are already consumed
+            let all_tokens = self.tokenizer.slots()[token_slot].tokens();
+            let already_consumed = detected.window.clone().any(|pos| {
+                pos < all_tokens.len() && matches!(all_tokens[pos], Token::n())
+            });
+
+            if already_consumed {
+                eprintln!("   ⏩ Skipping {:?} - tokens already consumed", detected.window);
+                continue;
+            }
+
+            let handler = sorted_handlers.iter().find(|h| h.id() == detected.handler_id);
+            if let Some(handler) = handler {
+                eprintln!("   🔍 Extracting with {} at {:?}", handler.id().name(), detected.window);
+
+                match handler.extract(self, token_slot, detected.window.clone()) {
+                    Ok(Some(extracted)) => {
+                        eprintln!("      ✅ Extracted successfully");
+                        extracted_data.push(ExtractedData {
+                            element: extracted,
+                            handler_id: handler.id(),
+                        });
+                    }
+                    Ok(None) => {
+                        eprintln!("      ⚠️  extract() returned None");
+                    }
+                    Err(e) => {
+                        eprintln!("      ❌ extract() error: {}", e);
+                    }
                 }
             }
         }
 
-        let elapsed = start_time.elapsed();
-        self.report_with_tokens(
-            "handlizer",
-            "process",
-            if handlers_successful > 0 {
-                ReportLevel::Info
-            } else {
-                ReportLevel::Warning
-            },
-            HandlerPhase::Process,
-            &format!(
-                "Processing complete: {}/{} handlers successful, {} results, took {:?}",
-                handlers_successful,
-                handlers_attempted,
-                results.len(),
-                elapsed
-            ),
-            handlers_successful > 0,
-            tokens.len(),
-            results.iter().map(|r| r.token_count()).sum(),
-        );
+        eprintln!("\n📊 Extraction complete: {} elements extracted", extracted_data.len());
+
+        // === PHASE 3: CONVERSION ===
+        eprintln!("\n⚙️  === PHASE 3: CONVERSION ===");
+
+        for data in &extracted_data {
+            let handler = sorted_handlers.iter().find(|h| h.id() == data.handler_id);
+            if let Some(handler) = handler {
+                eprintln!("   🔄 Converting with {}", handler.id().name());
+
+                match handler.convert(self, data.element.clone()) {
+                    Ok(Some(converted)) => {
+                        let code = match converted {
+                            ConvertedElement::Variable(v) => v.code,
+                            ConvertedElement::Function(f) => f.code,
+                            ConvertedElement::Struct(s) => s.code,
+                            ConvertedElement::Enum(e) => e.code,
+                            ConvertedElement::Global(g) => g.code,
+                            _ => String::new(),
+                        };
+                        eprintln!("      ✅ Converted successfully");
+                        results.push(HandlerResult::Completed(
+                            None,
+                            token_range.clone(),
+                            code,
+                            handler.id(),
+                        ));
+                    }
+                    Ok(None) => {
+                        eprintln!("      ⚠️  convert() returned None");
+                    }
+                    Err(e) => {
+                        eprintln!("      ❌ convert() error: {}", e);
+                    }
+                }
+            }
+        }
+
+        eprintln!("\n📊 Conversion complete: {} results", results.len());
+
+        // Count consumed tokens
+        let consumed_count = (token_range.start..token_range.end)
+            .filter(|&pos| matches!(self.tokenizer.slots()[token_slot].get(pos), Some(Token::n())))
+            .count();
+
+        eprintln!("\n🎉 All phases complete:");
+        eprintln!("   📊 Total results: {}", results.len());
+        eprintln!("   🔒 Tokens marked as Token::n(): {} / {}", consumed_count, token_count);
+        eprintln!("   ♻️  Tokens remaining: {}", token_count - consumed_count);
 
         Ok(results)
     }
+
+    pub fn route(
+        &mut self,
+        token_slot: usize,
+        token_range: Range<usize>,
+        request: RedirectRequest,
+    ) -> Result<HandlerResult> {
+        let tokens = self.tokenizer.get_tokens(token_slot, token_range.clone());
+        let handler_name = request.from_handler.to_string();
+
+        // Filter tokens efficiently
+        let filtered_tokens: Vec<Token> = tokens
+            .into_iter()
+            .filter(|token| !matches!(*token, Token::n()))
+            .collect();
+
+        let response = if filtered_tokens.is_empty() {
+            RedirectResponse::default()
+        } else {
+            // Get routing targets early to avoid repeated lookups
+            let potential_targets = self
+                .handlizer
+                .routing_rules
+                .get(&handler_name)
+                .cloned()
+                .unwrap_or_default();
+
+            // Find best match with early termination
+            let best_match = potential_targets
+                .iter()
+                .filter(|target| {
+                    !self
+                        .handlizer
+                        .visited_handlers
+                        .iter()
+                        .any(|h| h.to_string() == **target)
+                })
+                .filter_map(|target| {
+                    self.patternizer
+                        .process_handler_patterns(&filtered_tokens, target)
+                        .ok()
+                        .map(|confidence| (target, confidence))
+                })
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal));
+
+            match best_match {
+                Some((target, confidence)) if confidence > 0.6 => RedirectResponse {
+                    target_handler: Some(Id::get(target)),
+                    modified_range: None,
+                    routing_reason: format!(
+                        "Pattern analysis suggests {} (confidence: {:.2})",
+                        target, confidence
+                    ),
+                    should_retry: true,
+                    metadata: Vec::new(),
+                },
+                Some((_, confidence)) => RedirectResponse {
+                    target_handler: None,
+                    modified_range: None,
+                    routing_reason: format!("Low confidence routing (max: {:.2})", confidence),
+                    should_retry: false,
+                    metadata: Vec::new(),
+                },
+                None => RedirectResponse {
+                    target_handler: None,
+                    modified_range: None,
+                    routing_reason: "No suitable routing target found".to_string(),
+                    should_retry: false,
+                    metadata: Vec::new(),
+                },
+            }
+        };
+
+        self.handlizer.process_analyzed_redirect(request, response)
+    }
     /// Enhanced redirect system with intelligent routing and learning
-    pub fn try_redirect(
+    pub fn try_route(
         &mut self,
         token_slot: usize,
         token_range: Range<usize>,
         result: HandlerResult,
         handler_id: &Id,
     ) -> Result<HandlerResult> {
-        let start_time = std::time::Instant::now();
         let tokens = self.tokenizer.get_tokens(token_slot, token_range.clone());
 
-        self.report_with_tokens(
-            "handlizer",
-            "try_redirect",
-            ReportLevel::Info,
-            HandlerPhase::Process,
-            &format!(
-                "Attempting intelligent redirect for failed handler: {}",
-                handler_id.name()
-            ),
-            true,
-            tokens.len(),
-            0,
-        );
+        // Early exit for empty tokens
+        if tokens.is_empty() {
+            return Ok(HandlerResult::NotHandled(
+                None,
+                token_range,
+                handler_id.clone(),
+            ));
+        }
 
-        // Create redirect request
-        let redirect_request = crate::handler::RedirectRequest {
+        // Create redirect request with pre-allocated capacity
+        let redirect_request = RedirectRequest {
             from_handler: handler_id.clone(),
             token_range: token_range.clone(),
-            failed_patterns: Vec::new(),
+            failed_patterns: Vec::with_capacity(1),
             suggested_handler: None,
             metadata: Vec::new(),
         };
 
-        // Use the workflow helper to handle redirect with proper borrowing
-        match Handlizer::handle_redirect_workflow(
-            self,
-            token_slot,
-            token_range.clone(),
-            redirect_request,
-        ) {
+        // Direct redirect handling without timing overhead
+        match self.route(token_slot, token_range.clone(), redirect_request) {
             Ok(redirect_result) => {
                 if !matches!(redirect_result, HandlerResult::NotHandled(_, _, _)) {
-                    let elapsed = start_time.elapsed();
-                    self.report_with_tokens(
-                        "handlizer",
-                        "try_redirect",
-                        ReportLevel::Info,
-                        HandlerPhase::Process,
-                        &format!("Redirect successful in {:?}", elapsed),
-                        true,
-                        tokens.len(),
-                        redirect_result.token_count(),
-                    );
                     return Ok(redirect_result);
                 }
             }
-            Err(e) => {
-                self.report_with_tokens(
-                    "handlizer",
-                    "try_redirect",
-                    ReportLevel::Debug,
-                    HandlerPhase::Process,
-                    &format!("Redirect workflow failed: {}", e),
-                    false,
-                    tokens.len(),
-                    0,
-                );
+            Err(_) => {
+                // Silent failure handling - avoid logging overhead
             }
         }
 
-        // If all redirects failed, return the original result
-        let elapsed = start_time.elapsed();
-        self.report_with_tokens(
-            "handlizer",
-            "try_redirect",
-            ReportLevel::Warning,
-            HandlerPhase::Process,
-            &format!("All redirect strategies exhausted in {:?}", elapsed),
-            false,
-            tokens.len(),
-            0,
-        );
-
+        // Return optimized NotHandled result
         Ok(HandlerResult::NotHandled(
             Some(tokens),
             token_range,
             handler_id.clone(),
         ))
     }
-    /// Match patterns for a handler using the patternizer
-    pub fn match_pattern(&mut self, handler_type: &str, tokens: &[crate::Token]) -> PatternResult {
-        self.patternizer.match_pattern(handler_type, tokens)
-    }
-
-    /// Check if tokens should be rejected by any handler
-    pub fn should_reject_tokens(&mut self, handler_type: &str, tokens: &[crate::Token]) -> bool {
-        self.patternizer.should_reject_tokens(handler_type, tokens)
-    }
-
-    /// Get pattern statistics
-    pub fn get_pattern_stats(&self) -> std::collections::HashMap<String, usize> {
-        self.patternizer.get_stats()
-    }
-
-    /// Save pattern cache to JSON file
-    pub fn save_pattern_cache(&self, file_path: &str) -> crate::error::Result<()> {
-        self.patternizer.save_cache_to_json(file_path)
-    }
-
-    /// Load pattern cache from JSON file
-    pub fn load_pattern_cache(&mut self, file_path: &str) -> crate::error::Result<()> {
-        self.patternizer.load_cache_from_json(file_path)
-    }
-
-    /// Get a string value from the registry
-    pub fn get_string(&self, name: &str) -> Option<String> {
-        self.registry.get_string(name)
-    }
-
     /// Get a boolean value from the registry
     pub fn get_bool(&self, name: &str) -> Option<bool> {
         self.registry.get_bool(name)
@@ -610,12 +738,6 @@ impl Context {
         );
     }
 
-    /// Configure system includes
-    pub fn with_system_includes(&mut self, enabled: bool) {
-        self.registry
-            .insert(Id::get("system_includes"), Entry::Bool(enabled));
-    }
-
     /// Register a handler with the context
     pub fn register_handler(&mut self, handler: Box<dyn Handler>) {
         let id = handler.id();
@@ -625,7 +747,7 @@ impl Context {
     // ===== SAMPLIZER DELEGATION FUNCTIONS =====
 
     /// Get validation results from the global Samplizer
-    pub fn get_validation_results(self) -> HashMap<String, crate::ValidationResult> {
+    pub fn get_validation_results(self) -> HashMap<Id, crate::ValidationResult> {
         self.samplizer.validation_results.clone()
     }
 
@@ -664,18 +786,9 @@ impl Context {
             .record_failure(handler_id, tokens_attempted, reason);
     }
 
-    /// Store a Pattern directly in the registry
-    pub fn insert_pattern(&mut self, pattern_name: &str, pattern: Pattern) {
-        self.registry.insert_pattern(pattern_name, pattern);
-    }
-
-    /// Retrieve a Pattern directly from the registry
-    pub fn get_pattern(&self, pattern_name: &str) -> Option<Pattern> {
-        self.registry.get_pattern(pattern_name)
-    }
 
     /// Add a handler report to the centralized reporting system
-    pub fn add_report(&mut self, report: HandlerReport) {
+    pub fn add_report(&mut self, report: Report) {
         self.registry.add_report(report);
     }
 
@@ -685,20 +798,19 @@ impl Context {
         handler_name: &str,
         function_name: &str,
         level: ReportLevel,
-        phase: HandlerPhase,
+        phase: Phase,
         message: &str,
         success: bool,
     ) {
-        let report_id = Id::get(&Id::gen_name(&format!(
+        let report_id = Id::get(&gen_name(&format!(
             "report_{}_{}",
             handler_name, function_name
         )));
         let handler_id = Id::get(handler_name);
 
-        let report = HandlerReport {
-            report_id: std::sync::Arc::new(report_id),
-            handler_id: std::sync::Arc::new(handler_id),
-            handler_name: handler_name.to_string(),
+        let report = Report {
+            report_id,
+            handler_id,
             function_name: function_name.to_string(),
             message: message.to_string(),
             details: None,
@@ -707,7 +819,7 @@ impl Context {
             tokens_consumed: 0,
             phase,
             success,
-            metadata: std::collections::HashMap::new(),
+            metadata: HashMap::new(),
         };
 
         self.add_report(report);
@@ -719,22 +831,21 @@ impl Context {
         handler_name: &str,
         function_name: &str,
         level: ReportLevel,
-        phase: HandlerPhase,
+        phase: Phase,
         message: &str,
         success: bool,
         tokens_processed: usize,
         tokens_consumed: usize,
     ) {
-        let report_id = Id::get(&Id::gen_name(&format!(
+        let report_id = Id::get(&gen_name(&format!(
             "report_{}_{}",
             handler_name, function_name
         )));
         let handler_id = Id::get(handler_name);
 
-        let report = HandlerReport {
-            report_id: std::sync::Arc::new(report_id),
-            handler_id: std::sync::Arc::new(handler_id),
-            handler_name: handler_name.to_string(),
+        let report = Report {
+            report_id,
+            handler_id,
             function_name: function_name.to_string(),
             message: message.to_string(),
             details: None,
@@ -743,29 +854,29 @@ impl Context {
             tokens_consumed,
             phase,
             success,
-            metadata: std::collections::HashMap::new(),
+            metadata: HashMap::new(),
         };
 
         self.registry.add_report(report);
     }
 
     /// Get all handler reports from the registry
-    pub fn get_reports(&self) -> Vec<HandlerReport> {
+    pub fn get_reports(&self) -> Vec<Report> {
         self.registry.get_reports()
     }
 
     /// Get reports filtered by handler name
-    pub fn get_reports_by_handler(&self, handler_name: &str) -> Vec<HandlerReport> {
+    pub fn get_reports_by_handler(&self, handler_name: &str) -> Vec<Report> {
         self.registry.get_reports_by_handler(handler_name)
     }
 
     /// Get reports filtered by report level
-    pub fn get_reports_by_level(&self, level: &ReportLevel) -> Vec<HandlerReport> {
+    pub fn get_reports_by_level(&self, level: &ReportLevel) -> Vec<Report> {
         self.registry.get_reports_by_level(level)
     }
 
     /// Get reports filtered by handler phase
-    pub fn get_reports_by_phase(&self, phase: &HandlerPhase) -> Vec<HandlerReport> {
+    pub fn get_reports_by_phase(&self, phase: &Phase) -> Vec<Report> {
         self.registry.get_reports_by_phase(phase)
     }
 
@@ -776,7 +887,7 @@ impl Context {
     }
 
     /// Display reports using the new Range-based table system
-    fn display_reports_with_table(&self, reports: &[HandlerReport]) {
+    fn display_reports_with_table(&self, reports: &[Report]) {
         if reports.is_empty() {
             println!("No reports to display");
             return;
@@ -792,7 +903,7 @@ impl Context {
 
         // Add report data (limit to 20 for readability)
         for report in reports.iter().take(20) {
-            let handler_name = truncate_string(&report.handler_name, 19);
+            let handler_name = truncate_string(&report.handler_name(), 19);
             let status = if report.success { "✅" } else { "❌" };
             let function_name = truncate_string(&report.function_name, 15);
             let phase = format!("{}", report.phase);
@@ -827,7 +938,7 @@ impl Context {
     }
 
     /// Simple report display that doesn't require Context access
-    fn display_reports_simple(&self, reports: &[HandlerReport]) {
+    pub fn display_reports_simple(&self, reports: &[Report]) {
         if reports.is_empty() {
             println!("📚 No reports available");
             return;
@@ -841,11 +952,10 @@ impl Context {
         println!("✅ Success Rate: {:.1}%\n", success_rate);
 
         // Group by handler for cleaner display
-        let mut handler_groups: std::collections::HashMap<String, Vec<&HandlerReport>> =
-            std::collections::HashMap::new();
+        let mut handler_groups: HashMap<String, Vec<&Report>> = HashMap::new();
         for report in reports {
             handler_groups
-                .entry(report.handler_name.clone())
+                .entry(report.handler_name().to_string())
                 .or_default()
                 .push(report);
         }
@@ -888,7 +998,7 @@ impl Context {
     }
 
     /// Create and display a formatted table from reports using Range-based coordinates
-    fn display_reports_table_format(&self, reports: &[HandlerReport]) {
+    fn display_reports_table_format(&self, reports: &[Report]) {
         if reports.is_empty() {
             println!("📋 No reports available for table display\n");
             return;
@@ -920,16 +1030,13 @@ impl Context {
             return;
         }
 
-        let mut handler_counts: std::collections::HashMap<String, usize> =
-            std::collections::HashMap::new();
-        let mut phase_counts: std::collections::HashMap<HandlerPhase, usize> =
-            std::collections::HashMap::new();
-        let mut level_counts: std::collections::HashMap<ReportLevel, usize> =
-            std::collections::HashMap::new();
+        let mut handler_counts: HashMap<String, usize> = HashMap::new();
+        let mut phase_counts: HashMap<Phase, usize> = HashMap::new();
+        let mut level_counts: HashMap<ReportLevel, usize> = HashMap::new();
 
         for report in &reports {
             *handler_counts
-                .entry(report.handler_name.clone())
+                .entry(report.handler_name().to_string())
                 .or_insert(0) += 1;
             *phase_counts.entry(report.phase.clone()).or_insert(0) += 1;
             *level_counts.entry(report.level.clone()).or_insert(0) += 1;
@@ -1003,44 +1110,44 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 /// Comprehensive handler reporting structure for centralized debugging and statistics
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HandlerReport {
-    pub report_id: std::sync::Arc<Id>,
-    pub handler_id: std::sync::Arc<Id>,
-    pub handler_name: String,
+pub struct Report {
+    pub report_id: Id,
+    pub handler_id: Id,
     pub function_name: String,
     pub message: String,
     pub details: Option<String>,
     pub level: ReportLevel,
     pub tokens_processed: usize,
     pub tokens_consumed: usize,
-    pub phase: HandlerPhase,
+    pub phase: Phase,
     pub success: bool,
     pub metadata: HashMap<String, String>,
 }
 
-impl HandlerReport {
+impl Report {
     pub fn timestamp(&self) -> u128 {
         self.handler_id.timestamp()
     }
-
     pub fn report_id(&self) -> &Id {
         &self.report_id
+    }
+    pub fn report_name(&self) -> String {
+        self.report_id.name()
     }
 
     pub fn handler_id(&self) -> &Id {
         &self.handler_id
     }
-
-    pub fn handler_name(&self) -> &str {
-        &self.handler_name
+    pub fn handler_name(&self) -> String {
+        self.handler_id.name()
     }
 
-    pub fn function_name(&self) -> &str {
-        &self.function_name
+    pub fn function_name(&self) -> String {
+        self.function_name.clone()
     }
 
-    pub fn message(&self) -> &str {
-        &self.message
+    pub fn message(&self) -> String {
+        self.message.clone()
     }
 
     pub fn level(&self) -> &ReportLevel {
@@ -1055,7 +1162,7 @@ impl HandlerReport {
         self.tokens_consumed
     }
 
-    pub fn phase(&self) -> &HandlerPhase {
+    pub fn phase(&self) -> &Phase {
         &self.phase
     }
 
@@ -1068,27 +1175,32 @@ impl HandlerReport {
     }
 }
 
-impl PartialOrd for HandlerReport {
+impl PartialOrd for Report {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl Ord for HandlerReport {
+impl Ord for Report {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.handler_id
-            .cmp(&other.handler_id)
+        self.report_id
+            .cmp(&other.report_id)
+            .then_with(|| self.handler_id.cmp(&other.handler_id))
             .then_with(|| self.phase.cmp(&other.phase))
             .then_with(|| self.tokens_processed.cmp(&other.tokens_processed))
             .then_with(|| self.level.cmp(&other.level))
-            .then_with(|| self.handler_name.cmp(&other.handler_name))
+            .then_with(|| self.function_name.cmp(&other.function_name))
+            .then_with(|| self.message.cmp(&other.message))
+            .then_with(|| self.success.cmp(&other.success))
+            .then_with(|| self.metadata.values().cmp(other.metadata.values()))
+            .then_with(|| self.metadata.keys().cmp(other.metadata.keys()))
     }
 }
 
-impl Hash for HandlerReport {
+impl Hash for Report {
     fn hash<H: Hasher>(&self, state: &mut H) {
+        self.report_id.hash(state);
         self.handler_id.hash(state);
-        self.handler_name.hash(state);
         self.function_name.hash(state);
         self.message.hash(state);
         self.level.hash(state);
@@ -1102,7 +1214,7 @@ impl Hash for HandlerReport {
         }
     }
 }
-impl std::fmt::Display for HandlerReport {
+impl Display for Report {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -1118,28 +1230,28 @@ impl std::fmt::Display for HandlerReport {
 
 /// Handler processing phases
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum HandlerPhase {
-    Initialize,
-    Process,
-    Handle,
-    Extract,
-    Convert,
-    Report,
-    Result,
-    Redirect,
+pub enum Phase {
+    Initialize(Option<String>),
+    Analyze(Option<String>),
+    Process(Option<String>),
+    Extract(Option<String>),
+    Convert(Option<String>),
+    Report(Option<String>),
+    Result(Option<String>),
+    Redirect(Option<String>),
 }
 
-impl std::fmt::Display for HandlerPhase {
+impl std::fmt::Display for Phase {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            HandlerPhase::Initialize => write!(f, "INITIALIZE"),
-            HandlerPhase::Process => write!(f, "PROCESS"),
-            HandlerPhase::Handle => write!(f, "HANDLE"),
-            HandlerPhase::Extract => write!(f, "EXTRACT"),
-            HandlerPhase::Convert => write!(f, "CONVERT"),
-            HandlerPhase::Report => write!(f, "REPORT"),
-            HandlerPhase::Result => write!(f, "RESULT"),
-            HandlerPhase::Redirect => write!(f, "REDIRECT"),
+            Phase::Initialize(s) => write!(f, "INITIALIZE: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Analyze(s) => write!(f, "ANALYZE: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Process(s) => write!(f, "PROCESS: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Extract(s) => write!(f, "EXTRACT: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Convert(s) => write!(f, "CONVERT: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Report(s) => write!(f, "REPORT: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Result(s) => write!(f, "RESULT: {}", s.clone().unwrap_or("".to_string())),
+            Phase::Redirect(s) => write!(f, "REDIRECT: {}", s.clone().unwrap_or("".to_string())),
         }
     }
 }
@@ -1148,8 +1260,8 @@ impl std::fmt::Display for HandlerPhase {
 /// This allows redirect functions to queue up handler calls without direct function access
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct HandlerRedirect {
-    pub source_handler: String,
-    pub target_handler: String,
+    pub source_handler_id: Id,
+    pub target_handler_id: Id,
     pub directive_type: String,
     pub tokens: Vec<Token>,
     pub original_result: String, // Serialized HandlerResult for later processing
@@ -1158,41 +1270,45 @@ pub struct HandlerRedirect {
 
 impl HandlerRedirect {
     pub fn new(
-        source_handler: String,
-        target_handler: String,
+        source_handler_id: Id,
+        target_handler_id: Id,
         directive_type: String,
         tokens: Vec<Token>,
         original_result: String,
     ) -> Self {
         Self {
-            source_handler,
-            target_handler,
+            source_handler_id,
+            target_handler_id,
             directive_type,
             tokens,
             original_result,
-            timestamp: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_nanos(),
+            timestamp: time!(),
         }
     }
     pub fn timestamp(&self) -> u128 {
         self.timestamp.clone()
     }
-    pub fn source_handler(&self) -> &str {
-        &self.source_handler
+    pub fn source_handler_id(&self) -> Id {
+        self.source_handler_id.clone()
     }
-    pub fn target_handler(&self) -> &str {
-        &self.target_handler
+
+    pub fn source_handler_name(&self) -> String {
+        self.source_handler_id.name()
     }
-    pub fn directive_type(&self) -> &str {
-        &self.directive_type
+    pub fn target_handler_name(&self) -> String {
+        self.target_handler_id.name()
     }
-    pub fn tokens(&self) -> &Vec<crate::Token> {
-        &self.tokens
+    pub fn target_handler_id(&self) -> Id {
+        self.target_handler_id.clone()
     }
-    pub fn original_result(&self) -> &str {
-        &self.original_result
+    pub fn directive_type(&self) -> String {
+        self.directive_type.clone()
+    }
+    pub fn tokens(&self) -> Vec<Token> {
+        self.tokens.clone()
+    }
+    pub fn original_result(&self) -> String {
+        self.original_result.clone()
     }
 }
 
@@ -1201,33 +1317,26 @@ impl std::fmt::Display for HandlerRedirect {
         write!(
             f,
             "Redirect({} -> {} | {} | {} tokens)",
-            self.source_handler(),
-            self.target_handler(),
+            self.source_handler_id(),
+            self.target_handler_id(),
             self.directive_type(),
             self.tokens().len().to_string()
         )
     }
 }
 
-impl HandlerReport {
+impl Report {
     pub fn new(
-        report_name: &str,
-        handler_id: std::sync::Arc<Id>,
-        handler_name: String,
+        report_id: Id,
+        handler_id: Option<Id>,
         function_name: String,
         message: String,
         level: ReportLevel,
-        phase: HandlerPhase,
+        phase: Phase,
     ) -> Self {
-        let timestamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-
-        HandlerReport {
-            report_id: std::sync::Arc::new(Id::get(report_name)),
-            handler_id,
-            handler_name,
+        Report {
+            report_id,
+            handler_id: handler_id.unwrap_or_else(|| Id::get("unknown")),
             function_name,
             message,
             details: None,

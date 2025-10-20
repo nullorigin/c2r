@@ -56,10 +56,7 @@ impl Coords {
     }
 
     /// Create a coordinate from multiple ranges (automatically sets to Custom shape)
-    pub fn from_multiple_ranges(
-        x_ranges: Vec<Range<usize>>,
-        y_ranges: Vec<Range<usize>>,
-    ) -> Self {
+    pub fn from_multiple_ranges(x_ranges: Vec<Range<usize>>, y_ranges: Vec<Range<usize>>) -> Self {
         Self {
             x_ranges,
             y_ranges,
@@ -73,31 +70,31 @@ impl Coords {
     pub fn point(x: usize, y: usize) -> Self {
         Self::new(Self::x_point(x), Self::y_point(y))
     }
-    
+
     /// Create a renderable dot (single unit for display)
     pub fn dot(x: usize, y: usize) -> Self {
-        Self::new(x..x+1, y..y+1)
+        Self::new(x..x + 1, y..y + 1)
     }
-    
+
     /// Create a single-dot x range (for shape point coordinates)
     /// Creates coord..coord+1 range representing a single unit at that position
     pub fn x_dot(coord: usize) -> Range<usize> {
-        coord..coord+1
+        coord..coord + 1
     }
-    
+
     /// Create a single-dot y range (for shape point coordinates)
     /// Creates coord..coord+1 range representing a single unit at that position
     pub fn y_dot(coord: usize) -> Range<usize> {
-        coord..coord+1
+        coord..coord + 1
     }
-    
+
     /// Create an empty x range at a specific point (coord..coord)
     /// Useful for mathematical point representations in shapes
     pub fn x_point(coord: usize) -> Range<usize> {
         coord..coord
     }
-    
-    /// Create an empty y range at a specific point (coord..coord) 
+
+    /// Create an empty y range at a specific point (coord..coord)
     /// Useful for mathematical point representations in shapes
     pub fn y_point(coord: usize) -> Range<usize> {
         coord..coord
@@ -239,28 +236,31 @@ impl Coords {
             ShapeType::Circle => {
                 let (center_x, center_y) = self.center();
                 let radius = self.total_width().min(self.total_height()) / 2;
-                
+
                 let dx = x as f64 - center_x as f64;
                 let dy = y as f64 - center_y as f64;
                 (dx * dx + dy * dy) <= (radius * radius) as f64
             }
             ShapeType::Triangle => {
                 let bounds = self.get_bounds();
-                let (x1, y1) = (bounds.0.start, bounds.1.end);  // bottom-left
-                let (x2, y2) = (bounds.0.end, bounds.1.end);    // bottom-right
+                let (x1, y1) = (bounds.0.start, bounds.1.end); // bottom-left
+                let (x2, y2) = (bounds.0.end, bounds.1.end); // bottom-right
                 let (x3, y3) = ((bounds.0.start + bounds.0.end) / 2, bounds.1.start); // top-center
-                
+
                 // Use barycentric coordinates to check if point is inside triangle
                 let denom = (y2 - y3) * (x1 - x3) + (x3 - x2) * (y1 - y3);
-                if denom == 0 { return false; } // degenerate triangle
-                
+                if denom == 0 {
+                    return false;
+                } // degenerate triangle
+
                 let a = ((y2 - y3) * (x - x3) + (x3 - x2) * (y - y3)) as f64 / denom as f64;
                 let b = ((y3 - y1) * (x - x3) + (x1 - x3) * (y - y3)) as f64 / denom as f64;
                 let c = 1.0 - a - b;
-                
+
                 a >= 0.0 && b >= 0.0 && c >= 0.0
             }
-            _ => self.x_ranges
+            _ => self
+                .x_ranges
                 .iter()
                 .zip(&self.y_ranges)
                 .any(|(x_range, y_range)| x_range.contains(&x) && y_range.contains(&y)),
@@ -277,7 +277,7 @@ impl Coords {
         let max_x = self.x_ranges.iter().map(|r| r.end).max().unwrap_or(0);
         let min_y = self.y_ranges.iter().map(|r| r.start).min().unwrap_or(0);
         let max_y = self.y_ranges.iter().map(|r| r.end).max().unwrap_or(0);
-        
+
         (min_x..max_x, min_y..max_y)
     }
 
@@ -323,7 +323,7 @@ impl Coords {
                 if x_bound.is_empty() || y_bound.is_empty() {
                     return points;
                 }
-                
+
                 let start_x = x_bound.start;
                 let start_y = y_bound.start;
                 let end_x = x_bound.end.saturating_sub(1);
@@ -484,27 +484,24 @@ impl Coords {
 
     /// Create a union of this coordinate with another
     pub fn union(&self, other: &Coords) -> Coords {
-        let mut result = Coords::from_multiple_ranges(
-            self.x_ranges.clone(),
-            self.y_ranges.clone(),
-        );
-        
+        let mut result = Coords::from_multiple_ranges(self.x_ranges.clone(), self.y_ranges.clone());
+
         for (x_range, y_range) in other.x_ranges.iter().zip(&other.y_ranges) {
             result.add_range(x_range.clone(), y_range.clone());
         }
-        
+
         result
     }
 
     /// Create intersection of this coordinate with another
     pub fn intersection(&self, other: &Coords) -> Option<Coords> {
         let (self_bounds, other_bounds) = (self.get_bounds(), other.get_bounds());
-        
+
         let x_start = self_bounds.0.start.max(other_bounds.0.start);
         let x_end = self_bounds.0.end.min(other_bounds.0.end);
         let y_start = self_bounds.1.start.max(other_bounds.1.start);
         let y_end = self_bounds.1.end.min(other_bounds.1.end);
-        
+
         if x_start < x_end && y_start < y_end {
             Some(Coords::new(x_start..x_end, y_start..y_end))
         } else {
@@ -515,7 +512,7 @@ impl Coords {
     /// Check if this coordinate completely contains another
     pub fn contains(&self, other: &Coords) -> bool {
         let (self_bounds, other_bounds) = (self.get_bounds(), other.get_bounds());
-        
+
         self_bounds.0.start <= other_bounds.0.start
             && self_bounds.0.end >= other_bounds.0.end
             && self_bounds.1.start <= other_bounds.1.start
@@ -524,12 +521,14 @@ impl Coords {
 
     /// Expand the coordinate by a given margin in all directions
     pub fn expand(&mut self, margin: usize) {
-        self.x_ranges = self.x_ranges
+        self.x_ranges = self
+            .x_ranges
             .iter()
             .map(|r| r.start.saturating_sub(margin)..r.end + margin)
             .collect();
-        
-        self.y_ranges = self.y_ranges
+
+        self.y_ranges = self
+            .y_ranges
             .iter()
             .map(|r| r.start.saturating_sub(margin)..r.end + margin)
             .collect();
@@ -537,7 +536,8 @@ impl Coords {
 
     /// Shrink the coordinate by a given margin from all directions
     pub fn shrink(&mut self, margin: usize) {
-        self.x_ranges = self.x_ranges
+        self.x_ranges = self
+            .x_ranges
             .iter()
             .filter_map(|r| {
                 let new_start = r.start + margin;
@@ -549,8 +549,9 @@ impl Coords {
                 }
             })
             .collect();
-        
-        self.y_ranges = self.y_ranges
+
+        self.y_ranges = self
+            .y_ranges
             .iter()
             .filter_map(|r| {
                 let new_start = r.start + margin;
@@ -626,7 +627,8 @@ impl Table {
         if self.cells.is_empty() {
             0
         } else {
-            self.cells.keys()
+            self.cells
+                .keys()
                 .map(|coord| coord.get_bounds().1.end) // y coordinate = row
                 .max()
                 .unwrap_or(0)
@@ -650,7 +652,7 @@ impl Table {
     }
 
     pub fn name(&self) -> String {
-        self.id.name.to_string()
+        self.id.name()
     }
 
     pub fn id(&self) -> Id {
@@ -779,9 +781,10 @@ impl Table {
 
     pub fn contains_cell_global(&self, global_row: usize, global_col: usize) -> bool {
         self.global_to_local(global_row, global_col)
-            .map_or(false, |(local_row, local_col)| self.contains_cell(local_row, local_col))
+            .map_or(false, |(local_row, local_col)| {
+                self.contains_cell(local_row, local_col)
+            })
     }
-
 
     pub fn local_to_global(&self, row: usize, col: usize) -> (usize, usize) {
         (row + self.row_offset, col + self.column_offset)
@@ -791,13 +794,16 @@ impl Table {
         let (col_range, row_range) = coord.get_bounds();
         Coords::new(
             (col_range.start + self.column_offset)..(col_range.end + self.column_offset),
-            (row_range.start + self.row_offset)..(row_range.end + self.row_offset)
+            (row_range.start + self.row_offset)..(row_range.end + self.row_offset),
         )
     }
 
     pub fn global_to_local(&self, global_row: usize, global_col: usize) -> Option<(usize, usize)> {
         if global_row >= self.row_offset && global_col >= self.column_offset {
-            Some((global_row - self.row_offset, global_col - self.column_offset))
+            Some((
+                global_row - self.row_offset,
+                global_col - self.column_offset,
+            ))
         } else {
             None
         }
@@ -805,11 +811,11 @@ impl Table {
 
     pub fn global_coord_to_local(&self, global_coord: &Coords) -> Option<Coords> {
         let (col_range, row_range) = global_coord.get_bounds();
-        
+
         if row_range.start >= self.row_offset && col_range.start >= self.column_offset {
             Some(Coords::new(
                 (col_range.start - self.column_offset)..(col_range.end - self.column_offset),
-                (row_range.start - self.row_offset)..(row_range.end - self.row_offset)
+                (row_range.start - self.row_offset)..(row_range.end - self.row_offset),
             ))
         } else {
             None
@@ -827,12 +833,16 @@ impl Table {
 
     pub fn is_within_global_bounds(&self, global_row: usize, global_col: usize) -> bool {
         self.global_to_local(global_row, global_col)
-            .map_or(false, |(local_row, local_col)| self.is_within_bounds(local_row, local_col))
+            .map_or(false, |(local_row, local_col)| {
+                self.is_within_bounds(local_row, local_col)
+            })
     }
 
     pub fn is_global_coord_within_bounds(&self, global_coord: &Coords) -> bool {
         self.global_coord_to_local(global_coord)
-            .map_or(false, |local_coord| self.is_coord_within_bounds(&local_coord))
+            .map_or(false, |local_coord| {
+                self.is_coord_within_bounds(&local_coord)
+            })
     }
 
     pub fn clear_cells(&mut self) {
@@ -863,11 +873,12 @@ impl Table {
         }
 
         // Find the maximum bounds from all cells
-        let (max_col, max_row) = self.cells.keys()
-            .map(|coord| coord.get_bounds())
-            .fold((0, 0), |(max_col, max_row), (col_range, row_range)| {
+        let (max_col, max_row) = self.cells.keys().map(|coord| coord.get_bounds()).fold(
+            (0, 0),
+            |(max_col, max_row), (col_range, row_range)| {
                 (max_col.max(col_range.end), max_row.max(row_range.end))
-            });
+            },
+        );
 
         // Ensure minimum dimensions of 1x1
         self.rows = max_row.max(1);
@@ -895,7 +906,7 @@ impl Table {
 
     fn auto_resize_for_coord(&mut self, coord: &Coords) {
         let (col_range, row_range) = coord.get_bounds();
-        
+
         if row_range.end > self.rows {
             self.rows = row_range.end;
         }
@@ -912,15 +923,16 @@ impl Table {
             return;
         }
 
-        let (max_col, max_row) = self.cells.keys()
-            .map(|coord| coord.get_bounds())
-            .fold((0, 0), |(max_col, max_row), (col_range, row_range)| {
+        let (max_col, max_row) = self.cells.keys().map(|coord| coord.get_bounds()).fold(
+            (0, 0),
+            |(max_col, max_row), (col_range, row_range)| {
                 (max_col.max(col_range.end), max_row.max(row_range.end))
-            });
+            },
+        );
 
         self.rows = max_row;
         self.columns = max_col;
-        
+
         self.coords.clear();
         self.coords.extend(self.cells.keys().cloned());
     }
@@ -934,7 +946,8 @@ impl Table {
     pub fn add_header(&mut self, headers: Vec<&str>) {
         for (col, header) in headers.iter().enumerate() {
             let coord = Coords::dot(col, 0); // x=col, y=row - use dot for header display
-            let mut cell = TableCell::new_with_coords(0, col, &format!("header_{}", col), coord.clone());
+            let mut cell =
+                TableCell::new_with_coords(0, col, &format!("header_{}", col), coord.clone());
             cell.add_entry(Entry::Str(header.to_string()));
             // Header cell added successfully
             self.set_cell_by_coord(coord, cell);
@@ -953,7 +966,12 @@ impl Table {
 
         for (col, entry) in row_data.iter().enumerate() {
             let coord = Coords::dot(col, row_idx); // x=col, y=row - use dot for cell display
-            let mut cell = TableCell::new_with_coords(row_idx, col, &format!("cell_{}_{}", row_idx, col), coord.clone());
+            let mut cell = TableCell::new_with_coords(
+                row_idx,
+                col,
+                &format!("cell_{}_{}", row_idx, col),
+                coord.clone(),
+            );
             cell.add_entry(entry.clone());
             self.set_cell_by_coord(coord, cell);
         }
@@ -966,7 +984,8 @@ impl Table {
             0
         } else {
             // Find the maximum row end from all cells (y coordinate = row)
-            self.cells.keys()
+            self.cells
+                .keys()
                 .map(|coord| coord.get_bounds().1.end) // y coordinate = row
                 .max()
                 .unwrap_or(0)
@@ -977,14 +996,14 @@ impl Table {
     fn calculate_column_widths(&self) -> Vec<usize> {
         const MIN_COLUMN_WIDTH: usize = 8;
         const COLUMN_PADDING: usize = 2;
-        
+
         let mut widths = vec![MIN_COLUMN_WIDTH; self.columns];
 
         // Calculate content-based widths
         for (coord, cell) in &self.cells {
             let content_width = Self::calculate_display_width(&cell.display_content());
             let (col_range, _) = coord.get_bounds();
-            
+
             for col in col_range {
                 if col < widths.len() {
                     widths[col] = widths[col].max(content_width + COLUMN_PADDING);
@@ -994,7 +1013,7 @@ impl Table {
 
         // Ensure table is wide enough for title
         self.adjust_widths_for_title(&mut widths);
-        
+
         widths
     }
 
@@ -1006,7 +1025,7 @@ impl Table {
             self.content_rows(),
             self.columns
         );
-        
+
         let title_width = Self::calculate_display_width(&title);
         let border_width = self.columns + 1;
         let current_content_width: usize = widths.iter().sum();
@@ -1029,21 +1048,23 @@ impl Table {
 
     /// Calculate actual terminal display width for text with Unicode characters
     fn calculate_display_width(text: &str) -> usize {
-        text.chars().map(|c| {
-            match c {
-                // Check for ✅ and ❌ specifically
-                '✅' | '❌' => 2, // These are often wide in terminals
-                
-                // Zero-width characters
-                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => 0,
-                
-                // Most ASCII and basic characters
-                c if c.is_ascii() => 1,
-                
-                // For other Unicode, assume width 1 unless we know it's wide
-                _ => 1
-            }
-        }).sum()
+        text.chars()
+            .map(|c| {
+                match c {
+                    // Check for ✅ and ❌ specifically
+                    '✅' | '❌' => 2, // These are often wide in terminals
+
+                    // Zero-width characters
+                    '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{feff}' => 0,
+
+                    // Most ASCII and basic characters
+                    c if c.is_ascii() => 1,
+
+                    // For other Unicode, assume width 1 unless we know it's wide
+                    _ => 1,
+                }
+            })
+            .sum()
     }
 
     /// Format content with proper justification and padding
@@ -1053,7 +1074,7 @@ impl Table {
         justification: &Justification,
     ) -> String {
         let content_width = Self::calculate_display_width(content);
-        
+
         // Ensure we don't exceed total_width
         if content_width >= total_width {
             return if content_width == total_width {
@@ -1063,12 +1084,12 @@ impl Table {
                 content.chars().take(total_width).collect()
             };
         }
-        
+
         // Calculate padding to fill total_width exactly
         let total_padding = total_width - content_width;
-        
+
         let mut result = String::with_capacity(total_width * 4); // Extra capacity for Unicode
-        
+
         match justification {
             Justification::Left => {
                 result.push(' '); // 1 space left padding
@@ -1092,7 +1113,7 @@ impl Table {
                 result.push(' '); // 1 space right padding
             }
         }
-        
+
         // Verify we have exactly the right display width
         let actual_width = Self::calculate_display_width(&result);
         if actual_width != total_width {
@@ -1103,7 +1124,7 @@ impl Table {
                 result = result.chars().take(total_width).collect();
             }
         }
-        
+
         result
     }
 
@@ -1136,7 +1157,7 @@ impl Table {
         } else {
             String::new()
         };
-        
+
         let title = format!(
             "Table: {} ({} rows × {} cols){}",
             self.name(),
@@ -1144,13 +1165,13 @@ impl Table {
             self.columns,
             coord_info
         );
-        
+
         let title_char_width = title.chars().count();
         let available_width = total_width.saturating_sub(2);
         let total_padding = available_width.saturating_sub(title_char_width);
         let left_padding = total_padding / 2;
         let right_padding = total_padding - left_padding;
-        
+
         output.push('│');
         output.push_str(&" ".repeat(left_padding));
         output.push_str(&title);
@@ -1179,13 +1200,10 @@ impl Table {
                     (String::new(), &Justification::Left)
                 };
 
-                let formatted_cell = Self::format_content_with_justification(
-                    &content,
-                    widths[col],
-                    justification,
-                );
+                let formatted_cell =
+                    Self::format_content_with_justification(&content, widths[col], justification);
                 output.push_str(&formatted_cell);
-                
+
                 if col < self.columns - 1 {
                     output.push('│');
                 }
@@ -1408,9 +1426,11 @@ impl TableCell {
             (Some(coords1), Some(coords2)) => {
                 let (col_range1, row_range1) = coords1.get_bounds();
                 let (col_range2, row_range2) = coords2.get_bounds();
-                
-                row_range1.start < row_range2.end && row_range2.start < row_range1.end &&
-                col_range1.start < col_range2.end && col_range2.start < col_range1.end
+
+                row_range1.start < row_range2.end
+                    && row_range2.start < row_range1.end
+                    && col_range1.start < col_range2.end
+                    && col_range2.start < col_range1.end
             }
             _ => false,
         }
@@ -1493,8 +1513,8 @@ impl TableCell {
         &mut self.entries
     }
 
-    pub fn name(&self) -> &str {
-        self.id.name.as_str()
+    pub fn name(&self) -> String {
+        self.id.name()
     }
 
     pub fn id(&self) -> Id {

@@ -1,23 +1,23 @@
 pub mod generator;
-pub mod parsing;
-pub mod value;
+pub mod key;
+pub mod macros;
+pub mod node;
 pub mod num;
 pub mod obj;
-pub mod key;
+pub mod parsing;
 pub mod short;
-pub mod node;
-pub mod macros;
+pub mod value;
 pub use crate::implement;
 pub use crate::implement_eq;
 
 pub use crate::json::generator::*;
-pub use crate::json::parsing::*;
-pub use crate::json::obj::*;
-pub use crate::json::value::*;
-pub use crate::json::num::*;
 pub use crate::json::key::*;
-pub use crate::json::short::*;
 pub use crate::json::node::*;
+pub use crate::json::num::*;
+pub use crate::json::obj::*;
+pub use crate::json::parsing::*;
+pub use crate::json::short::*;
+pub use crate::json::value::*;
 
 implement!(String, String);
 implement!(Number, isize as num);
@@ -35,11 +35,6 @@ implement!(Number, f64 as num);
 implement!(Number, Number);
 implement!(Object, Object);
 implement!(Boolean, bool);
-
-
-
-
-
 
 // From: https://github.com/dtolnay/fastwrite/blob/master/src/lib.rs#L68
 //
@@ -64,15 +59,4 @@ fn extend_from_slice(dst: &mut Vec<u8>, src: &[u8]) {
     }
 }
 
-
-
-
-
 pub const KEY_BUF_LEN: usize = 32;
-
-
-
-
-
-
-

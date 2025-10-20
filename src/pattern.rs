@@ -1,12 +1,13 @@
-use crate::json::Value;
-use crate::{context, error, object, report, warn}; // Adaptivizer functionality moved to handler::Handlizer
-use crate::convert::{is_c_keyword, is_type_token};
-use crate::Context;
-use crate::{debug, info};
+use crate::common::is_c_keyword;
 use crate::entry::Entry;
 use crate::error::{C2RError, Kind, Reason, Result};
+use crate::json::Value;
 use crate::lock::Id;
+// Adaptivizer functionality moved to handler::Handlizer
+use crate::Context;
 use crate::Token;
+use crate::{debug, info};
+use crate::{error, object, report, warn};
 use core::clone::Clone;
 use core::option::Option::{self, None, Some};
 use core::result::Result::Ok;
@@ -14,38 +15,277 @@ use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
+
+// ===== TYPE CONVERSION SYSTEM WITH METADATA =====
+
+/// Category classification for C types
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeCategory {
+    BasicInteger,
+    BasicFloat,
+    FixedWidthInteger,
+    SizeType,
+    SystemType,
+    PointerType,
+    StorageQualifier,
+}
+
+/// Metadata for type conversions with scoring weights
+#[derive(Debug, Clone)]
+pub struct TypeMetadata {
+    pub c_type: String,
+    pub rust_type: String,
+    pub category: TypeCategory,
+    pub score_weight: f64,
+    pub is_signed: bool,
+    pub is_pointer: bool,
+}
+
+impl TypeMetadata {
+    pub fn new(
+        c_type: &str,
+        rust_type: &str,
+        category: TypeCategory,
+        score_weight: f64,
+        is_signed: bool,
+    ) -> Self {
+        Self {
+            c_type: c_type.to_string(),
+            rust_type: rust_type.to_string(),
+            category,
+            score_weight,
+            is_signed,
+            is_pointer: false,
+        }
+    }
+
+    pub fn pointer(mut self) -> Self {
+        self.is_pointer = true;
+        self
+    }
+}
+
+/// Enhanced type conversion map with metadata and scoring
+pub struct TypeConversionMap {
+    /// C type string -> Rust type string
+    pub type_map: HashMap<String, String>,
+    /// C type string -> TypeMetadata
+    pub metadata_map: HashMap<String, TypeMetadata>,
+    /// Category -> list of C types in that category
+    pub category_index: HashMap<TypeCategory, Vec<String>>,
+}
+
+impl TypeConversionMap {
+    /// Check if a string is a known C type
+    pub fn is_c_type(&self, type_str: &str) -> bool {
+        self.type_map.contains_key(type_str)
+    }
+
+    /// Convert a C type to its Rust equivalent
+    pub fn convert_type(&self, c_type: &str) -> Option<String> {
+        self.type_map.get(c_type).cloned()
+    }
+
+    /// Get metadata for a C type
+    pub fn get_metadata(&self, c_type: &str) -> Option<&TypeMetadata> {
+        self.metadata_map.get(c_type)
+    }
+
+    /// Get all C types in a specific category
+    pub fn get_types_by_category(&self, category: TypeCategory) -> Vec<String> {
+        self.category_index
+            .get(&category)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Calculate type score for tokens (for pattern matching)
+    pub fn calculate_type_score(&self, tokens: &[Token]) -> f64 {
+        let mut score = 0.0;
+        for token in tokens {
+            let token_str = token.to_string();
+            if let Some(metadata) = self.get_metadata(&token_str) {
+                score += metadata.score_weight;
+            }
+        }
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Check if tokens contain storage qualifiers
+    pub fn has_storage_qualifier(&self, tokens: &[Token]) -> bool {
+        tokens.iter().any(|token| {
+            let token_str = token.to_string();
+            self.get_metadata(&token_str)
+                .map(|m| m.category == TypeCategory::StorageQualifier)
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// Global type conversion map (lazy initialized)
+pub static TYPE_CONVERSION_MAP: LazyLock<TypeConversionMap> = LazyLock::new(|| {
+    let mut type_map = HashMap::new();
+    let mut metadata_map = HashMap::new();
+    let mut category_index: HashMap<TypeCategory, Vec<String>> = HashMap::new();
+
+    // Helper macro to add type with metadata
+    macro_rules! add_type {
+        ($c_type:expr, $rust_type:expr, $category:expr, $weight:expr, $signed:expr) => {
+            type_map.insert($c_type.to_string(), $rust_type.to_string());
+            let metadata = TypeMetadata::new($c_type, $rust_type, $category, $weight, $signed);
+            metadata_map.insert($c_type.to_string(), metadata);
+            category_index
+                .entry($category)
+                .or_insert_with(Vec::new)
+                .push($c_type.to_string());
+        };
+    }
+
+    // Basic C types (high scoring weight)
+    add_type!("bool", "bool", TypeCategory::BasicInteger, 0.35, false);
+    add_type!("_Bool", "bool", TypeCategory::BasicInteger, 0.35, false);
+    add_type!("char", "i8", TypeCategory::BasicInteger, 0.35, true);
+    add_type!("short", "i16", TypeCategory::BasicInteger, 0.35, true);
+    add_type!("int", "i32", TypeCategory::BasicInteger, 0.35, true);
+    add_type!("long", "i64", TypeCategory::BasicInteger, 0.35, true);
+    add_type!("long long", "i64", TypeCategory::BasicInteger, 0.35, true);
+    add_type!("float", "f32", TypeCategory::BasicFloat, 0.35, true);
+    add_type!("double", "f64", TypeCategory::BasicFloat, 0.35, true);
+    add_type!("void", "()", TypeCategory::BasicInteger, 0.30, false);
+
+    // Unsigned types
+    add_type!("unsigned char", "u8", TypeCategory::BasicInteger, 0.35, false);
+    add_type!("unsigned short", "u16", TypeCategory::BasicInteger, 0.35, false);
+    add_type!("unsigned int", "u32", TypeCategory::BasicInteger, 0.35, false);
+    add_type!("unsigned long", "u64", TypeCategory::BasicInteger, 0.35, false);
+    add_type!("unsigned long long", "u64", TypeCategory::BasicInteger, 0.35, false);
+
+    // Size types (medium-high scoring weight)
+    add_type!("size_t", "usize", TypeCategory::SizeType, 0.35, false);
+    add_type!("ssize_t", "isize", TypeCategory::SizeType, 0.35, true);
+    add_type!("ptrdiff_t", "isize", TypeCategory::SizeType, 0.35, true);
+    add_type!("intptr_t", "isize", TypeCategory::SizeType, 0.35, true);
+    add_type!("uintptr_t", "usize", TypeCategory::SizeType, 0.35, false);
+
+    // Fixed-width integer types (medium-high scoring weight)
+    add_type!("int8_t", "i8", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int16_t", "i16", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int32_t", "i32", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int64_t", "i64", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("uint8_t", "u8", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint16_t", "u16", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint32_t", "u32", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint64_t", "u64", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("intmax_t", "i64", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("uintmax_t", "u64", TypeCategory::FixedWidthInteger, 0.35, false);
+
+    // Fast integer types
+    add_type!("int_fast8_t", "i8", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int_fast16_t", "i16", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int_fast32_t", "i32", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int_fast64_t", "i64", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("uint_fast8_t", "u8", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint_fast16_t", "u16", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint_fast32_t", "u32", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint_fast64_t", "u64", TypeCategory::FixedWidthInteger, 0.35, false);
+
+    // Least integer types
+    add_type!("int_least8_t", "i8", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int_least16_t", "i16", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int_least32_t", "i32", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("int_least64_t", "i64", TypeCategory::FixedWidthInteger, 0.35, true);
+    add_type!("uint_least8_t", "u8", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint_least16_t", "u16", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint_least32_t", "u32", TypeCategory::FixedWidthInteger, 0.35, false);
+    add_type!("uint_least64_t", "u64", TypeCategory::FixedWidthInteger, 0.35, false);
+
+    // Storage qualifiers (lower scoring weight)
+    add_type!("static", "static", TypeCategory::StorageQualifier, 0.15, false);
+    add_type!("const", "const", TypeCategory::StorageQualifier, 0.15, false);
+    add_type!("extern", "extern", TypeCategory::StorageQualifier, 0.15, false);
+    add_type!("register", "register", TypeCategory::StorageQualifier, 0.15, false);
+    add_type!("auto", "auto", TypeCategory::StorageQualifier, 0.15, false);
+    add_type!("volatile", "volatile", TypeCategory::StorageQualifier, 0.15, false);
+
+    // Common C library types (medium scoring weight)
+    add_type!("FILE", "libc::FILE", TypeCategory::SystemType, 0.30, false);
+    add_type!("DIR", "libc::DIR", TypeCategory::SystemType, 0.30, false);
+    add_type!("time_t", "libc::time_t", TypeCategory::SystemType, 0.30, false);
+    add_type!("clock_t", "libc::clock_t", TypeCategory::SystemType, 0.30, false);
+    add_type!("tm", "libc::tm", TypeCategory::SystemType, 0.30, false);
+    add_type!("timespec", "libc::timespec", TypeCategory::SystemType, 0.30, false);
+    add_type!("timeval", "libc::timeval", TypeCategory::SystemType, 0.30, false);
+    add_type!("va_list", "libc::va_list", TypeCategory::SystemType, 0.30, false);
+    add_type!("pthread_t", "libc::pthread_t", TypeCategory::SystemType, 0.30, false);
+    add_type!("pthread_mutex_t", "libc::pthread_mutex_t", TypeCategory::SystemType, 0.30, false);
+    add_type!("pthread_cond_t", "libc::pthread_cond_t", TypeCategory::SystemType, 0.30, false);
+
+    // Generate pointer variants
+    let base_types: Vec<(String, String)> = type_map.iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    for (c_type, rust_type) in &base_types {
+        // Single pointer
+        type_map.insert(format!("{}*", c_type), format!("*mut {}", rust_type));
+        type_map.insert(format!("const {}*", c_type), format!("*const {}", rust_type));
+
+        // Double pointer
+        type_map.insert(format!("{}**", c_type), format!("*mut *mut {}", rust_type));
+        type_map.insert(format!("const {}**", c_type), format!("*const *const {}", rust_type));
+    }
+
+    // Generate array variants (including pointer arrays like char*[])
+    // Arrays in function parameters decay to pointers in C
+    for (c_type, rust_type) in &base_types {
+        // Unknown size array: type[] -> *mut type (in parameters, arrays decay to pointers)
+        type_map.insert(format!("{}[]", c_type), format!("*mut {}", rust_type));
+        type_map.insert(format!("const {}[]", c_type), format!("*const {}", rust_type));
+
+        // Pointer array: type*[] -> *mut *mut type (common in argv)
+        type_map.insert(format!("{}*[]", c_type), format!("*mut *mut {}", rust_type));
+        type_map.insert(format!("const {}*[]", c_type), format!("*const *const {}", rust_type));
+    }
+
+    TypeConversionMap {
+        type_map,
+        metadata_map,
+        category_index,
+    }
+});
 
 /// Hardcoded map of delimiter pairs for the Pair pattern
 /// Maps opening delimiter to closing delimiter, or self-pairs for identical delimiters
 fn get_delimiter_pairs() -> HashMap<char, char> {
     let mut pairs = HashMap::new();
-    
+
     // Standard bracket pairs
     pairs.insert('(', ')');
     pairs.insert('[', ']');
     pairs.insert('{', '}');
     pairs.insert('<', '>');
-    
+
     // Quote pairs (identical)
     pairs.insert('"', '"');
     pairs.insert('\'', '\'');
     pairs.insert('`', '`');
-    
+
     // Programming-specific pairs
-    pairs.insert('|', '|');  // Bitwise OR, absolute value
-    pairs.insert('*', '*');  // Markdown emphasis, C comments
-    pairs.insert('#', '#');  // Preprocessor, comments
-    
+    pairs.insert('|', '|'); // Bitwise OR, absolute value
+    pairs.insert('*', '*'); // Markdown emphasis, C comments
+    pairs.insert('#', '#'); // Preprocessor, comments
+
     // Mathematical/scientific pairs
-    pairs.insert('∥', '∥');  // Parallel lines
-    pairs.insert('‖', '‖');  // Double vertical bar
-    
+    pairs.insert('∥', '∥'); // Parallel lines
+    pairs.insert('‖', '‖'); // Double vertical bar
+
     // Extended bracket variants
-    pairs.insert('⟨', '⟩');  // Angle brackets
-    pairs.insert('⟦', '⟧');  // Double brackets
-    pairs.insert('⦃', '⦄');  // Fancy braces
-    
+    pairs.insert('⟨', '⟩'); // Angle brackets
+    pairs.insert('⟦', '⟧'); // Double brackets
+    pairs.insert('⦃', '⦄'); // Fancy braces
+
     pairs
 }
 
@@ -61,17 +301,17 @@ fn validate_delimiter_pairs(tokens: &[Token]) -> Result<()> {
     let delimiter_map = get_delimiter_pairs();
     let mut stack: Vec<(char, usize)> = Vec::new(); // (delimiter, position)
     let mut identical_pair_states: HashMap<char, bool> = HashMap::new(); // track state of identical pairs
-    
+
     for (pos, token) in tokens.iter().enumerate() {
         let token_str = token.to_string();
-        
+
         // Only process single-character delimiter tokens
         if token_str.len() != 1 {
             continue;
         }
-        
+
         let c = token_str.chars().next().unwrap();
-        
+
         if let Some(&closing_char) = delimiter_map.get(&c) {
             if closing_char == c {
                 // Handle identical pairs (quotes, pipes, etc.)
@@ -86,14 +326,20 @@ fn validate_delimiter_pairs(tokens: &[Token]) -> Result<()> {
                             return Err(C2RError::new(
                                 Kind::Logic,
                                 Reason::Invalid("delimiter pairing"),
-                                Some(format!("Mismatched delimiter at position {}: expected '{}', found '{}'", pos, last_char, c))
+                                Some(format!(
+                                    "Mismatched delimiter at position {}: expected '{}', found '{}'",
+                                    pos, last_char, c
+                                )),
                             ));
                         }
                     } else {
                         return Err(C2RError::new(
                             Kind::Logic,
                             Reason::Invalid("delimiter pairing"),
-                            Some(format!("Unmatched closing delimiter '{}' at position {}", c, pos))
+                            Some(format!(
+                                "Unmatched closing delimiter '{}' at position {}",
+                                c, pos
+                            )),
                         ));
                     }
                 } else {
@@ -115,38 +361,48 @@ fn validate_delimiter_pairs(tokens: &[Token]) -> Result<()> {
                         return Err(C2RError::new(
                             Kind::Logic,
                             Reason::Invalid("delimiter pairing"),
-                            Some(format!("Mismatched delimiter at position {}: expected '{}', found '{}'", pos, expected_closer, c))
+                            Some(format!(
+                                "Mismatched delimiter at position {}: expected '{}', found '{}'",
+                                pos, expected_closer, c
+                            )),
                         ));
                     }
                 } else {
                     return Err(C2RError::new(
                         Kind::Logic,
                         Reason::Invalid("delimiter pairing"),
-                        Some(format!("Unexpected closing delimiter '{}' at position {}", c, pos))
+                        Some(format!(
+                            "Unexpected closing delimiter '{}' at position {}",
+                            c, pos
+                        )),
                     ));
                 }
             } else {
                 return Err(C2RError::new(
                     Kind::Logic,
                     Reason::Invalid("delimiter pairing"),
-                    Some(format!("Unmatched closing delimiter '{}' at position {}", c, pos))
+                    Some(format!(
+                        "Unmatched closing delimiter '{}' at position {}",
+                        c, pos
+                    )),
                 ));
             }
         }
     }
-    
+
     // Check for unclosed delimiters
     if !stack.is_empty() {
-        let unclosed: Vec<String> = stack.iter()
+        let unclosed: Vec<String> = stack
+            .iter()
             .map(|(c, pos)| format!("'{}' at position {}", c, pos))
             .collect();
         return Err(C2RError::new(
             Kind::Logic,
             Reason::Invalid("delimiter pairing"),
-            Some(format!("Unclosed delimiter(s): {}", unclosed.join(", ")))
+            Some(format!("Unclosed delimiter(s): {}", unclosed.join(", "))),
         ));
     }
-    
+
     Ok(())
 }
 
@@ -261,7 +517,7 @@ pub enum TokenTypeVariant {
     /// Token::d (delimiter character sequence)
     Delimiter,
 }
-impl std::fmt::Display for TokenTypeVariant {
+impl Display for TokenTypeVariant {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             TokenTypeVariant::Array => write!(f, "array"),
@@ -279,7 +535,7 @@ impl std::fmt::Display for TokenTypeVariant {
     }
 }
 /// Represents the result of pattern matching
-#[derive(Debug, Clone, PartialEq, Eq,Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum PatternResult {
     /// Pattern matches successfully
     Match { consumed_tokens: usize },
@@ -330,10 +586,12 @@ pub enum PatternResult {
 }
 impl Default for PatternResult {
     fn default() -> Self {
-        PatternResult::NoMatch { reason: "No match".to_string() }
+        PatternResult::NoMatch {
+            reason: "No match".to_string(),
+        }
     }
 }
-impl std::fmt::Display for PatternResult {
+impl Display for PatternResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PatternResult::Match { consumed_tokens } => {
@@ -496,9 +754,9 @@ impl PartialEq for PatternRule {
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct HandlerPattern {
     /// Unique identifier for this pattern
-    pub id: String,
+    pub id: Id,
     /// Human-readable description
-    pub description: String,
+    pub description: Option<String>,
     /// Sequence of pattern rules to match
     pub rules: Vec<PatternRule>,
     /// Minimum number of tokens required
@@ -554,8 +812,8 @@ impl PartialEq for Patternizer {
         true
     }
 }
-impl std::hash::Hash for Patternizer {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+impl Hash for Patternizer {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.patterns.iter().for_each(|(key, value)| {
             key.hash(state);
             value.hash(state);
@@ -565,7 +823,7 @@ impl std::hash::Hash for Patternizer {
             value.hash(state);
         });
     }
-}  
+}
 
 /// Helper function to determine the TokenTypeVariant from a Token
 pub fn get_token_type_variant(token: &Token) -> TokenTypeVariant {
@@ -609,37 +867,42 @@ pub fn generate_token_fingerprint(token: &Token) -> TokenFingerprint {
         let debug_str = format!("{:?}", token);
         debug_str.len() < 1000 && !debug_str.contains("�")
     }) {
-        Ok(true) => {}, // Token seems safe, continue
+        Ok(true) => {} // Token seems safe, continue
         Ok(false) | Err(_) => {
             eprintln!("⚠️  CRITICAL: Detected corrupted/oversized token, using safe fallback");
             return create_safe_fallback_fingerprint();
         }
     }
-    
+
     // Safe token string conversion with panic protection
     let token_str = match std::panic::catch_unwind(|| token.to_string()) {
         Ok(s) => {
             // Additional check after to_string
             if s.contains('�') || s.len() > 500 || s.as_bytes().contains(&0xFF) {
-                eprintln!("⚠️  WARNING: Token string contains suspicious data, sanitizing: {}", s.chars().take(20).collect::<String>());
-                s.chars().filter(|&c| c != '�' && c.is_ascii_graphic() || c.is_whitespace()).collect()
+                eprintln!(
+                    "⚠️  WARNING: Token string contains suspicious data, sanitizing: {}",
+                    s.chars().take(20).collect::<String>()
+                );
+                s.chars()
+                    .filter(|&c| c != '�' && c.is_ascii_graphic() || c.is_whitespace())
+                    .collect()
             } else {
                 s
             }
-        },
+        }
         Err(_) => {
             eprintln!("⚠️  ERROR: Token.to_string() panicked, using safe fallback");
             return create_safe_fallback_fingerprint();
         }
     };
-    
+
     // Final safety check
     let safe_token_str = if token_str.is_empty() {
         "empty".to_string()
     } else {
         token_str
     };
-    
+
     let mut hasher: DefaultHasher = DefaultHasher::new();
     safe_token_str.hash(&mut hasher);
     let value_hash: u64 = hasher.finish();
@@ -654,21 +917,40 @@ pub fn generate_token_fingerprint(token: &Token) -> TokenFingerprint {
         Ok((first, last)) => (first, last),
         Err(_) => {
             // Fallback for corrupted UTF-8: try to extract safely
-            eprintln!("⚠️  WARNING: Corrupted chars in token, using byte fallback: {:?}", safe_token_str);
+            eprintln!(
+                "⚠️  WARNING: Corrupted chars in token, using byte fallback: {:?}",
+                safe_token_str
+            );
             let bytes = safe_token_str.as_bytes();
-            let first_char = if !bytes.is_empty() { Some(bytes[0] as char) } else { None };
-            let last_char = if !bytes.is_empty() { Some(bytes[bytes.len() - 1] as char) } else { None };
+            let first_char = if !bytes.is_empty() {
+                Some(bytes[0] as char)
+            } else {
+                None
+            };
+            let last_char = if !bytes.is_empty() {
+                Some(bytes[bytes.len() - 1] as char)
+            } else {
+                None
+            };
             (first_char, last_char)
         }
     };
 
     // Safe token method calls with panic protection
     let (is_numeric, is_integer, is_float, is_whitespace) = match std::panic::catch_unwind(|| {
-        (token.is_numeric(), token.is_int(), token.is_float(), token.is_whitespace())
+        (
+            token.is_numeric(),
+            token.is_int(),
+            token.is_float(),
+            token.is_whitespace(),
+        )
     }) {
         Ok(values) => values,
         Err(_) => {
-            eprintln!("⚠️  WARNING: Token method calls failed, using safe defaults for: {:?}", token);
+            eprintln!(
+                "⚠️  WARNING: Token method calls failed, using safe defaults for: {:?}",
+                token
+            );
             (false, false, false, false)
         }
     };
@@ -692,10 +974,13 @@ pub fn generate_token_fingerprint(token: &Token) -> TokenFingerprint {
 pub fn generate_sequence_fingerprint(tokens: &[Token]) -> SequenceFingerprint {
     // Safety check: Prevent stack overflow with very large token sequences
     if tokens.len() > 10000 {
-        eprintln!("⚠️  WARNING: Very large token sequence ({} tokens) - truncating for safety", tokens.len());
+        eprintln!(
+            "⚠️  WARNING: Very large token sequence ({} tokens) - truncating for safety",
+            tokens.len()
+        );
         return generate_sequence_fingerprint(&tokens[..10000]);
     }
-    
+
     // Safety check: Handle empty token sequences
     if tokens.is_empty() {
         return SequenceFingerprint {
@@ -704,21 +989,28 @@ pub fn generate_sequence_fingerprint(tokens: &[Token]) -> SequenceFingerprint {
             signature: 0,
         };
     }
-    
+
     // Debug: Log token sequence info for debugging
     if tokens.len() > 100 {
-        println!("🔍 DEBUG: Processing large token sequence with {} tokens", tokens.len());
+        println!(
+            "🔍 DEBUG: Processing large token sequence with {} tokens",
+            tokens.len()
+        );
     }
-    
+
     // Pre-scan for corrupted tokens
     let mut corrupted_count = 0;
-    for (i, token) in tokens.iter().enumerate().take(50) {  // Check first 50 tokens
+    for (i, token) in tokens.iter().enumerate().take(50) {
+        // Check first 50 tokens
         if std::panic::catch_unwind(|| generate_token_fingerprint(token)).is_err() {
             corrupted_count += 1;
         }
         // Early abort if too many corrupted tokens detected
         if corrupted_count > 5 {
-            eprintln!("🚨 CRITICAL: Too many corrupted tokens detected early ({} in first 50), using safe fallback sequence", corrupted_count);
+            eprintln!(
+                "🚨 CRITICAL: Too many corrupted tokens detected early ({} in first 50), using safe fallback sequence",
+                corrupted_count
+            );
             return SequenceFingerprint {
                 token_fingerprints: vec![create_safe_fallback_fingerprint()],
                 sequence_length: tokens.len(),
@@ -726,7 +1018,7 @@ pub fn generate_sequence_fingerprint(tokens: &[Token]) -> SequenceFingerprint {
             };
         }
     }
-    
+
     let token_fingerprints: Vec<TokenFingerprint> = tokens
         .iter()
         .enumerate()
@@ -746,7 +1038,7 @@ pub fn generate_sequence_fingerprint(tokens: &[Token]) -> SequenceFingerprint {
     let mut hasher: DefaultHasher = DefaultHasher::new();
     for fingerprint in &token_fingerprints {
         fingerprint.hash(&mut hasher);
-    }   
+    }
     let signature: u64 = hasher.finish();
 
     SequenceFingerprint {
@@ -774,12 +1066,12 @@ impl TokenPattern {
                 !token_str.is_empty()
                     && !token_str.chars().all(|c| c.is_ascii_punctuation())
                     && token_str
-                        .chars()
-                        .next()
-                        .map_or(false, |c| c.is_alphanumeric())
+                    .chars()
+                    .next()
+                    .map_or(false, |c| c.is_alphanumeric())
             }
             TokenPattern::TypeKeyword => {
-                is_type_token(token)
+                is_c_keyword(token.clone())
                     || matches!(
                         token_str.as_str(),
                         "struct"
@@ -801,9 +1093,10 @@ impl TokenPattern {
                     return false;
                 }
                 // Handle various numeric formats: integers, floats, scientific notation, hex
-                token_str.parse::<f64>().is_ok() 
+                token_str.parse::<f64>().is_ok()
                     || token_str.parse::<i64>().is_ok()
-                    || (token_str.starts_with("0x") && token_str[2..].chars().all(|c| c.is_ascii_hexdigit()))
+                    || (token_str.starts_with("0x")
+                    && token_str[2..].chars().all(|c| c.is_ascii_hexdigit()))
             }
             TokenPattern::Any => true,
             TokenPattern::End => false,
@@ -822,12 +1115,12 @@ impl TokenPattern {
                 token_str.contains('/')
                     || token_str.contains('\\')
                     || (token_str.contains('.')
-                        && (token_str.ends_with(".c")
-                            || token_str.ends_with(".h")
-                            || token_str.ends_with(".cpp")
-                            || token_str.ends_with(".hpp")
-                            || token_str.contains("./")
-                            || token_str.contains("../")))
+                    && (token_str.ends_with(".c")
+                    || token_str.ends_with(".h")
+                    || token_str.ends_with(".cpp")
+                    || token_str.ends_with(".hpp")
+                    || token_str.contains("./")
+                    || token_str.contains("../")))
             }
             TokenPattern::IdentifierWithChars(allowed_chars) => {
                 if token_str.is_empty() {
@@ -837,7 +1130,8 @@ impl TokenPattern {
                 let mut chars = token_str.chars();
                 if let Some(first_char) = chars.next() {
                     (first_char.is_alphanumeric() || first_char == '_')
-                        && chars.all(|c| c.is_alphanumeric() || c == '_' || allowed_chars.contains(&c))
+                        && chars
+                        .all(|c| c.is_alphanumeric() || c == '_' || allowed_chars.contains(&c))
                 } else {
                     false
                 }
@@ -963,11 +1257,11 @@ impl TokenPattern {
                     // Malformed character class, treat as literal
                     text[text_idx] == '['
                         && Self::advanced_pattern_match(
-                            text,
-                            pattern,
-                            text_idx + 1,
-                            pattern_idx + 1,
-                        )
+                        text,
+                        pattern,
+                        text_idx + 1,
+                        pattern_idx + 1,
+                    )
                 }
             }
             c => {
@@ -1010,10 +1304,10 @@ impl TokenPattern {
                 // Path continuation: "./", "../", "/path", "file.ext"
                 if (token_str.ends_with('.') && (next_token == "/" || next_token.starts_with('/')))
                     || (path_separators.contains(&token_str.chars().last().unwrap_or(' '))
-                        && next_token.chars().next().unwrap_or(' ').is_alphanumeric())
+                    && next_token.chars().next().unwrap_or(' ').is_alphanumeric())
                     || (token_str.chars().all(|c| c.is_alphanumeric() || c == '_')
-                        && next_token.len() == 1
-                        && path_separators.contains(&next_token.chars().next().unwrap()))
+                    && next_token.len() == 1
+                    && path_separators.contains(&next_token.chars().next().unwrap()))
                 {
                     continue; // Keep consuming tokens
                 }
@@ -1023,8 +1317,8 @@ impl TokenPattern {
                     && next_token.len() == 1
                     && identifier_chars.contains(&next_token.chars().next().unwrap()))
                     || (token_str.len() == 1
-                        && identifier_chars.contains(&token_str.chars().next().unwrap())
-                        && next_token.chars().next().unwrap_or(' ').is_alphanumeric())
+                    && identifier_chars.contains(&token_str.chars().next().unwrap())
+                    && next_token.chars().next().unwrap_or(' ').is_alphanumeric())
                 {
                     continue; // Keep consuming tokens
                 }
@@ -1082,10 +1376,14 @@ impl PatternRule {
 
 impl HandlerPattern {
     /// Create a new handler pattern
-    pub fn new(id: String, description: String) -> Self {
+    pub fn new(id: Id) -> Self {
         Self {
-            id,
-            description,
+            id: id.clone(),
+            description: Some(format!(
+                "Pattern: {} Timestamp: {}",
+                id.name(),
+                id.timestamp()
+            )),
             rules: vec![],
             min_tokens: 1,
             max_tokens: None,
@@ -1137,20 +1435,46 @@ impl Patternizer {
     }
 
     /// Learn from successful adaptive variations
-    pub fn learn_from_adaptive_success(&mut self,context: &mut Context, handler_type: &str, successful_pattern: HandlerPattern, confidence: f64) {
+    pub fn learn_from_adaptive_success(
+        &mut self,
+        context: &mut Context,
+        handler_type: &str,
+        successful_pattern: HandlerPattern,
+        confidence: f64,
+    ) {
         if confidence >= 0.8 {
             // High confidence adaptations can be promoted to regular patterns
             report!(
                 context,
-                "patternizer", 
-                "learn_from_adaptive_success", 
-                crate::ReportLevel::Info, 
-                crate::HandlerPhase::Process, 
-                &format!("Promoting adaptive pattern '{}' to regular pattern", successful_pattern.id), 
+                "patternizer",
+                "learn_from_adaptive_success",
+                crate::ReportLevel::Info,
+                crate::Phase::Process(Some("learn_from_adaptive_success".to_string())),
+                &format!(
+                    "Promoting adaptive pattern '{}' to regular pattern with confidence {:.2}",
+                    successful_pattern.id.name(),
+                    confidence
+                ),
                 true
             );
-            
-            self.register_pattern(handler_type.to_string(), successful_pattern);
+
+            // Create enhanced pattern with boosted priority based on confidence
+            let enhanced_pattern = HandlerPattern {
+                id: successful_pattern.id.clone(),
+                description: successful_pattern.description.clone(),
+                rules: successful_pattern.rules.clone(),
+                min_tokens: successful_pattern.min_tokens,
+                max_tokens: successful_pattern.max_tokens,
+                priority: successful_pattern.priority + ((confidence - 0.8) * 100.0) as i32,
+            };
+
+            self.register_pattern(Id::get(handler_type), enhanced_pattern);
+        } else if confidence >= 0.6 {
+            // Medium confidence patterns get cached for future reference
+            let cache_key = format!("{}_{}", handler_type, successful_pattern.id.name());
+            self.match_cache.insert(cache_key, PatternResult::Match {
+                consumed_tokens: successful_pattern.min_tokens
+            });
         }
     }
 
@@ -1160,241 +1484,437 @@ impl Patternizer {
     }
 
     /// Register a pattern for a handler type
-    pub fn register_pattern(&mut self, handler_type: String, pattern: HandlerPattern) {
+    pub fn register_pattern(&mut self, pattern_id: Id, pattern: HandlerPattern) {
         self.patterns
-            .entry(handler_type.clone())
+            .entry(pattern_id.name().to_string())
             .or_insert_with(Vec::<HandlerPattern>::new)
             .push(pattern);
 
         // Sort by priority (highest first)
-        if let Some(patterns) = self.patterns.get_mut(&handler_type) {
+        if let Some(patterns) = self.patterns.get_mut(pattern_id.clone().name().trim()) {
             patterns.sort_by(|a: &HandlerPattern, b: &HandlerPattern| b.priority.cmp(&a.priority));
         }
+    }
+
+    // ===== TYPE CONVERSION INTEGRATION =====
+
+    /// Get reference to the global type conversion map
+    pub fn type_map(&self) -> &TypeConversionMap {
+        &TYPE_CONVERSION_MAP
+    }
+
+    /// Check if a token is a known C type
+    pub fn is_c_type(&self, token: &Token) -> bool {
+        TYPE_CONVERSION_MAP.is_c_type(&token.to_string())
+    }
+
+    /// Convert C type token to Rust type
+    pub fn convert_c_to_rust(&self, token: &Token) -> Option<String> {
+        TYPE_CONVERSION_MAP.convert_type(&token.to_string())
+    }
+
+    /// Calculate type score for tokens (for handlers to use)
+    pub fn calculate_type_score(&self, tokens: &[Token]) -> f64 {
+        TYPE_CONVERSION_MAP.calculate_type_score(tokens)
+    }
+
+    /// Check if tokens contain storage qualifiers
+    pub fn has_storage_qualifier(&self, tokens: &[Token]) -> bool {
+        TYPE_CONVERSION_MAP.has_storage_qualifier(tokens)
+    }
+
+    /// Get all types by category
+    pub fn get_types_by_category(&self, category: TypeCategory) -> Vec<String> {
+        TYPE_CONVERSION_MAP.get_types_by_category(category)
+    }
+
+    /// Calculate structure score for array/struct patterns
+    pub fn calculate_structure_score(&self, tokens: &[Token]) -> f64 {
+        let mut score: f64 = 0.0;
+        let mut bracket_balance = 0;
+        let mut has_brackets = false;
+        let mut has_type = false;
+        let mut has_identifier = false;
+
+        for token in tokens {
+            let token_str = token.to_string();
+            match token_str.as_str() {
+                "[" => {
+                    bracket_balance += 1;
+                    has_brackets = true;
+                    score += 0.2;
+                }
+                "]" => {
+                    bracket_balance -= 1;
+                    score += 0.2;
+                }
+                s if self.is_c_type(token) => {
+                    has_type = true;
+                    score += 0.15;
+                }
+                s if !s.is_empty()
+                    && s.chars()
+                    .next()
+                    .map_or(false, |c| c.is_alphabetic() || c == '_') =>
+                    {
+                        has_identifier = true;
+                        score += 0.1;
+                    }
+                _ => {}
+            }
+        }
+
+        // Bonus for complete structure
+        if has_brackets && has_type && has_identifier {
+            score += 0.3;
+        }
+
+        // Penalty for unbalanced brackets
+        if bracket_balance != 0 {
+            score -= 0.2;
+        }
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Calculate syntax score for array/declaration patterns
+    pub fn calculate_syntax_score(&self, tokens: &[Token]) -> f64 {
+        let mut score: f64 = 0.0;
+        let mut bracket_pairs = 0;
+        let mut open_brackets = 0;
+        let mut has_assignment = false;
+        let mut has_semicolon = false;
+
+        for token in tokens {
+            let token_str = token.to_string();
+            match token_str.as_str() {
+                "[" => open_brackets += 1,
+                "]" => {
+                    if open_brackets > 0 {
+                        bracket_pairs += 1;
+                        open_brackets -= 1;
+                    }
+                }
+                "=" => {
+                    has_assignment = true;
+                    score += 0.15;
+                }
+                ";" => {
+                    has_semicolon = true;
+                    score += 0.1;
+                }
+                "," => score += 0.05,
+                "{" | "}" => score += 0.1,
+                _ => {}
+            }
+        }
+
+        score += bracket_pairs as f64 * 0.25;
+
+        // Bonus for complete statement structure
+        if has_assignment && has_semicolon {
+            score += 0.1;
+        }
+
+        score.clamp(0.0, 1.0)
+    }
+
+    /// Calculate semantic score for array/declaration patterns
+    pub fn calculate_semantic_score(&self, tokens: &[Token]) -> f64 {
+        let mut score: f64 = 0.0;
+        let mut consecutive_identifiers = 0;
+        let mut has_size_specifier = false;
+
+        for (i, token) in tokens.iter().enumerate() {
+            let token_str = token.to_string();
+
+            // Check for numeric size specifiers
+            if token_str.chars().all(|c| c.is_numeric()) && i > 0 {
+                if let Some(prev_token) = tokens.get(i - 1) {
+                    if prev_token.to_string() == "[" {
+                        has_size_specifier = true;
+                        score += 0.2;
+                    }
+                }
+            }
+
+            // Count consecutive identifiers
+            if token_str.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                consecutive_identifiers += 1;
+            } else {
+                consecutive_identifiers = 0;
+            }
+
+            // Penalty for too many consecutive identifiers
+            if consecutive_identifiers > 3 {
+                score -= 0.1;
+            }
+        }
+
+        if has_size_specifier {
+            score += 0.3;
+        }
+
+        score.clamp(0.0, 1.0)
     }
 
     /// Initialize common patterns for all handlers (moved from standalone function)
     pub fn initialize_common_patterns(&mut self) {
         // Function patterns
-        let function_pattern: HandlerPattern = HandlerPattern::new(
-            "function_declaration".to_string(),
-            "C function declaration or definition".to_string(),
-        )
-        .with_rules(vec![
-            // Return type (optional static/inline/extern)
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "static".to_string(),
-                "inline".to_string(),
-                "extern".to_string(),
-            ]))
-            .optional(),
-            PatternRule::new(TokenPattern::TypeKeyword)
-                .forbid_next(vec![TokenPattern::Exact("(".to_string())]), // Reject if type followed by (
-            // Function name
-            PatternRule::new(TokenPattern::Identifier)
-                .allow_next(vec![TokenPattern::Exact("(".to_string())]), // Must be followed by (
-            // Opening parenthesis
-            PatternRule::new(TokenPattern::Exact("(".to_string())),
-            // Parameters (simplified - any tokens until closing paren)
-            PatternRule::new(TokenPattern::Any).optional(), // Flexible parameter matching
-        ])
-        .min_tokens(4)
-        .priority(200); // High priority for functions
+        let function_pattern: HandlerPattern = HandlerPattern::new(Id::get("function_declaration"))
+            .with_rules(vec![
+                // Return type (optional static/inline/extern)
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "static".to_string(),
+                    "inline".to_string(),
+                    "extern".to_string(),
+                ]))
+                    .optional(),
+                PatternRule::new(TokenPattern::TypeKeyword)
+                    .forbid_next(vec![TokenPattern::Exact("(".to_string())]), // Reject if type followed by (
+                // Function name
+                PatternRule::new(TokenPattern::Identifier)
+                    .allow_next(vec![TokenPattern::Exact("(".to_string())]), // Must be followed by (
+                // Opening parenthesis
+                PatternRule::new(TokenPattern::Exact("(".to_string())),
+                // Parameters (simplified - any tokens until closing paren)
+                PatternRule::new(TokenPattern::Any).optional(), // Flexible parameter matching
+            ])
+            .min_tokens(4)
+            .priority(200); // High priority for functions
 
-        self.register_pattern("function".to_string(), function_pattern);
+        self.register_pattern(Id::get("function"), function_pattern);
 
         // Array patterns - improved with multiple variations
-        let array_declaration_pattern: HandlerPattern = HandlerPattern::new(
-            "array_declaration".to_string(),
-            "C array declaration with brackets".to_string(),
-        )
-        .with_rules(vec![
-            // Optional storage class
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "static".to_string(),
-                "const".to_string(),
-                "extern".to_string(),
-            ]))
-            .optional(),
-            // Type
-            PatternRule::new(TokenPattern::TypeKeyword)
-                .forbid_next(vec![TokenPattern::Exact("(".to_string())]), // Reject function calls
-            // Identifier
-            PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
-                // Ensure identifier is followed by [ (not function call)
-                if pos + 1 < tokens.len() {
-                    tokens[pos + 1].to_string() == "["
-                } else {
-                    false
-                }
-            }),
-            // Opening bracket
-            PatternRule::new(TokenPattern::Exact("[".to_string())),
-            // Size (optional - empty brackets or number/identifier)
-            PatternRule::new(TokenPattern::Any).optional(),
-            // Closing bracket
-            PatternRule::new(TokenPattern::Exact("]".to_string())),
-        ])
-        .min_tokens(4)
-        .priority(150);
+        let array_declaration_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("array_declaration"))
+                .with_rules(vec![
+                    // Optional storage class
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "static".to_string(),
+                        "const".to_string(),
+                        "extern".to_string(),
+                    ]))
+                        .optional(),
+                    // Type
+                    PatternRule::new(TokenPattern::TypeKeyword)
+                        .forbid_next(vec![TokenPattern::Exact("(".to_string())]), // Reject function calls
+                    // Identifier
+                    PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
+                        // Ensure identifier is followed by [ (not function call)
+                        if pos + 1 < tokens.len() {
+                            tokens[pos + 1].to_string() == "["
+                        } else {
+                            false
+                        }
+                    }),
+                    // Opening bracket
+                    PatternRule::new(TokenPattern::Exact("[".to_string())),
+                    // Size (optional - empty brackets or number/identifier)
+                    PatternRule::new(TokenPattern::Any).optional(),
+                    // Closing bracket
+                    PatternRule::new(TokenPattern::Exact("]".to_string())),
+                ])
+                .min_tokens(4)
+                .priority(150);
 
-        self.register_pattern("array_declaration".to_string(), array_declaration_pattern);
+        self.register_pattern(Id::get("array_declaration"), array_declaration_pattern);
 
         // Multi-dimensional array pattern
-        let array_multi_pattern = HandlerPattern::new(
-            "array_multi".to_string(),
-            "C multi-dimensional array declaration".to_string(),
-        )
-        .with_rules(vec![
-            // Type
-            PatternRule::new(TokenPattern::TypeKeyword),
-            // Identifier
-            PatternRule::new(TokenPattern::Identifier),
-            // Multiple bracket pairs
-            PatternRule::new(TokenPattern::Exact("[".to_string())),
-            PatternRule::new(TokenPattern::Any).optional(), // Size
-            PatternRule::new(TokenPattern::Exact("]".to_string())),
-            PatternRule::new(TokenPattern::Exact("[".to_string())),
-            PatternRule::new(TokenPattern::Any).optional(), // Second dimension
-            PatternRule::new(TokenPattern::Exact("]".to_string())),
-        ])
-        .min_tokens(6)
-        .priority(160); // Higher priority than single arrays
+        let array_multi_pattern = HandlerPattern::new(Id::get("array_multi"))
+            .with_rules(vec![
+                // Type
+                PatternRule::new(TokenPattern::TypeKeyword),
+                // Identifier
+                PatternRule::new(TokenPattern::Identifier),
+                // Multiple bracket pairs
+                PatternRule::new(TokenPattern::Exact("[".to_string())),
+                PatternRule::new(TokenPattern::Any).optional(), // Size
+                PatternRule::new(TokenPattern::Exact("]".to_string())),
+                PatternRule::new(TokenPattern::Exact("[".to_string())),
+                PatternRule::new(TokenPattern::Any).optional(), // Second dimension
+                PatternRule::new(TokenPattern::Exact("]".to_string())),
+            ])
+            .min_tokens(6)
+            .priority(160); // Higher priority than single arrays
 
-        self.register_pattern("array_multi".to_string(), array_multi_pattern);
+        self.register_pattern(Id::get("array_multi"), array_multi_pattern);
+
+        // General "array" pattern - catch-all for array declarations
+        let array_pattern = HandlerPattern::new(Id::get("array"))
+            .with_rules(vec![
+                // Optional storage class
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "static".to_string(),
+                    "const".to_string(),
+                    "extern".to_string(),
+                ])).optional(),
+                // Type
+                PatternRule::new(TokenPattern::TypeKeyword),
+                // Array name
+                PatternRule::new(TokenPattern::Identifier),
+                // Opening bracket
+                PatternRule::new(TokenPattern::Exact("[".to_string())),
+            ])
+            .min_tokens(4)
+            .priority(145); // Between specific array patterns
+
+        self.register_pattern(Id::get("array"), array_pattern);
 
         // Struct patterns
-        let struct_declaration_pattern: HandlerPattern = HandlerPattern::new(
-            "struct_declaration".to_string(),
-            "C struct declaration or definition".to_string(),
-        )
-        .with_rules(vec![
-            // struct keyword
-            PatternRule::new(TokenPattern::Exact("struct".to_string())),
-            // Optional struct name/tag
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            // Either { for definition or ; for forward declaration
-            PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
-        ])
-        .min_tokens(2)
-        .priority(140);
+        let struct_declaration_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("struct_declaration"))
+                .with_rules(vec![
+                    // struct keyword
+                    PatternRule::new(TokenPattern::Exact("struct".to_string())),
+                    // Optional struct name/tag
+                    PatternRule::new(TokenPattern::Identifier).optional(),
+                    // Either { for definition or ; for forward declaration
+                    PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
+                ])
+                .min_tokens(2)
+                .priority(140);
 
-        self.register_pattern("struct_declaration".to_string(), struct_declaration_pattern);
+        self.register_pattern(Id::get("struct_declaration"), struct_declaration_pattern);
 
         // Struct definition pattern (with body)
-        let struct_definition_pattern: HandlerPattern = HandlerPattern::new(
-            "struct_definition".to_string(),
-            "C struct definition with body".to_string(),
-        )
-        .with_rules(vec![
-            // struct keyword
-            PatternRule::new(TokenPattern::Exact("struct".to_string())),
-            // Optional struct name/tag
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            // Opening brace
-            PatternRule::new(TokenPattern::Exact("{".to_string())),
-            // Body content (flexible)
-            PatternRule::new(TokenPattern::Any).optional(),
-        ])
-        .min_tokens(3)
-        .priority(150); // Higher priority than declaration
+        let struct_definition_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("struct_definition"))
+                .with_rules(vec![
+                    // struct keyword
+                    PatternRule::new(TokenPattern::Exact("struct".to_string())),
+                    // Optional struct name/tag
+                    PatternRule::new(TokenPattern::Identifier).optional(),
+                    // Opening brace
+                    PatternRule::new(TokenPattern::Exact("{".to_string())),
+                    // Body content (flexible)
+                    PatternRule::new(TokenPattern::Any).optional(),
+                ])
+                .min_tokens(3)
+                .priority(150); // Higher priority than declaration
 
-        self.register_pattern("struct_definition".to_string(), struct_definition_pattern);
+        self.register_pattern(Id::get("struct_definition"), struct_definition_pattern);
+
+        // General "struct" pattern - catch-all
+        let struct_pattern = HandlerPattern::new(Id::get("struct"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::Exact("struct".to_string())),
+                PatternRule::new(TokenPattern::Identifier).optional(),
+                PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
+            ])
+            .min_tokens(2)
+            .priority(135);
+
+        self.register_pattern(Id::get("struct"), struct_pattern);
 
         // Enum patterns
-        let enum_declaration_pattern: HandlerPattern = HandlerPattern::new(
-            "enum_declaration".to_string(),
-            "C enum declaration".to_string(),
-        )
-        .with_rules(vec![
-            // enum keyword
-            PatternRule::new(TokenPattern::Exact("enum".to_string())),
-            // Optional enum name/tag
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            // Either { for definition or ; for forward declaration
-            PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
-        ])
-        .min_tokens(2)
-        .priority(140);
+        let enum_declaration_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("enum_declaration"))
+                .with_rules(vec![
+                    // enum keyword
+                    PatternRule::new(TokenPattern::Exact("enum".to_string())),
+                    // Optional enum name/tag
+                    PatternRule::new(TokenPattern::Identifier).optional(),
+                    // Either { for definition or ; for forward declaration
+                    PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
+                ])
+                .min_tokens(2)
+                .priority(140);
 
-        self.register_pattern("enum_declaration".to_string(), enum_declaration_pattern);
+        self.register_pattern(Id::get("enum_declaration"), enum_declaration_pattern);
 
         // Typedef enum pattern
-        let typedef_enum_pattern: HandlerPattern = HandlerPattern::new(
-            "typedef_enum".to_string(),
-            "C typedef enum declaration".to_string(),
-        )
-        .with_rules(vec![
-            // typedef keyword
-            PatternRule::new(TokenPattern::Exact("typedef".to_string())),
-            // enum keyword
-            PatternRule::new(TokenPattern::Exact("enum".to_string())),
-            // Optional enum name/tag
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            // Opening brace for definition
-            PatternRule::new(TokenPattern::Exact("{".to_string())),
-        ])
-        .min_tokens(4)
-        .priority(160); // Higher priority than simple enum
+        let typedef_enum_pattern: HandlerPattern = HandlerPattern::new(Id::get("typedef_enum"))
+            .with_rules(vec![
+                // typedef keyword
+                PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+                // enum keyword
+                PatternRule::new(TokenPattern::Exact("enum".to_string())),
+                // Optional enum name/tag
+                PatternRule::new(TokenPattern::Identifier).optional(),
+                // Opening brace for definition
+                PatternRule::new(TokenPattern::Exact("{".to_string())),
+            ])
+            .min_tokens(4)
+            .priority(160); // Higher priority than simple enum
 
-        self.register_pattern("typedef_enum".to_string(), typedef_enum_pattern);
+        self.register_pattern(Id::get("typedef_enum"), typedef_enum_pattern);
+
+        // General "enum" pattern - catch-all
+        let enum_pattern = HandlerPattern::new(Id::get("enum"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::Exact("enum".to_string())),
+                PatternRule::new(TokenPattern::Identifier).optional(),
+                PatternRule::new(TokenPattern::OneOf(vec!["{".to_string(), ";".to_string()])),
+            ])
+            .min_tokens(2)
+            .priority(135);
+
+        self.register_pattern(Id::get("enum"), enum_pattern);
 
         // Typedef patterns
-        let typedef_simple_pattern: HandlerPattern = HandlerPattern::new(
-            "typedef_simple".to_string(),
-            "C simple typedef declaration".to_string(),
-        )
-        .with_rules(vec![
-            // typedef keyword
-            PatternRule::new(TokenPattern::Exact("typedef".to_string())),
-            // Type (could be basic type or struct/enum)
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "int".to_string(),
-                "char".to_string(),
-                "float".to_string(),
-                "double".to_string(),
-                "void".to_string(),
-                "struct".to_string(),
-                "enum".to_string(),
-                "union".to_string(),
-            ])),
-            // Optional struct/enum name
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            // New type name
-            PatternRule::new(TokenPattern::Identifier),
-            // Semicolon
-            PatternRule::new(TokenPattern::Exact(";".to_string())),
-        ])
-        .min_tokens(4)
-        .priority(130);
+        let typedef_simple_pattern: HandlerPattern = HandlerPattern::new(Id::get("typedef_simple"))
+            .with_rules(vec![
+                // typedef keyword
+                PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+                // Type (could be basic type or struct/enum)
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "int".to_string(),
+                    "char".to_string(),
+                    "float".to_string(),
+                    "double".to_string(),
+                    "void".to_string(),
+                    "struct".to_string(),
+                    "enum".to_string(),
+                    "union".to_string(),
+                ])),
+                // Optional struct/enum name
+                PatternRule::new(TokenPattern::Identifier).optional(),
+                // New type name
+                PatternRule::new(TokenPattern::Identifier),
+                // Semicolon
+                PatternRule::new(TokenPattern::Exact(";".to_string())),
+            ])
+            .min_tokens(4)
+            .priority(130);
 
-        self.register_pattern("typedef_simple".to_string(), typedef_simple_pattern);
+        self.register_pattern(Id::get("typedef_simple"), typedef_simple_pattern);
 
         // Typedef struct pattern (not captured by typedef_enum)
-        let typedef_struct_pattern: HandlerPattern = HandlerPattern::new(
-            "typedef_struct".to_string(),
-            "C typedef struct declaration".to_string(),
-        )
-        .with_rules(vec![
-            // typedef keyword
-            PatternRule::new(TokenPattern::Exact("typedef".to_string())),
-            // struct keyword
-            PatternRule::new(TokenPattern::Exact("struct".to_string())),
-            // Optional struct name/tag
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            // Either opening brace or new type name
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "{".to_string(),
-                "identifier".to_string(),
-            ])),
-        ])
-        .min_tokens(3)
-        .priority(150); // Higher priority than simple typedef
+        let typedef_struct_pattern: HandlerPattern = HandlerPattern::new(Id::get("typedef_struct"))
+            .with_rules(vec![
+                // typedef keyword
+                PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+                // struct keyword
+                PatternRule::new(TokenPattern::Exact("struct".to_string())),
+                // Optional struct name/tag
+                PatternRule::new(TokenPattern::Identifier).optional(),
+                // Either opening brace or new type name
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "{".to_string(),
+                    "identifier".to_string(),
+                ])),
+            ])
+            .min_tokens(3)
+            .priority(150); // Higher priority than simple typedef
 
-        self.register_pattern("typedef_struct".to_string(), typedef_struct_pattern);
+        self.register_pattern(Id::get("typedef_struct"), typedef_struct_pattern);
+
+        // General "typedef" pattern - catch-all
+        let typedef_pattern = HandlerPattern::new(Id::get("typedef"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::Exact("typedef".to_string())),
+                PatternRule::new(TokenPattern::Identifier),
+                PatternRule::new(TokenPattern::Exact(";".to_string())),
+            ])
+            .min_tokens(3)
+            .priority(125);
+
+        self.register_pattern(Id::get("typedef"), typedef_pattern);
 
         // Control flow patterns
         let control_flow_if_pattern: HandlerPattern =
-            HandlerPattern::new("control_flow_if".to_string(), "C if statement".to_string())
+            HandlerPattern::new(Id::get("control_flow_if"))
                 .with_rules(vec![
                     // if keyword
                     PatternRule::new(TokenPattern::Exact("if".to_string())),
@@ -1406,10 +1926,10 @@ impl Patternizer {
                 .min_tokens(3)
                 .priority(120);
 
-        self.register_pattern("control_flow_if".to_string(), control_flow_if_pattern);
+        self.register_pattern(Id::get("control_flow_if"), control_flow_if_pattern);
 
         let control_flow_for_pattern: HandlerPattern =
-            HandlerPattern::new("control_flow_for".to_string(), "C for loop".to_string())
+            HandlerPattern::new(Id::get("control_flow_for"))
                 .with_rules(vec![
                     // for keyword
                     PatternRule::new(TokenPattern::Exact("for".to_string())),
@@ -1421,10 +1941,10 @@ impl Patternizer {
                 .min_tokens(3)
                 .priority(120);
 
-        self.register_pattern("control_flow_for".to_string(), control_flow_for_pattern);
+        self.register_pattern(Id::get("control_flow_for"), control_flow_for_pattern);
 
         let control_flow_while_pattern: HandlerPattern =
-            HandlerPattern::new("control_flow_while".to_string(), "C while loop".to_string())
+            HandlerPattern::new(Id::get("control_flow_while"))
                 .with_rules(vec![
                     // while keyword
                     PatternRule::new(TokenPattern::Exact("while".to_string())),
@@ -1436,340 +1956,460 @@ impl Patternizer {
                 .min_tokens(3)
                 .priority(120);
 
-        self.register_pattern("control_flow_while".to_string(), control_flow_while_pattern);
+        self.register_pattern(Id::get("control_flow_while"), control_flow_while_pattern);
+
+        // General "loop" pattern - catch-all for any loop construct
+        let loop_pattern = HandlerPattern::new(Id::get("loop"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "for".to_string(),
+                    "while".to_string(),
+                    "do".to_string(),
+                ])),
+                PatternRule::new(TokenPattern::Exact("(".to_string())).optional(),
+            ])
+            .min_tokens(2)
+            .priority(115);
+
+        self.register_pattern(Id::get("loop"), loop_pattern);
 
         // Include directive patterns
-        let include_directive_pattern: HandlerPattern = HandlerPattern::new(
-            "include_directive".to_string(),
-            "C #include preprocessor directive".to_string(),
-        )
-        .with_rules(vec![
-            // #include (as single token or separate # and include)
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "#include".to_string(),
-                "#".to_string(),
-            ])),
-            PatternRule::new(TokenPattern::Exact("include".to_string())).optional(),
-            // Header file path in <> or ""
-            PatternRule::new(TokenPattern::OneOf(vec!["<".to_string(), "\"".to_string()]))
-                .optional(),
-            PatternRule::new(TokenPattern::Identifier).optional(),
-            PatternRule::new(TokenPattern::OneOf(vec![">".to_string(), "\"".to_string()]))
-                .optional(),
-        ])
-        .min_tokens(2)
-        .priority(950);
+        let include_directive_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("include_directive"))
+                .with_rules(vec![
+                    // #include (as single token or separate # and include)
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "#include".to_string(),
+                        "#".to_string(),
+                    ])),
+                    PatternRule::new(TokenPattern::Exact("include".to_string())).optional(),
+                    // Header file path in <> or ""
+                    PatternRule::new(TokenPattern::OneOf(vec!["<".to_string(), "\"".to_string()]))
+                        .optional(),
+                    PatternRule::new(TokenPattern::Identifier).optional(),
+                    PatternRule::new(TokenPattern::OneOf(vec![">".to_string(), "\"".to_string()]))
+                        .optional(),
+                ])
+                .min_tokens(2)
+                .priority(950);
 
-        self.register_pattern("include_directive".to_string(), include_directive_pattern);
+        self.register_pattern(Id::get("include_directive"), include_directive_pattern);
 
         // Define macro patterns
-        let define_macro_pattern: HandlerPattern = HandlerPattern::new(
-            "define_macro".to_string(),
-            "C #define preprocessor directive".to_string(),
-        )
-        .with_rules(vec![
-            // #define (as single token or separate # and define)
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "#define".to_string(),
-                "#".to_string(),
-            ])),
-            PatternRule::new(TokenPattern::Exact("define".to_string())).optional(),
-            // Macro name
-            PatternRule::new(TokenPattern::Identifier),
-            // Optional parameters or body
-            PatternRule::new(TokenPattern::Any).optional(),
-        ])
-        .min_tokens(2)
-        .priority(920);
+        let define_macro_pattern: HandlerPattern = HandlerPattern::new(Id::get("define_macro"))
+            .with_rules(vec![
+                // #define (as single token or separate # and define)
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "#define".to_string(),
+                    "#".to_string(),
+                ])),
+                PatternRule::new(TokenPattern::Exact("define".to_string())).optional(),
+                // Macro name
+                PatternRule::new(TokenPattern::Identifier),
+                // Optional parameters or body
+                PatternRule::new(TokenPattern::Any).optional(),
+            ])
+            .min_tokens(2)
+            .priority(920);
 
-        self.register_pattern("define_macro".to_string(), define_macro_pattern);
+        self.register_pattern(Id::get("define_macro"), define_macro_pattern);
 
         // Conditional macro patterns
-        let conditional_macro_pattern: HandlerPattern = HandlerPattern::new(
-            "conditional_macro".to_string(),
-            "C conditional preprocessor directives".to_string(),
-        )
-        .with_rules(vec![
-            // Conditional directives
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "#ifdef".to_string(),
-                "#ifndef".to_string(),
-                "#endif".to_string(),
-                "#else".to_string(),
-                "#elif".to_string(),
-                "#undef".to_string(),
-                "#".to_string(),
-            ])),
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "ifdef".to_string(),
-                "ifndef".to_string(),
-                "endif".to_string(),
-                "else".to_string(),
-                "elif".to_string(),
-                "undef".to_string(),
-            ]))
-            .optional(),
-            // Optional condition
-            PatternRule::new(TokenPattern::Identifier).optional(),
-        ])
-        .min_tokens(1)
-        .priority(910);
+        let conditional_macro_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("conditional_macro"))
+                .with_rules(vec![
+                    // Conditional directives
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "#ifdef".to_string(),
+                        "#ifndef".to_string(),
+                        "#endif".to_string(),
+                        "#else".to_string(),
+                        "#elif".to_string(),
+                        "#undef".to_string(),
+                        "#".to_string(),
+                    ])),
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "ifdef".to_string(),
+                        "ifndef".to_string(),
+                        "endif".to_string(),
+                        "else".to_string(),
+                        "elif".to_string(),
+                        "undef".to_string(),
+                    ]))
+                        .optional(),
+                    // Optional condition
+                    PatternRule::new(TokenPattern::Identifier).optional(),
+                ])
+                .min_tokens(1)
+                .priority(910);
 
-        self.register_pattern("conditional_macro".to_string(), conditional_macro_pattern);
+        self.register_pattern(Id::get("conditional_macro"), conditional_macro_pattern);
+
+        // General "macro" pattern - catch-all for preprocessor directives
+        // Note: This should match AFTER specific patterns, so lower priority
+        let macro_pattern = HandlerPattern::new(Id::get("macro"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "#define".to_string(),
+                    "#include".to_string(),
+                    "#ifdef".to_string(),
+                    "#ifndef".to_string(),
+                    "#if".to_string(),
+                    "#endif".to_string(),
+                    "#pragma".to_string(),
+                ])),
+            ])
+            .min_tokens(2)  // At least directive + something
+            .priority(200);  // Lower than specific macro patterns (define_macro=920)
+
+        self.register_pattern(Id::get("macro"), macro_pattern);
+
+        // General "comment" pattern - catch-all for comments
+        // Should only match when there's actual comment content
+        let comment_pattern = HandlerPattern::new(Id::get("comment"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "//".to_string(),
+                    "/*".to_string(),
+                ])),
+            ])
+            .min_tokens(2)  // Comment marker + at least some content
+            .priority(95);   // Very low priority
+
+        self.register_pattern(Id::get("comment"), comment_pattern);
+
+        // General "variable" pattern - catch-all for variable declarations
+        let variable_pattern = HandlerPattern::new(Id::get("variable"))
+            .with_rules(vec![
+                // Optional storage class
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "static".to_string(),
+                    "const".to_string(),
+                    "auto".to_string(),
+                    "register".to_string(),
+                ])).optional(),
+                // Type
+                PatternRule::new(TokenPattern::TypeKeyword),
+                // Variable name
+                PatternRule::new(TokenPattern::Identifier),
+                // Semicolon or assignment (not function call)
+                PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
+                    .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
+            ])
+            .min_tokens(3)
+            .priority(85);
+
+        self.register_pattern(Id::get("variable"), variable_pattern);
+
+        // General "expression" pattern - catch-all for expressions
+        let expression_pattern = HandlerPattern::new(Id::get("expression"))
+            .with_rules(vec![
+                PatternRule::new(TokenPattern::Identifier),
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "+".to_string(),
+                    "-".to_string(),
+                    "*".to_string(),
+                    "/".to_string(),
+                    "=".to_string(),
+                    "==".to_string(),
+                    "!=".to_string(),
+                    "<".to_string(),
+                    ">".to_string(),
+                ])),
+                PatternRule::new(TokenPattern::Any),
+            ])
+            .min_tokens(3)
+            .priority(40);
+
+        self.register_pattern(Id::get("expression"), expression_pattern);
 
         // Main function pattern (very specific)
-        let main_function_pattern: HandlerPattern = HandlerPattern::new(
-            "main_function".to_string(),
-            "C main function declaration or definition".to_string(),
-        )
-        .with_rules(vec![
-            // Optional storage class
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "static".to_string(),
-                "extern".to_string(),
-            ]))
-            .optional(),
-            // Return type
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "int".to_string(),
-                "void".to_string(),
-            ])),
-            // Main identifier
-            PatternRule::new(TokenPattern::Exact("main".to_string())),
-            // Opening parenthesis
-            PatternRule::new(TokenPattern::Exact("(".to_string())),
-            // Parameters (optional)
-            PatternRule::new(TokenPattern::Any).optional(),
-        ])
-        .min_tokens(4)
-        .priority(1000);
+        let main_function_pattern: HandlerPattern = HandlerPattern::new(Id::get("main_function"))
+            .with_rules(vec![
+                // Optional storage class
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "static".to_string(),
+                    "extern".to_string(),
+                ]))
+                    .optional(),
+                // Return type
+                PatternRule::new(TokenPattern::OneOf(vec![
+                    "int".to_string(),
+                    "void".to_string(),
+                ])),
+                // Main identifier
+                PatternRule::new(TokenPattern::Exact("main".to_string())),
+                // Opening parenthesis
+                PatternRule::new(TokenPattern::Exact("(".to_string())),
+                // Parameters (optional)
+                PatternRule::new(TokenPattern::Any).optional(),
+            ])
+            .min_tokens(4)
+            .priority(1000);
 
-        self.register_pattern("main_function".to_string(), main_function_pattern);
+        self.register_pattern(Id::get("main_function"), main_function_pattern);
 
         // Function declaration pattern
-        let function_declaration_pattern: HandlerPattern = HandlerPattern::new(
-            "function_declaration".to_string(),
-            "C function declaration (no body)".to_string(),
-        )
-        .with_rules(vec![
-            // Optional storage class
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "static".to_string(),
-                "inline".to_string(),
-                "extern".to_string(),
-            ]))
-            .optional(),
-            // Return type
-            PatternRule::new(TokenPattern::TypeKeyword),
-            // Function name (not main)
-            PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
-                if pos < tokens.len() {
-                    tokens[pos].to_string() != "main"
-                } else {
-                    false
-                }
-            }),
-            // Opening parenthesis
-            PatternRule::new(TokenPattern::Exact("(".to_string())),
-            // Parameters
-            PatternRule::new(TokenPattern::Any).optional(),
-            // Closing parenthesis
-            PatternRule::new(TokenPattern::Exact(")".to_string())),
-            // Semicolon (declaration, not definition)
-            PatternRule::new(TokenPattern::Exact(";".to_string())),
-        ])
-        .min_tokens(5)
-        .priority(900);
+        let function_declaration_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("function_declaration"))
+                .with_rules(vec![
+                    // Optional storage class
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "static".to_string(),
+                        "inline".to_string(),
+                        "extern".to_string(),
+                    ]))
+                        .optional(),
+                    // Return type
+                    PatternRule::new(TokenPattern::TypeKeyword),
+                    // Function name (not main)
+                    PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
+                        if pos < tokens.len() {
+                            tokens[pos].to_string() != "main"
+                        } else {
+                            false
+                        }
+                    }),
+                    // Opening parenthesis
+                    PatternRule::new(TokenPattern::Exact("(".to_string())),
+                    // Parameters
+                    PatternRule::new(TokenPattern::Any).optional(),
+                    // Closing parenthesis
+                    PatternRule::new(TokenPattern::Exact(")".to_string())),
+                    // Semicolon (declaration, not definition)
+                    PatternRule::new(TokenPattern::Exact(";".to_string())),
+                ])
+                .min_tokens(5)
+                .priority(900);
 
         self.register_pattern(
-            "function_declaration".to_string(),
+            Id::get("function_declaration"),
             function_declaration_pattern,
         );
 
         // Function definition pattern
-        let function_definition_pattern: HandlerPattern = HandlerPattern::new(
-            "function_definition".to_string(),
-            "C function definition (with body)".to_string(),
-        )
-        .with_rules(vec![
-            // Optional storage class
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "static".to_string(),
-                "inline".to_string(),
-            ]))
-            .optional(),
-            // Return type
-            PatternRule::new(TokenPattern::TypeKeyword),
-            // Function name (not main)
-            PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
-                if pos < tokens.len() {
-                    tokens[pos].to_string() != "main"
-                } else {
-                    false
-                }
-            }),
-            // Opening parenthesis
-            PatternRule::new(TokenPattern::Exact("(".to_string())),
-            // Parameters
-            PatternRule::new(TokenPattern::Any).optional(),
-            // Closing parenthesis
-            PatternRule::new(TokenPattern::Exact(")".to_string())),
-            // Opening brace (definition has body)
-            PatternRule::new(TokenPattern::Exact("{".to_string())),
-        ])
-        .min_tokens(6)
-        .priority(850);
+        let function_definition_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("function_definition"))
+                .with_rules(vec![
+                    // Optional storage class
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "static".to_string(),
+                        "inline".to_string(),
+                    ]))
+                        .optional(),
+                    // Return type
+                    PatternRule::new(TokenPattern::TypeKeyword),
+                    // Function name (not main)
+                    PatternRule::new(TokenPattern::Identifier).with_validator(|tokens, pos| {
+                        if pos < tokens.len() {
+                            tokens[pos].to_string() != "main"
+                        } else {
+                            false
+                        }
+                    }),
+                    // Opening parenthesis
+                    PatternRule::new(TokenPattern::Exact("(".to_string())),
+                    // Parameters
+                    PatternRule::new(TokenPattern::Any).optional(),
+                    // Closing parenthesis
+                    PatternRule::new(TokenPattern::Exact(")".to_string())),
+                    // Opening brace (definition has body)
+                    PatternRule::new(TokenPattern::Exact("{".to_string())),
+                ])
+                .min_tokens(6)
+                .priority(850);
 
-        self.register_pattern(
-            "function_definition".to_string(),
-            function_definition_pattern,
-        );
+        self.register_pattern(Id::get("function_definition"), function_definition_pattern);
+
+        // Function prototype pattern (declaration without body)
+        let function_prototype_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("function_prototype"))
+                .with_rules(vec![
+                    // Optional storage class
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "static".to_string(),
+                        "extern".to_string(),
+                        "inline".to_string(),
+                    ])).optional(),
+                    // Return type
+                    PatternRule::new(TokenPattern::TypeKeyword),
+                    // Optional pointer
+                    PatternRule::new(TokenPattern::Exact("*".to_string())).optional(),
+                    // Function name
+                    PatternRule::new(TokenPattern::Identifier),
+                    // Opening parenthesis
+                    PatternRule::new(TokenPattern::Exact("(".to_string())),
+                    // Closing parenthesis
+                    PatternRule::new(TokenPattern::Exact(")".to_string())),
+                    // Semicolon (not opening brace)
+                    PatternRule::new(TokenPattern::Exact(";".to_string())),
+                ])
+                .min_tokens(5)
+                .priority(890);
+
+        self.register_pattern(Id::get("function_prototype"), function_prototype_pattern);
 
         // Extern declaration pattern
-        let extern_declaration_pattern: HandlerPattern = HandlerPattern::new(
-            "extern_declaration".to_string(),
-            "C extern declaration".to_string(),
-        )
-        .with_rules(vec![
-            // Extern keyword
-            PatternRule::new(TokenPattern::Exact("extern".to_string())),
-            // Type or function signature
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "int".to_string(),
-                "char".to_string(),
-                "float".to_string(),
-                "double".to_string(),
-                "void".to_string(),
-                "struct".to_string(),
-            ])),
-            // Identifier
-            PatternRule::new(TokenPattern::Identifier),
-            // Optional parentheses for function or semicolon for variable
-            PatternRule::new(TokenPattern::OneOf(vec!["(".to_string(), ";".to_string()])),
-        ])
-        .min_tokens(4)
-        .priority(880);
+        let extern_declaration_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("extern_declaration"))
+                .with_rules(vec![
+                    // Extern keyword
+                    PatternRule::new(TokenPattern::Exact("extern".to_string())),
+                    // Type or function signature
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "int".to_string(),
+                        "char".to_string(),
+                        "float".to_string(),
+                        "double".to_string(),
+                        "void".to_string(),
+                        "struct".to_string(),
+                    ])),
+                    // Identifier
+                    PatternRule::new(TokenPattern::Identifier),
+                    // Optional parentheses for function or semicolon for variable
+                    PatternRule::new(TokenPattern::OneOf(vec!["(".to_string(), ";".to_string()])),
+                ])
+                .min_tokens(4)
+                .priority(880);
 
-        self.register_pattern("extern_declaration".to_string(), extern_declaration_pattern);
+        self.register_pattern(Id::get("extern_declaration"), extern_declaration_pattern);
 
         // Static variable pattern
-        let static_variable_pattern: HandlerPattern = HandlerPattern::new(
-            "static_variable".to_string(),
-            "C static variable declaration".to_string(),
-        )
-        .with_rules(vec![
-            // Static keyword
-            PatternRule::new(TokenPattern::Exact("static".to_string())),
-            // Type
-            PatternRule::new(TokenPattern::TypeKeyword),
-            // Variable name
-            PatternRule::new(TokenPattern::Identifier),
-            // Semicolon or assignment (not function call)
-            PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
-                .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
-        ])
-        .min_tokens(4)
-        .priority(870);
+        let static_variable_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("static_variable"))
+                .with_rules(vec![
+                    // Static keyword
+                    PatternRule::new(TokenPattern::Exact("static".to_string())),
+                    // Type
+                    PatternRule::new(TokenPattern::TypeKeyword),
+                    // Variable name
+                    PatternRule::new(TokenPattern::Identifier),
+                    // Semicolon or assignment (not function call)
+                    PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
+                        .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
+                ])
+                .min_tokens(4)
+                .priority(870);
 
-        self.register_pattern("static_variable".to_string(), static_variable_pattern);
+        self.register_pattern(Id::get("static_variable"), static_variable_pattern);
 
         // Global constant pattern
-        let global_constant_pattern: HandlerPattern = HandlerPattern::new(
-            "global_constant".to_string(),
-            "C global constant declaration".to_string(),
-        )
-        .with_rules(vec![
-            // Const keyword
-            PatternRule::new(TokenPattern::Exact("const".to_string())),
-            // Type
-            PatternRule::new(TokenPattern::TypeKeyword),
-            // Variable name
-            PatternRule::new(TokenPattern::Identifier),
-            // Assignment or semicolon
-            PatternRule::new(TokenPattern::OneOf(vec!["=".to_string(), ";".to_string()])),
-        ])
-        .min_tokens(4)
-        .priority(850);
+        let global_constant_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("global_constant"))
+                .with_rules(vec![
+                    // Const keyword
+                    PatternRule::new(TokenPattern::Exact("const".to_string())),
+                    // Type
+                    PatternRule::new(TokenPattern::TypeKeyword),
+                    // Variable name
+                    PatternRule::new(TokenPattern::Identifier),
+                    // Assignment or semicolon
+                    PatternRule::new(TokenPattern::OneOf(vec!["=".to_string(), ";".to_string()])),
+                ])
+                .min_tokens(4)
+                .priority(850);
 
-        self.register_pattern("global_constant".to_string(), global_constant_pattern);
+        self.register_pattern(Id::get("global_constant"), global_constant_pattern);
 
         // Global variable pattern
-        let global_variable_pattern: HandlerPattern = HandlerPattern::new(
-            "global_variable".to_string(),
-            "C global variable declaration".to_string(),
-        )
-        .with_rules(vec![
-            // Type (not preceded by static, const, extern)
-            PatternRule::new(TokenPattern::TypeKeyword).with_validator(|tokens, pos| {
-                if pos > 0 {
-                    let prev_token = tokens[pos - 1].to_string();
-                    !matches!(prev_token.as_str(), "static" | "const" | "extern")
-                } else {
-                    true
-                }
-            }),
-            // Variable name
-            PatternRule::new(TokenPattern::Identifier),
-            // Semicolon or assignment (not function)
-            PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
-                .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
-        ])
-        .min_tokens(3)
-        .priority(800);
+        let global_variable_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("global_variable"))
+                .with_rules(vec![
+                    // Type (not preceded by static, const, extern)
+                    PatternRule::new(TokenPattern::TypeKeyword).with_validator(|tokens, pos| {
+                        if pos > 0 {
+                            let prev_token = tokens[pos - 1].to_string();
+                            !matches!(prev_token.as_str(), "static" | "const" | "extern")
+                        } else {
+                            true
+                        }
+                    }),
+                    // Variable name
+                    PatternRule::new(TokenPattern::Identifier),
+                    // Semicolon or assignment (not function)
+                    PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
+                        .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
+                ])
+                .min_tokens(3)
+                .priority(800);
 
-        self.register_pattern("global_variable".to_string(), global_variable_pattern);
+        self.register_pattern(Id::get("global_variable"), global_variable_pattern);
+
+        // General "global" pattern - matches any global declaration
+        // This is a catch-all pattern with lower priority for handlers that use generic "global" matching
+        let global_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("global"))
+                .with_rules(vec![
+                    // Optional storage class or qualifier
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "extern".to_string(),
+                        "static".to_string(),
+                        "const".to_string(),
+                        "volatile".to_string(),
+                    ])).optional(),
+                    // Type
+                    PatternRule::new(TokenPattern::TypeKeyword),
+                    // Variable name
+                    PatternRule::new(TokenPattern::Identifier),
+                    // Semicolon or assignment (not function)
+                    PatternRule::new(TokenPattern::OneOf(vec![";".to_string(), "=".to_string()]))
+                        .forbid_next(vec![TokenPattern::Exact("(".to_string())]),
+                ])
+                .min_tokens(3)
+                .priority(790); // Slightly lower than specific patterns
+
+        self.register_pattern(Id::get("global"), global_pattern);
 
         // Expression patterns (more restrictive)
-        let binary_expression_pattern: HandlerPattern = HandlerPattern::new(
-            "binary_expression".to_string(),
-            "Binary expression (not function call)".to_string(),
-        )
-        .with_rules(vec![
-            // Left operand (not a type keyword)
-            PatternRule::new(TokenPattern::Identifier)
-                .forbid_next(vec![TokenPattern::Exact("(".to_string())]) // Reject function calls
-                .with_validator(|tokens, pos| {
-                    // Custom validation: ensure this isn't a type declaration
-                    if pos > 0 {
-                        let prev_token = tokens[pos - 1].to_string();
-                        ![
-                            "int", "char", "float", "double", "struct", "enum", "const", "static",
-                        ]
-                        .contains(&prev_token.as_str())
-                    } else {
-                        true
-                    }
-                }),
-            // Binary operator
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "+".to_string(),
-                "-".to_string(),
-                "*".to_string(),
-                "/".to_string(),
-                "==".to_string(),
-                "!=".to_string(),
-                "<".to_string(),
-                ">".to_string(),
-                "<=".to_string(),
-                ">=".to_string(),
-                "&&".to_string(),
-                "||".to_string(),
-                "&".to_string(),
-                "|".to_string(),
-                "^".to_string(),
-                "<<".to_string(),
-                ">>".to_string(),
-            ])),
-            // Right operand
-            PatternRule::new(TokenPattern::OneOf(vec![
-                "identifier".to_string(),
-                "number".to_string(),
-            ])),
-        ])
-        .min_tokens(3)
-        .priority(50); // Lower priority than functions/arrays
+        let binary_expression_pattern: HandlerPattern =
+            HandlerPattern::new(Id::get("binary_expression"))
+                .with_rules(vec![
+                    // Left operand (not a type keyword)
+                    PatternRule::new(TokenPattern::Identifier)
+                        .forbid_next(vec![TokenPattern::Exact("(".to_string())]) // Reject function calls
+                        .with_validator(|tokens, pos| {
+                            // Custom validation: ensure this isn't a type declaration
+                            if pos > 0 {
+                                let prev_token = tokens[pos - 1].to_string();
+                                ![
+                                    "int", "char", "float", "double", "struct", "enum", "const",
+                                    "static",
+                                ]
+                                    .contains(&prev_token.as_str())
+                            } else {
+                                true
+                            }
+                        }),
+                    // Binary operator
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "+".to_string(),
+                        "-".to_string(),
+                        "*".to_string(),
+                        "/".to_string(),
+                        "==".to_string(),
+                        "!=".to_string(),
+                        "<".to_string(),
+                        ">".to_string(),
+                        "<=".to_string(),
+                        ">=".to_string(),
+                        "&&".to_string(),
+                        "||".to_string(),
+                        "&".to_string(),
+                        "|".to_string(),
+                        "^".to_string(),
+                        "<<".to_string(),
+                        ">>".to_string(),
+                    ])),
+                    // Right operand
+                    PatternRule::new(TokenPattern::OneOf(vec![
+                        "identifier".to_string(),
+                        "number".to_string(),
+                    ])),
+                ])
+                .min_tokens(3)
+                .priority(50); // Lower priority than functions/arrays
 
-        self.register_pattern("expression".to_string(), binary_expression_pattern);
+        self.register_pattern(Id::get("binary_expression"), binary_expression_pattern);
     }
 
     /// Check if tokens should be rejected by any handler (moved from standalone function)
@@ -1844,7 +2484,7 @@ impl Patternizer {
     pub fn match_pattern(&mut self, handler_type: &str, tokens: &[Token]) -> PatternResult {
         // Check cache first - use a more efficient cache key based on token hashes
         let token_hash = {
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            let mut hasher = DefaultHasher::new();
             handler_type.hash(&mut hasher);
             tokens.len().hash(&mut hasher);
             // Hash first few and last few tokens to avoid long concatenations
@@ -1926,9 +2566,17 @@ impl Patternizer {
                     // This is a negative cache hit - continue to next pattern
                     continue;
                 }
-                PatternResult::CachedPositive { pattern_id, cache_hit_count, reason } => {
+                PatternResult::CachedPositive {
+                    pattern_id,
+                    cache_hit_count,
+                    reason,
+                } => {
                     // This is a positive cache hit - continue to next pattern
-                    return PatternResult::CachedPositive { pattern_id, cache_hit_count: cache_hit_count + 1, reason };
+                    return PatternResult::CachedPositive {
+                        pattern_id,
+                        cache_hit_count: cache_hit_count + 1,
+                        reason,
+                    };
                 }
             }
         }
@@ -1942,7 +2590,11 @@ impl Patternizer {
     }
 
     /// Match tokens against a single pattern
-    pub fn match_single_pattern(&self, pattern: &HandlerPattern, tokens: &[Token]) -> PatternResult {
+    pub fn match_single_pattern(
+        &self,
+        pattern: &HandlerPattern,
+        tokens: &[Token],
+    ) -> PatternResult {
         // Check basic length requirements
         if tokens.len() < pattern.min_tokens {
             return PatternResult::NoMatch {
@@ -1961,10 +2613,11 @@ impl Patternizer {
         // Pre-validate CountOf patterns by counting occurrences across the entire sequence
         for rule in &pattern.rules {
             if let TokenPattern::CountOf(pattern_to_count, expected_count) = &rule.pattern {
-                let actual_count = tokens.iter()
+                let actual_count = tokens
+                    .iter()
                     .filter(|token| token.to_string() == *pattern_to_count)
                     .count();
-                
+
                 if actual_count != *expected_count {
                     return PatternResult::NoMatch {
                         reason: format!(
@@ -1980,7 +2633,9 @@ impl Patternizer {
         for rule in &pattern.rules {
             if let TokenPattern::Pair = &rule.pattern {
                 if let Err(err) = validate_delimiter_pairs(tokens) {
-                    return PatternResult::NoMatch { reason: err.to_string() };
+                    return PatternResult::NoMatch {
+                        reason: err.to_string(),
+                    };
                 }
             }
         }
@@ -2075,42 +2730,46 @@ impl Patternizer {
     pub fn clear_cache(&mut self) {
         self.match_cache.clear();
     }
-    
+
     /// Save pattern cache to JSON file
     pub fn save_cache_to_json(&self, file_path: &str) -> Result<()> {
         use std::fs;
-        
+
         // Convert cache to JSON-serializable format
-        let mut cache_json = object!{};
-        
+        let mut cache_json = object! {};
+
         for (key, result) in &self.match_cache {
             let result_json = self.pattern_result_to_json(result);
             cache_json[key] = result_json;
         }
-        
+
         // Create metadata object
         let timestamp = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
             Ok(duration) => format!("{}.{:09}", duration.as_secs(), duration.subsec_nanos()),
             Err(_) => "unknown".to_string(),
         };
-        
-        let metadata = object!{
+
+        let metadata = object! {
             "version": Value::String("1.0".into()),
             "timestamp": Value::String(timestamp),
             "cache_size": Value::String(self.match_cache.len().to_string()),
             "pattern_count": Value::String(self.patterns.len().to_string())
         };
-        
-        let final_json = object!{
+
+        let final_json = object! {
             "metadata": metadata,
             "cache": cache_json
         };
-        
+
         // Write to file with proper error handling
         match fs::write(file_path, crate::json::stringify_pretty(final_json, 2)) {
             Ok(()) => {
                 debug!("Pattern cache saved to: {}", file_path);
-                info!("Saved {} cache entries to {}", self.match_cache.len(), file_path);
+                info!(
+                    "Saved {} cache entries to {}",
+                    self.match_cache.len(),
+                    file_path
+                );
                 Ok(())
             }
             Err(e) => {
@@ -2124,56 +2783,67 @@ impl Patternizer {
     fn pattern_result_to_json(&self, result: &PatternResult) -> Value {
         match result {
             PatternResult::Match { consumed_tokens } => {
-                object!{
+                object! {
                     "type": Value::String("Match".to_string()),
                     "consumed_tokens": Value::String(consumed_tokens.to_string())
                 }
             }
             PatternResult::NoMatch { reason } => {
-                object!{
+                object! {
                     "type": Value::String("NoMatch".to_string()),
                     "reason": Value::String(reason.clone())
                 }
             }
             PatternResult::CountOf { offsets } => {
-                let offsets_array: Vec<Value> = offsets.iter()
-                    .map(|offset| Value::Array(vec![
-                        Value::String(offset.start.to_string()), 
-                        Value::String(offset.end.to_string())
-                    ]))
+                let offsets_array: Vec<Value> = offsets
+                    .iter()
+                    .map(|offset| {
+                        Value::Array(vec![
+                            Value::String(offset.start.to_string()),
+                            Value::String(offset.end.to_string()),
+                        ])
+                    })
                     .collect();
-                object!{
+                object! {
                     "type": Value::String("CountOf".to_string()),
                     "offsets": Value::Array(offsets_array)
                 }
             }
             PatternResult::Sequence { range } => {
-                object!{
+                object! {
                     "type": Value::String("Sequence".to_string()),
                     "start": Value::String(range.start.to_string()),
                     "end": Value::String(range.end.to_string())
                 }
             }
             PatternResult::Fuzzy { offsets } => {
-                let offsets_array: Vec<Value> = offsets.iter()
-                    .map(|offset| Value::Array(vec![
-                        Value::String(offset.start.to_string()), 
-                        Value::String(offset.end.to_string())
-                    ]))
+                let offsets_array: Vec<Value> = offsets
+                    .iter()
+                    .map(|offset| {
+                        Value::Array(vec![
+                            Value::String(offset.start.to_string()),
+                            Value::String(offset.end.to_string()),
+                        ])
+                    })
                     .collect();
-                object!{
+                object! {
                     "type": Value::String("Fuzzy".to_string()),
                     "offsets": Value::Array(offsets_array)
                 }
             }
             PatternResult::Reject { reason } => {
-                object!{
+                object! {
                     "type": Value::String("Reject".to_string()),
                     "reason": Value::String(reason.clone())
                 }
             }
-            PatternResult::TypeMismatch { expected_type, actual_type, position, reason } => {
-                object!{
+            PatternResult::TypeMismatch {
+                expected_type,
+                actual_type,
+                position,
+                reason,
+            } => {
+                object! {
                     "type": Value::String("TypeMismatch".to_string()),
                     "expected_type": Value::String(format!("{:?}", expected_type)),
                     "actual_type": Value::String(format!("{:?}", actual_type)),
@@ -2181,8 +2851,13 @@ impl Patternizer {
                     "reason": Value::String(reason.clone())
                 }
             }
-            PatternResult::ValueMismatch { expected_value, actual_value, position, reason } => {
-                object!{
+            PatternResult::ValueMismatch {
+                expected_value,
+                actual_value,
+                position,
+                reason,
+            } => {
+                object! {
                     "type": Value::String("ValueMismatch".to_string()),
                     "expected_value": Value::String(expected_value.clone()),
                     "actual_value": Value::String(actual_value.clone()),
@@ -2190,24 +2865,36 @@ impl Patternizer {
                     "reason": Value::String(reason.clone())
                 }
             }
-            PatternResult::StructureMismatch { expected_pattern, actual_structure, reason } => {
-                object!{
+            PatternResult::StructureMismatch {
+                expected_pattern,
+                actual_structure,
+                reason,
+            } => {
+                object! {
                     "type": Value::String("StructureMismatch".to_string()),
                     "expected_pattern": Value::String(expected_pattern.clone()),
                     "actual_structure": Value::String(actual_structure.clone()),
                     "reason": Value::String(reason.clone())
                 }
             }
-            PatternResult::CachedNegative { pattern_id, cache_hit_count, reason } => {
-                object!{
+            PatternResult::CachedNegative {
+                pattern_id,
+                cache_hit_count,
+                reason,
+            } => {
+                object! {
                     "type": Value::String("CachedNegative".to_string()),
                     "pattern_id": Value::String(pattern_id.clone()),
                     "cache_hit_count": Value::String(cache_hit_count.to_string()),
                     "reason": Value::String(reason.clone())
                 }
             }
-            PatternResult::CachedPositive { pattern_id, cache_hit_count, reason } => {
-                object!{
+            PatternResult::CachedPositive {
+                pattern_id,
+                cache_hit_count,
+                reason,
+            } => {
+                object! {
                     "type": Value::String("CachedPositive".to_string()),
                     "pattern_id": Value::String(pattern_id.clone()),
                     "cache_hit_count": Value::String(cache_hit_count.to_string()),
@@ -2219,28 +2906,42 @@ impl Patternizer {
     /// Load pattern cache from JSON file
     pub fn load_cache_from_json(&mut self, file_path: &str) -> Result<()> {
         use std::fs;
-        
+
         if !std::path::Path::new(file_path).exists() {
             info!("Pattern cache file not found: {}", file_path);
             return Ok(()); // Not an error - just no cache to load
         }
-        
-        let content = fs::read_to_string(file_path)
-            .map_err(|e| C2RError::new(Kind::Io, Reason::Failed("to read cache file"), Some(e.to_string())))?;
-        
+
+        let content = fs::read_to_string(file_path).map_err(|e| {
+            C2RError::new(
+                Kind::Io,
+                Reason::Failed("to read cache file"),
+                Some(e.to_string()),
+            )
+        })?;
+
         if content.trim().is_empty() {
             info!("Pattern cache file is empty: {}", file_path);
             return Ok(());
         }
-        
-        let json_data = crate::json::parse(&content)
-            .map_err(|e| C2RError::new(Kind::Json, Reason::Invalid("JSON"), Some(format!("Failed to parse {}: {}", file_path, e))))?;
-        
+
+        let json_data = crate::json::parse(&content).map_err(|e| {
+            C2RError::new(
+                Kind::Json,
+                Reason::Invalid("JSON"),
+                Some(format!("Failed to parse {}: {}", file_path, e)),
+            )
+        })?;
+
         // Validate structure
         if !json_data.is_object() {
-            return Err(C2RError::new(Kind::Json, Reason::Invalid("JSON structure"), Some("Root must be an object".to_string())));
+            return Err(C2RError::new(
+                Kind::Json,
+                Reason::Invalid("JSON structure"),
+                Some("Root must be an object".to_string()),
+            ));
         }
-        
+
         // Validate and log metadata
         if let Some(metadata) = json_data["metadata"].as_object() {
             if let Some(version) = metadata.get("version") {
@@ -2255,12 +2956,12 @@ impl Patternizer {
         } else {
             warn!("Pattern cache missing metadata section");
         }
-        
+
         // Load cache entries with enhanced error handling
         if let Some(cache_obj) = json_data["cache"].as_object() {
             let mut loaded_count = 0;
             let mut failed_count = 0;
-            
+
             for node in cache_obj.iter() {
                 let key = node.key.as_str();
                 match self.json_to_pattern_result(&node.value) {
@@ -2274,25 +2975,31 @@ impl Patternizer {
                     }
                 }
             }
-            
-            info!("Loaded {} pattern cache entries from {}", loaded_count, file_path);
+
+            info!(
+                "Loaded {} pattern cache entries from {}",
+                loaded_count, file_path
+            );
             if failed_count > 0 {
                 warn!("Failed to parse {} cache entries", failed_count);
             }
         } else {
             warn!("Pattern cache missing cache section");
         }
-        
+
         Ok(())
     }
-    
+
     /// Convert JSON value to PatternResult
-    fn json_to_pattern_result(&self, json_value: &crate::json::Value) -> Option<PatternResult> {
+    fn json_to_pattern_result(&self, json_value: &Value) -> Option<PatternResult> {
         let result_type = json_value["type"].as_str()?;
-        
+
         match result_type {
             "Match" => {
-                let consumed_tokens = json_value["consumed_tokens"].as_str()?.parse::<usize>().ok()?;
+                let consumed_tokens = json_value["consumed_tokens"]
+                    .as_str()?
+                    .parse::<usize>()
+                    .ok()?;
                 Some(PatternResult::Match { consumed_tokens })
             }
             "NoMatch" => {
@@ -2301,7 +3008,8 @@ impl Patternizer {
             }
             "CountOf" => {
                 let offsets_array = json_value["offsets"].as_array()?;
-                let offsets: Vec<Range<usize>> = offsets_array.iter()
+                let offsets: Vec<Range<usize>> = offsets_array
+                    .iter()
                     .filter_map(|v| {
                         let array = v.as_array()?;
                         if array.len() >= 2 {
@@ -2322,7 +3030,8 @@ impl Patternizer {
             }
             "Fuzzy" => {
                 let offsets_array = json_value["offsets"].as_array()?;
-                let offsets: Vec<Range<usize>> = offsets_array.iter()
+                let offsets: Vec<Range<usize>> = offsets_array
+                    .iter()
                     .filter_map(|v| {
                         let array = v.as_array()?;
                         if array.len() >= 2 {
@@ -2345,16 +3054,16 @@ impl Patternizer {
                 let actual_type = json_value["found"].as_str()?;
                 let position = json_value["position"].as_str()?.parse::<usize>().ok()?;
                 let reason = json_value["reason"].as_str()?.to_string();
-                
+
                 // Parse the expected_type and actual_type strings back to TokenTypeVariant
                 let expected_variant = self.parse_token_type_variant(expected_type)?;
                 let actual_variant = self.parse_token_type_variant(actual_type)?;
-                
-                Some(PatternResult::TypeMismatch { 
+
+                Some(PatternResult::TypeMismatch {
                     expected_type: expected_variant,
                     actual_type: actual_variant,
                     position,
-                    reason
+                    reason,
                 })
             }
             "ValueMismatch" => {
@@ -2362,35 +3071,42 @@ impl Patternizer {
                 let actual_value = json_value["found"].as_str()?.to_string();
                 let position = json_value["position"].as_str()?.parse::<usize>().ok()?;
                 let reason = json_value["reason"].as_str()?.to_string();
-                
-                Some(PatternResult::ValueMismatch { 
+
+                Some(PatternResult::ValueMismatch {
                     expected_value,
                     actual_value,
                     position,
-                    reason
+                    reason,
                 })
             }
             "StructureMismatch" => {
                 let expected_pattern = json_value["expected_pattern"].as_str()?.to_string();
                 let actual_structure = json_value["actual_structure"].as_str()?.to_string();
                 let reason = json_value["reason"].as_str()?.to_string();
-                
-                Some(PatternResult::StructureMismatch { 
+
+                Some(PatternResult::StructureMismatch {
                     expected_pattern,
                     actual_structure,
-                    reason
+                    reason,
                 })
             }
             "CachedNegative" => {
                 let pattern_id = json_value["pattern_id"].as_str()?.to_string();
-                let cache_hit_count = json_value["cache_hit_count"].as_str()?.parse::<usize>().ok()?;
+                let cache_hit_count = json_value["cache_hit_count"]
+                    .as_str()?
+                    .parse::<usize>()
+                    .ok()?;
                 let reason = json_value["reason"].as_str()?.to_string();
-                Some(PatternResult::CachedNegative { pattern_id, cache_hit_count, reason })
+                Some(PatternResult::CachedNegative {
+                    pattern_id,
+                    cache_hit_count,
+                    reason,
+                })
             }
-            _ => None
+            _ => None,
         }
     }
-    
+
     /// Helper function to parse TokenTypeVariant from string
     fn parse_token_type_variant(&self, type_str: &str) -> Option<TokenTypeVariant> {
         match type_str {
@@ -2408,8 +3124,99 @@ impl Patternizer {
             _ => None,
         }
     }
+    pub fn process_handler_patterns(
+        &mut self,
+        tokens: &[Token],
+        handler_type: &str,
+    ) -> Result<f64> {
+        let mut matched = 0.0;
+        let mut total_tests = 0.0;
 
-        
+        // Test different pattern types based on handler
+        match handler_type {
+            "function_handler" => {
+                if matches!(
+                    self.match_pattern("function", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+
+                if matches!(
+                    self.match_pattern("function_declaration", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 0.8; // Slightly lower weight
+                }
+                total_tests += 1.0;
+            }
+            "struct_handler" => {
+                if matches!(
+                    self.match_pattern("struct_definition", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+            }
+            "enum_handler" => {
+                if matches!(
+                    self.match_pattern("enum_definition", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+            }
+            "typedef_handler" => {
+                if matches!(
+                    self.match_pattern("typedef_definition", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+            }
+            "array_handler" => {
+                if matches!(
+                    self.match_pattern("array_declaration", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+            }
+            "global_handler" => {
+                if matches!(
+                    self.match_pattern("global_variable", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+            }
+            "expression_handler" => {
+                if matches!(
+                    self.match_pattern("expression_assignment", tokens),
+                    PatternResult::Match { .. }
+                ) {
+                    matched += 1.0;
+                }
+                total_tests += 1.0;
+            }
+            _ => {
+                // Default pattern testing
+                total_tests = 1.0;
+            }
+        }
+
+        if total_tests > 0.0 {
+            Ok(matched / total_tests)
+        } else {
+            Ok(0.0)
+        }
+    }
 
     /// Get statistics about registered patterns
     pub fn get_stats(&self) -> HashMap<String, usize> {
@@ -2590,13 +3397,13 @@ impl Patternizer {
     }
 
     /// Get all unique pattern IDs
-    pub fn get_pattern_ids(&self) -> Vec<String> {
+    pub fn get_pattern_ids(&self) -> Vec<Id> {
         self.iter_all_patterns()
             .filter_map(|item: PatternIteratorItem<'_>| match item {
                 PatternIteratorItem::Pattern(pattern, _) => Some(pattern.id.clone()),
                 _ => None,
             })
-            .collect()
+            .collect::<Vec<Id>>()
     }
 }
 
@@ -2611,8 +3418,6 @@ pub struct CachedPatternMatch {
     pub hit_count: u64,
     pub last_used: Instant,
     pub performance_metrics: PatternMetrics,
-
-    // === NEW: ENHANCED CACHING FEATURES ===
     /// Sequence fingerprint for fast comparison and better cache keys
     pub sequence_fingerprint: SequenceFingerprint,
     /// Whether this is a positive (match) or negative (no match) cache entry
@@ -2679,6 +3484,27 @@ pub struct Pattern {
     pub usage_metrics: PatternMetrics,
 }
 impl Pattern {
+    pub fn new(
+        id: Id,
+        name: String,
+        description: String,
+        token_patterns: Vec<TokenPattern>,
+        priority: u32,
+        handler_types: Vec<String>,
+        created_at: Instant,
+        usage_metrics: PatternMetrics,
+    ) -> Self {
+        Pattern {
+            id,
+            name,
+            description,
+            token_patterns,
+            priority,
+            handler_types,
+            created_at,
+            usage_metrics,
+        }
+    }
     pub fn id(&self) -> &Id {
         &self.id
     }
@@ -2734,7 +3560,7 @@ pub fn store_pattern(context: &mut Context, pattern_id: &str, pattern: Pattern) 
     let pattern_key: String = format!("pattern_{}", pattern_id);
 
     // Use GlobalContext::with_context for proper shared access to the same global instance
-    context.set_entry(Id::get(&pattern_key), Entry::Patternizer(pattern.clone()));
+    context.set_entry(Id::get(&pattern_key), Entry::Pattern(pattern.clone()));
     println!(
         "📋 Stored pattern '{}' in registry with key '{}'",
         pattern.id.name(),
@@ -2743,7 +3569,11 @@ pub fn store_pattern(context: &mut Context, pattern_id: &str, pattern: Pattern) 
 }
 
 /// Cache a pattern match result (both positive and negative) in the context registry
-pub fn cache_pattern_match(context: &mut Context, pattern_id: &str, cached_match: CachedPatternMatch) {
+pub fn cache_pattern_match(
+    context: &mut Context,
+    pattern_id: &str,
+    cached_match: CachedPatternMatch,
+) {
     let cache_key: String = format!("pattern_cache_{}", pattern_id);
     // Extract consumed_tokens from the match_result
     let consumed_tokens = match &cached_match.match_result {
@@ -2789,8 +3619,8 @@ pub fn cache_pattern_match(context: &mut Context, pattern_id: &str, cached_match
                 )),
             ),
         ]
-        .into_iter()
-        .collect(),
+            .into_iter()
+            .collect(),
     );
     context.registry.set_value(&cache_key, cache_data);
     println!("🔍 Cache stored for key: '{}'", cache_key);
@@ -2807,39 +3637,35 @@ pub fn get_cached_pattern_match(
 
     println!("🔍 Registry accessed for cache lookup");
     let cache_entry = context.get_entry(&Id::get(&cache_key)).clone();
-    
+
     if let Some(entry) = cache_entry {
         println!("✅ Cache entry found for key '{}'", cache_key);
         match entry {
-            crate::entry::Entry::StrMap(cache_data) => {
+            Entry::StrMap(cache_data) => {
                 println!("✅ Cache entry is StrMap with {} fields", cache_data.len());
                 // Verify token sequence matches
-                if let Some(crate::entry::Entry::StrMap(cached_tokens_map)) =
-                    cache_data.get("token_sequence")
-                {
+                if let Some(Entry::StrMap(cached_tokens_map)) = cache_data.get("token_sequence") {
                     println!(
                         "✅ Found cached token sequence with {} tokens",
                         cached_tokens_map.len()
                     );
                     let token_strings: Vec<String> =
                         token_sequence.iter().map(|t| t.to_string()).collect();
-                    
+
                     // Extract tokens from StrMap by sorting indices
                     let mut indexed_tokens: Vec<(usize, String)> = cached_tokens_map
                         .iter()
                         .filter_map(|(key, value)| {
                             let index = key.parse::<usize>().ok()?;
                             match value {
-                                crate::entry::Entry::Str(s) => Some((index, s.clone())),
+                                Entry::Str(s) => Some((index, s.clone())),
                                 _ => None,
                             }
                         })
                         .collect();
                     indexed_tokens.sort_by_key(|(index, _)| *index);
-                    let cached_token_strings: Vec<String> = indexed_tokens
-                        .into_iter()
-                        .map(|(_, token)| token)
-                        .collect();
+                    let cached_token_strings: Vec<String> =
+                        indexed_tokens.into_iter().map(|(_, token)| token).collect();
 
                     println!("🔍 Current tokens: {}", token_strings.join(", "));
                     println!("🔍 Cached tokens: {}", cached_token_strings.join(", "));
@@ -2850,40 +3676,44 @@ pub fn get_cached_pattern_match(
                             pattern_id
                         );
                         // Return the cached consumed_tokens value, not the full sequence length
-                        if let Some(crate::entry::Entry::Val(cached_consumed)) =
-                            cache_data.get("consumed_tokens")
+                        if let Some(Entry::Val(cached_consumed)) = cache_data.get("consumed_tokens")
                         {
-                            return Some(PatternResult::Match {
+                            Some(PatternResult::Match {
                                 consumed_tokens: *cached_consumed as usize,
-                            });
+                            })
                         } else {
                             // Fallback if no consumed_tokens found (should not happen)
-                            return Some(PatternResult::Match {
+                            Some(PatternResult::Match {
                                 consumed_tokens: token_sequence.len(),
-                            });
+                            })
                         }
                     } else {
                         println!("❌ Token sequences don't match - cache miss");
-                        return None;
+                        None
                     }
                 } else {
                     println!("❌ No token_sequence found in cache data");
-                    return None;
+                    None
                 }
             }
             _ => {
                 println!("❌ Cache entry is not StrMap: {:?}", entry);
-                return None;
+                None
             }
         }
     } else {
         println!("❌ No cache entry found for key '{}'", cache_key);
-        return None;
+        None
     }
 }
 
 /// Cache a negative pattern match result (pattern that failed to match)
-pub fn cache_negative_result(context: &mut Context, pattern_id: &str, tokens: &[Token], mismatch_result: PatternResult) {
+pub fn cache_negative_result(
+    context: &mut Context,
+    pattern_id: &str,
+    tokens: &[Token],
+    mismatch_result: PatternResult,
+) {
     let sequence_fingerprint: SequenceFingerprint = generate_sequence_fingerprint(tokens);
     let cache_key: String = format!("negative_cache_{}", pattern_id);
 
@@ -2901,12 +3731,13 @@ pub fn cache_negative_result(context: &mut Context, pattern_id: &str, tokens: &[
     );
 
     // Store as a list of negative entries for this pattern
-    let current_negatives: Vec<Entry> = context.get_entry(&Id::get(&cache_key))
-            .and_then(|entry| match entry {
-                Entry::List(list) => Some(list.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(Vec::new);
+    let current_negatives: Vec<Entry> = context
+        .get_entry(&Id::get(&cache_key))
+        .and_then(|entry| match entry {
+            Entry::List(list) => Some(list.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(Vec::new);
 
     let mut updated_negatives: Vec<Entry> = current_negatives;
     updated_negatives.push(Entry::Str(format!(
@@ -2914,53 +3745,67 @@ pub fn cache_negative_result(context: &mut Context, pattern_id: &str, tokens: &[
         sequence_fingerprint.signature, negative_entry.pattern_id
     )));
 
-    context.registry.set_value(&cache_key, Entry::List(updated_negatives));
+    context
+        .registry
+        .set_value(&cache_key, Entry::List(updated_negatives));
 }
 
 /// Check if a token sequence is in the negative cache for a pattern
-pub fn check_negative_cache(context: &mut Context, pattern_id: &str, tokens: &[Token]) -> Option<PatternResult> {
+pub fn check_negative_cache(
+    context: &mut Context,
+    pattern_id: &str,
+    tokens: &[Token],
+) -> Option<PatternResult> {
     // ULTRA-SAFE: Skip negative cache entirely if tokens look corrupted
     if tokens.len() > 1000 {
-        eprintln!("⚠️  WARNING: Skipping negative cache for oversized token sequence ({} tokens)", tokens.len());
+        eprintln!(
+            "⚠️  WARNING: Skipping negative cache for oversized token sequence ({} tokens)",
+            tokens.len()
+        );
         return None;
     }
-    
+
     // Quick corruption check on first few tokens
     for (i, token) in tokens.iter().enumerate().take(5) {
         if std::panic::catch_unwind(|| {
             let _ = format!("{:?}", token);
             let _ = token.to_string();
-        }).is_err() {
-            eprintln!("🚨 CRITICAL: Corrupted token detected at index {}, disabling negative cache for this sequence", i);
+        })
+            .is_err()
+        {
+            eprintln!(
+                "🚨 CRITICAL: Corrupted token detected at index {}, disabling negative cache for this sequence",
+                i
+            );
             return None;
         }
     }
-    
+
     let sequence_fingerprint: SequenceFingerprint = generate_sequence_fingerprint(tokens);
     let cache_key: String = format!("negative_cache_{}", pattern_id);
 
     if let Some(Entry::List(negative_entries)) = context.get_entry(&Id::get(&cache_key)) {
-            let signature_str: String = sequence_fingerprint.signature.to_string();
+        let signature_str: String = sequence_fingerprint.signature.to_string();
 
-            for entry in negative_entries {
-                if let Entry::Str(entry_str) = entry {
-                    if entry_str.starts_with(&signature_str) {
-                        println!(
-                            "🚫 NEGATIVE CACHE HIT! Pattern '{}' known not to match signature {}",
-                            pattern_id, sequence_fingerprint.signature
-                        );
-                        return Some(PatternResult::CachedNegative {
-                            pattern_id: pattern_id.to_string(),
-                            cache_hit_count: 1,
-                            reason: format!(
-                                "Previously failed to match token sequence with signature {}",
-                                sequence_fingerprint.signature
-                            ),
-                        });
-                    }
+        for entry in negative_entries {
+            if let Entry::Str(entry_str) = entry {
+                if entry_str.starts_with(&signature_str) {
+                    println!(
+                        "🚫 NEGATIVE CACHE HIT! Pattern '{}' known not to match signature {}",
+                        pattern_id, sequence_fingerprint.signature
+                    );
+                    return Some(PatternResult::CachedNegative {
+                        pattern_id: pattern_id.to_string(),
+                        cache_hit_count: 1,
+                        reason: format!(
+                            "Previously failed to match token sequence with signature {}",
+                            sequence_fingerprint.signature
+                        ),
+                    });
                 }
             }
         }
+    }
     None
 }
 
@@ -2970,7 +3815,11 @@ pub fn get_cache_statistics(context: &mut Context) -> CacheStatistics {
     let mut negative_hits: usize = 0;
     let mut total_entries: usize = 0;
 
-    context.registry.entries().into_iter().for_each(|(id, entry)| {
+    context
+        .registry
+        .entries()
+        .into_iter()
+        .for_each(|(id, entry)| {
             let id_str = id.name();
             if id_str.starts_with("pattern_cache_") {
                 positive_hits += 1;
@@ -2981,8 +3830,7 @@ pub fn get_cache_statistics(context: &mut Context) -> CacheStatistics {
                     total_entries += entries.len();
                 }
             }
-        }
-    );
+        });
     let hit_ratio = if total_entries > 0 {
         positive_hits as f64 / total_entries as f64
     } else {
@@ -3024,7 +3872,7 @@ pub fn register_common_multi_token_patterns(context: &mut Context) {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    context.insert_pattern("function", function_pattern);
+    context.registry.insert_pattern("function", function_pattern);
 
     // Struct declaration pattern: "struct identifier { ... }"
     let struct_pattern = Pattern {
@@ -3043,7 +3891,7 @@ pub fn register_common_multi_token_patterns(context: &mut Context) {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    context.insert_pattern("struct", struct_pattern);
+    context.registry.insert_pattern("struct", struct_pattern);
 
     // Enum declaration pattern: "enum identifier { ... }"
     let enum_pattern = Pattern {
@@ -3062,7 +3910,7 @@ pub fn register_common_multi_token_patterns(context: &mut Context) {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    context.insert_pattern("enum", enum_pattern);
+    context.registry.insert_pattern("enum", enum_pattern);
 
     // Array declaration pattern: "type identifier [ size ]"
     let array_pattern = Pattern {
@@ -3081,7 +3929,7 @@ pub fn register_common_multi_token_patterns(context: &mut Context) {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    context.insert_pattern("array", array_pattern);
+    context.registry.insert_pattern("array", array_pattern);
 
     // If statement pattern: "if ( condition )"
     let if_pattern = Pattern {
@@ -3099,11 +3947,15 @@ pub fn register_common_multi_token_patterns(context: &mut Context) {
         created_at: Instant::now(),
         usage_metrics: PatternMetrics::default(),
     };
-    context.insert_pattern("if", if_pattern);
+    context.registry.insert_pattern("if", if_pattern);
 }
 
 /// Enhanced pattern matching with context registry caching (simplified with get_value)
-pub fn match_pattern_with_registry_cache(context: &mut Context, pattern_name: &str, tokens: &[Token]) -> PatternResult {
+pub fn match_pattern_with_registry_cache(
+    context: &mut Context,
+    pattern_name: &str,
+    tokens: &[Token],
+) -> PatternResult {
     let start_time: Instant = Instant::now();
 
     // Check negative cache first - fastest path
@@ -3117,7 +3969,7 @@ pub fn match_pattern_with_registry_cache(context: &mut Context, pattern_name: &s
     }
 
     // Look up the pattern using the new dedicated get_pattern function
-    match context.get_pattern(pattern_name) {
+    match context.registry.get_pattern(pattern_name) {
         Some(pattern) => {
             // Match this pattern against the tokens
             let result: PatternResult = match_multi_token_pattern(&pattern, tokens);
@@ -3127,7 +3979,7 @@ pub fn match_pattern_with_registry_cache(context: &mut Context, pattern_name: &s
                 PatternResult::Match { .. } => {
                     // Cache successful matches
                     let sequence_fingerprint = generate_sequence_fingerprint(tokens);
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    let mut hasher = DefaultHasher::new();
                     pattern_name.hash(&mut hasher);
                     let pattern_hash = hasher.finish();
 
@@ -3179,7 +4031,7 @@ fn match_multi_token_pattern(pattern: &Pattern, tokens: &[Token]) -> PatternResu
     // For now, implement a simple pattern matching logic based on the pattern ID
     // In a full implementation, we would use the token_patterns vector for sophisticated matching
     match pattern.name.as_str() {
-        "c_function_declaration" => {
+        "function_declaration" => {
             // Look for: type identifier ( ... )
             if tokens.len() >= 4 {
                 let has_type: bool = matches!(
@@ -3202,7 +4054,7 @@ fn match_multi_token_pattern(pattern: &Pattern, tokens: &[Token]) -> PatternResu
                 }
             }
         }
-        "c_include_statement" => {
+        "include_statement" => {
             // Look for: # include <...> or # include "..."
             if tokens.len() >= 2
                 && tokens[0].to_string() == "#"
@@ -3213,7 +4065,7 @@ fn match_multi_token_pattern(pattern: &Pattern, tokens: &[Token]) -> PatternResu
                 };
             }
         }
-        "c_array_declaration" => {
+        "array_declaration" => {
             // Look for: type identifier [ size ]
             if tokens.len() >= 5 {
                 let has_type: bool = matches!(
@@ -3252,16 +4104,20 @@ fn match_multi_token_pattern(pattern: &Pattern, tokens: &[Token]) -> PatternResu
     }
 }
 /// Helper function for pattern matching using context patternizer (moved from BaseHandler)
-pub fn match_patterns_with_context(context: &mut Context, tokens: &[Token], patterns: &Vec<String>) -> bool {
+pub fn match_patterns(
+    context: &mut Context,
+    tokens: &[Token],
+    patterns: &Vec<String>,
+) -> bool {
     // Use both registry cache AND patternizer cache for complete coverage
     for pattern in patterns {
         // First try registry cache (fast)
         let result = match_pattern_with_registry_cache(context, pattern, tokens);
         if matches!(result, PatternResult::Match { .. }) {
-            return true;    
+            return true;
         }
     }
-    
+
     // If no registry cache hit, try patternizer directly to build cache
     for pattern in patterns {
         let result = context.patternizer.match_pattern(pattern, tokens);
@@ -3269,29 +4125,29 @@ pub fn match_patterns_with_context(context: &mut Context, tokens: &[Token], patt
             return true;
         }
     }
-    
+
     false
 }
 /// Match a registry-stored pattern against tokens
 #[allow(dead_code)]
 fn match_registry_pattern_against_tokens(
-    pattern_data: &HashMap<String, crate::entry::Entry>,
+    pattern_data: &HashMap<String, Entry>,
     tokens: &[Token],
 ) -> PatternResult {
     // Extract pattern information from the registry data
     let pattern_id = match pattern_data.get("id") {
-        Some(crate::entry::Entry::Str(id)) => id.clone(),
+        Some(Entry::Str(id)) => id.clone(),
         _ => "unknown".to_string(),
     };
     let _description = match pattern_data.get("description") {
-        Some(crate::entry::Entry::Str(desc)) => desc.clone(),
+        Some(Entry::Str(desc)) => desc.clone(),
         _ => "".to_string(),
     };
 
     // For now, implement a simple pattern matching logic based on the pattern ID
     // In a full implementation, we would deserialize the full Patternizer and use it
     match pattern_id.as_str() {
-        "c_function_declaration" => {
+        "function_declaration" => {
             // Look for: type identifier ( ... )
             if tokens.len() >= 4 {
                 let has_type: bool = matches!(
@@ -3314,7 +4170,7 @@ fn match_registry_pattern_against_tokens(
                 }
             }
         }
-        "c_include_statement" => {
+        "include_statement" => {
             // Look for: # include <...> or # include "..."
             if tokens.len() >= 2
                 && tokens[0].to_string() == "#"
@@ -3325,7 +4181,7 @@ fn match_registry_pattern_against_tokens(
                 };
             }
         }
-        "c_array_declaration" => {
+        "array_declaration" => {
             // Look for: type identifier [ size ]
             if tokens.len() >= 5 {
                 let has_type = matches!(

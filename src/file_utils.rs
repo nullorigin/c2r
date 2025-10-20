@@ -15,7 +15,7 @@ impl FileUtils {
             Ok(content) => Ok(content),
             Err(err) => Err(C2RError::new(
                 Kind::Io,
-                Reason::Other("io error"),
+                Reason::Read("error"),
                 Some(format!("Failed to read file {}: {}", path, err)),
             )),
         }
@@ -65,7 +65,7 @@ impl FileUtils {
             Ok(content) => Ok(content),
             Err(err) => Err(C2RError::new(
                 Kind::Io,
-                Reason::Other("io error"),
+                Reason::Read("io error"),
                 Some(format!("Failed to read file {:?}: {}", path, err)),
             )),
         }
@@ -93,7 +93,7 @@ impl FileUtils {
             Err(err) => {
                 return Err(C2RError::new(
                     Kind::Io,
-                    Reason::Other("io error"),
+                    Reason::Read("io error"),
                     Some(format!("Failed to read directory {:?}: {}", dir, err)),
                 ));
             }
@@ -105,7 +105,7 @@ impl FileUtils {
                 Err(err) => {
                     return Err(C2RError::new(
                         Kind::Io,
-                        Reason::Other("io error"),
+                        Reason::Read("error"),
                         Some(format!("Failed to read directory entry: {}", err)),
                     ));
                 }
