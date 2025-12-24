@@ -7,9 +7,9 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::{cmp::Ordering, fmt::Display};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct C2RError(Kind, Reason, Option<String>);
+pub struct Error(Kind, Reason, Option<String>);
 
-pub type Result<T> = std::result::Result<T, C2RError>;
+pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Kind {
@@ -360,7 +360,7 @@ pub enum Reason {
     Unexpected(&'static str),
 }
 
-impl C2RError {
+impl Error {
     pub fn new(kind: Kind, reason: Reason, message: Option<String>) -> Self {
         Self(kind, reason, message)
     }
@@ -395,67 +395,67 @@ impl C2RError {
         self.to_string()
     }
 }
-impl Default for C2RError {
+impl Default for Error {
     fn default() -> Self {
         Self(Kind::Other, Reason::Unknown("unknown error"), None)
     }
 }
-impl Display for C2RError {
+impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.to_string())
     }
 }
-impl std::error::Error for C2RError {}
-impl Ord for C2RError {
+impl std::error::Error for Error {}
+impl Ord for Error {
     fn cmp(&self, other: &Self) -> Ordering {
         self.0.cmp(&other.0).then_with(|| self.1.cmp(&other.1))
     }
 }
-impl PartialOrd for C2RError {
+impl PartialOrd for Error {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl From<std::fmt::Error> for C2RError {
+impl From<std::fmt::Error> for Error {
     fn from(e: std::fmt::Error) -> Self {
-        C2RError::new(Kind::Format, Reason::Invalid("format"), Some(e.to_string()))
+        Error::new(Kind::Format, Reason::Invalid("format"), Some(e.to_string()))
     }
 }
 
-impl From<C2RError> for std::fmt::Error {
-    fn from(_e: C2RError) -> Self {
+impl From<Error> for std::fmt::Error {
+    fn from(_e: Error) -> Self {
         std::fmt::Error
     }
 }
 
-impl From<std::num::ParseIntError> for C2RError {
+impl From<std::num::ParseIntError> for Error {
     fn from(e: std::num::ParseIntError) -> Self {
         match e.kind() {
             std::num::IntErrorKind::Empty => {
-                C2RError::new(Kind::ParseInt, Reason::Empty("string"), Some(e.to_string()))
+                Error::new(Kind::ParseInt, Reason::Empty("string"), Some(e.to_string()))
             }
-            std::num::IntErrorKind::InvalidDigit => C2RError::new(
+            std::num::IntErrorKind::InvalidDigit => Error::new(
                 Kind::ParseInt,
                 Reason::Invalid("digit"),
                 Some(e.to_string()),
             ),
-            std::num::IntErrorKind::PosOverflow => C2RError::new(
+            std::num::IntErrorKind::PosOverflow => Error::new(
                 Kind::ParseInt,
                 Reason::Overflow("positive"),
                 Some(e.to_string()),
             ),
-            std::num::IntErrorKind::NegOverflow => C2RError::new(
+            std::num::IntErrorKind::NegOverflow => Error::new(
                 Kind::ParseInt,
                 Reason::Overflow("negative"),
                 Some(e.to_string()),
             ),
-            std::num::IntErrorKind::Zero => C2RError::new(
+            std::num::IntErrorKind::Zero => Error::new(
                 Kind::ParseInt,
                 Reason::Divide("by zero"),
                 Some(e.to_string()),
             ),
-            _ => C2RError::new(
+            _ => Error::new(
                 Kind::ParseInt,
                 Reason::Unknown("integer parsing"),
                 Some(e.to_string()),
@@ -464,20 +464,20 @@ impl From<std::num::ParseIntError> for C2RError {
     }
 }
 
-impl From<std::num::ParseFloatError> for C2RError {
+impl From<std::num::ParseFloatError> for Error {
     fn from(e: std::num::ParseFloatError) -> Self {
         match e.to_string().as_str() {
-            "cannot parse float from empty string" => C2RError(
+            "cannot parse float from empty string" => Error(
                 Kind::ParseFloat,
                 Reason::Empty("string"),
                 Some(e.to_string()),
             ),
-            "invalid float literal" => C2RError(
+            "invalid float literal" => Error(
                 Kind::ParseFloat,
                 Reason::Invalid("float"),
                 Some(e.to_string()),
             ),
-            _ => C2RError(
+            _ => Error(
                 Kind::ParseFloat,
                 Reason::Parse("float parsing error"),
                 Some(e.to_string()),
@@ -486,302 +486,302 @@ impl From<std::num::ParseFloatError> for C2RError {
     }
 }
 
-impl From<std::io::Error> for C2RError {
+impl From<std::io::Error> for Error {
     fn from(e: std::io::Error) -> Self {
         match e.kind() {
-            std::io::ErrorKind::AddrInUse => C2RError(
+            std::io::ErrorKind::AddrInUse => Error(
                 Kind::IoAccess,
                 Reason::Address("in use"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::AddrNotAvailable => C2RError(
+            std::io::ErrorKind::AddrNotAvailable => Error(
                 Kind::IoAccess,
                 Reason::Address("not available"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::AlreadyExists => C2RError(
+            std::io::ErrorKind::AlreadyExists => Error(
                 Kind::IoAccess,
                 Reason::Exists("already"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::ArgumentListTooLong => C2RError(
+            std::io::ErrorKind::ArgumentListTooLong => Error(
                 Kind::Io,
                 Reason::Argument("list too long"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::BrokenPipe => {
-                C2RError(Kind::Io, Reason::Broken("pipe"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Broken("pipe"), Some(e.to_string()))
             }
-            std::io::ErrorKind::ConnectionAborted => C2RError(
+            std::io::ErrorKind::ConnectionAborted => Error(
                 Kind::NetworkConnection,
                 Reason::Connection("aborted"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::ConnectionRefused => C2RError(
+            std::io::ErrorKind::ConnectionRefused => Error(
                 Kind::NetworkConnection,
                 Reason::Connection("refused"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::ConnectionReset => C2RError(
+            std::io::ErrorKind::ConnectionReset => Error(
                 Kind::NetworkConnection,
                 Reason::Connection("reset"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::CrossesDevices => {
-                C2RError(Kind::Io, Reason::Crosses("devices"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Crosses("devices"), Some(e.to_string()))
             }
             std::io::ErrorKind::Deadlock => {
-                C2RError(Kind::Io, Reason::Deadlock("detected"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Deadlock("detected"), Some(e.to_string()))
             }
-            std::io::ErrorKind::DirectoryNotEmpty => C2RError(
+            std::io::ErrorKind::DirectoryNotEmpty => Error(
                 Kind::Io,
                 Reason::Directory("not empty"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::ExecutableFileBusy => C2RError(
+            std::io::ErrorKind::ExecutableFileBusy => Error(
                 Kind::Io,
                 Reason::Executable("file busy"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::FileTooLarge => {
-                C2RError(Kind::Io, Reason::File("too large"), Some(e.to_string()))
+                Error(Kind::Io, Reason::File("too large"), Some(e.to_string()))
             }
-            std::io::ErrorKind::HostUnreachable => C2RError(
+            std::io::ErrorKind::HostUnreachable => Error(
                 Kind::NetworkHost,
                 Reason::Host("unreachable"),
                 Some(e.to_string()),
             ),
-            std::io::ErrorKind::Interrupted => C2RError(
+            std::io::ErrorKind::Interrupted => Error(
                 Kind::Io,
                 Reason::Interrupted("operation"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::InvalidData => {
-                C2RError(Kind::Io, Reason::Invalid("data"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Invalid("data"), Some(e.to_string()))
             }
             std::io::ErrorKind::InvalidFilename => {
-                C2RError(Kind::Io, Reason::Invalid("filename"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Invalid("filename"), Some(e.to_string()))
             }
             std::io::ErrorKind::InvalidInput => {
-                C2RError(Kind::Io, Reason::Invalid("input"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Invalid("input"), Some(e.to_string()))
             }
             std::io::ErrorKind::IsADirectory => {
-                C2RError(Kind::Io, Reason::Is("a directory"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Is("a directory"), Some(e.to_string()))
             }
             std::io::ErrorKind::NetworkDown => {
-                C2RError(Kind::Network, Reason::Network("down"), Some(e.to_string()))
+                Error(Kind::Network, Reason::Network("down"), Some(e.to_string()))
             }
-            std::io::ErrorKind::NetworkUnreachable => C2RError(
+            std::io::ErrorKind::NetworkUnreachable => Error(
                 Kind::Network,
                 Reason::Network("unreachable"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::NotADirectory => {
-                C2RError(Kind::Io, Reason::Not("a directory"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Not("a directory"), Some(e.to_string()))
             }
-            std::io::ErrorKind::NotConnected => C2RError(
+            std::io::ErrorKind::NotConnected => Error(
                 Kind::NetworkConnection,
                 Reason::Not("connected"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::NotFound => {
-                C2RError(Kind::IoNotFound, Reason::Not("found"), Some(e.to_string()))
+                Error(Kind::IoNotFound, Reason::Not("found"), Some(e.to_string()))
             }
             std::io::ErrorKind::NotSeekable => {
-                C2RError(Kind::Io, Reason::Not("seekable"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Not("seekable"), Some(e.to_string()))
             }
             std::io::ErrorKind::OutOfMemory => {
-                C2RError(Kind::Io, Reason::OutOf("memory"), Some(e.to_string()))
+                Error(Kind::Io, Reason::OutOf("memory"), Some(e.to_string()))
             }
-            std::io::ErrorKind::PermissionDenied => C2RError(
+            std::io::ErrorKind::PermissionDenied => Error(
                 Kind::IoPermission,
                 Reason::Permission("denied"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::QuotaExceeded => {
-                C2RError(Kind::Io, Reason::Quota("exceeded"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Quota("exceeded"), Some(e.to_string()))
             }
-            std::io::ErrorKind::ReadOnlyFilesystem => C2RError(
+            std::io::ErrorKind::ReadOnlyFilesystem => Error(
                 Kind::Io,
                 Reason::Filesystem("read-only"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::ResourceBusy => {
-                C2RError(Kind::Io, Reason::Busy("resource"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Busy("resource"), Some(e.to_string()))
             }
-            std::io::ErrorKind::StaleNetworkFileHandle => C2RError(
+            std::io::ErrorKind::StaleNetworkFileHandle => Error(
                 Kind::Network,
                 Reason::Stale("network file handle"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::StorageFull => {
-                C2RError(Kind::Io, Reason::Storage("full"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Storage("full"), Some(e.to_string()))
             }
-            std::io::ErrorKind::TimedOut => C2RError(
+            std::io::ErrorKind::TimedOut => Error(
                 Kind::NetworkTimeout,
                 Reason::Timeout("operation"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::TooManyLinks => {
-                C2RError(Kind::Io, Reason::Multiple("links"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Multiple("links"), Some(e.to_string()))
             }
             std::io::ErrorKind::UnexpectedEof => {
-                C2RError(Kind::IoRead, Reason::Unexpected("eof"), Some(e.to_string()))
+                Error(Kind::IoRead, Reason::Unexpected("eof"), Some(e.to_string()))
             }
-            std::io::ErrorKind::Unsupported => C2RError(
+            std::io::ErrorKind::Unsupported => Error(
                 Kind::Io,
                 Reason::Unsupported("operation"),
                 Some(e.to_string()),
             ),
             std::io::ErrorKind::WouldBlock => {
-                C2RError(Kind::Io, Reason::Block("would block"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Block("would block"), Some(e.to_string()))
             }
             std::io::ErrorKind::WriteZero => {
-                C2RError(Kind::IoWrite, Reason::Write("zero"), Some(e.to_string()))
+                Error(Kind::IoWrite, Reason::Write("zero"), Some(e.to_string()))
             }
             std::io::ErrorKind::Other => {
-                C2RError(Kind::Io, Reason::Unknown("other"), Some(e.to_string()))
+                Error(Kind::Io, Reason::Unknown("other"), Some(e.to_string()))
             }
-            _ => C2RError(Kind::Io, Reason::Unknown("unknown"), Some(e.to_string())),
+            _ => Error(Kind::Io, Reason::Unknown("unknown"), Some(e.to_string())),
         }
     }
 }
-impl From<C2RError> for std::io::Error {
-    fn from(e: C2RError) -> Self {
+impl From<Error> for std::io::Error {
+    fn from(e: Error) -> Self {
         match e {
-            C2RError(Kind::Io, Reason::Address("address is in use"), _) => {
+            Error(Kind::Io, Reason::Address("address is in use"), _) => {
                 std::io::Error::new(std::io::ErrorKind::AddrInUse, e)
             }
-            C2RError(Kind::Io, Reason::Address("address is not available"), _) => {
+            Error(Kind::Io, Reason::Address("address is not available"), _) => {
                 std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, e)
             }
-            C2RError(Kind::Io, Reason::Already("unspecified io exists already"), _) => {
+            Error(Kind::Io, Reason::Already("unspecified io exists already"), _) => {
                 std::io::Error::new(std::io::ErrorKind::AlreadyExists, e)
             }
-            C2RError(Kind::Io, Reason::Argument("list is too long"), _) => {
+            Error(Kind::Io, Reason::Argument("list is too long"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ArgumentListTooLong, e)
             }
-            C2RError(Kind::Io, Reason::Broken("pipe is broken"), _) => {
+            Error(Kind::Io, Reason::Broken("pipe is broken"), _) => {
                 std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
             }
-            C2RError(Kind::Io, Reason::Connection("connection has been aborted"), _) => {
+            Error(Kind::Io, Reason::Connection("connection has been aborted"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ConnectionAborted, e)
             }
-            C2RError(Kind::Io, Reason::Connection("connection has been refused"), _) => {
+            Error(Kind::Io, Reason::Connection("connection has been refused"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ConnectionRefused, e)
             }
-            C2RError(Kind::Io, Reason::Connection("connection has been reset"), _) => {
+            Error(Kind::Io, Reason::Connection("connection has been reset"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ConnectionReset, e)
             }
-            C2RError(Kind::Io, Reason::Crosses("io operations cross devices"), _) => {
+            Error(Kind::Io, Reason::Crosses("io operations cross devices"), _) => {
                 std::io::Error::new(std::io::ErrorKind::CrossesDevices, e)
             }
-            C2RError(Kind::Io, Reason::Deadlock("io operations are deadlocked"), _) => {
+            Error(Kind::Io, Reason::Deadlock("io operations are deadlocked"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Deadlock, e)
             }
-            C2RError(Kind::Io, Reason::Directory("directory is not empty"), _) => {
+            Error(Kind::Io, Reason::Directory("directory is not empty"), _) => {
                 std::io::Error::new(std::io::ErrorKind::DirectoryNotEmpty, e)
             }
-            C2RError(Kind::Io, Reason::Executable("file busy"), _) => {
+            Error(Kind::Io, Reason::Executable("file busy"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ExecutableFileBusy, e)
             }
-            C2RError(Kind::Io, Reason::File("too large"), _) => {
+            Error(Kind::Io, Reason::File("too large"), _) => {
                 std::io::Error::new(std::io::ErrorKind::FileTooLarge, e)
             }
-            C2RError(Kind::Io, Reason::Host("unreachable"), _) => {
+            Error(Kind::Io, Reason::Host("unreachable"), _) => {
                 std::io::Error::new(std::io::ErrorKind::HostUnreachable, e)
             }
-            C2RError(Kind::Io, Reason::Interrupted("io operation was interrupted"), _) => {
+            Error(Kind::Io, Reason::Interrupted("io operation was interrupted"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Interrupted, e)
             }
-            C2RError(Kind::Io, Reason::Invalid("invalid io data"), _) => {
+            Error(Kind::Io, Reason::Invalid("invalid io data"), _) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidData, e)
             }
-            C2RError(Kind::Io, Reason::Invalid("invalid filename"), _) => {
+            Error(Kind::Io, Reason::Invalid("invalid filename"), _) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidFilename, e)
             }
-            C2RError(Kind::Io, Reason::Invalid("invalid input"), _) => {
+            Error(Kind::Io, Reason::Invalid("invalid input"), _) => {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
             }
-            C2RError(Kind::Io, Reason::Is("is a directory"), _) => {
+            Error(Kind::Io, Reason::Is("is a directory"), _) => {
                 std::io::Error::new(std::io::ErrorKind::IsADirectory, e)
             }
-            C2RError(Kind::Io, Reason::Network("network is down"), _) => {
+            Error(Kind::Io, Reason::Network("network is down"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NetworkDown, e)
             }
-            C2RError(Kind::Io, Reason::Network("unreachable"), _) => {
+            Error(Kind::Io, Reason::Network("unreachable"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NetworkUnreachable, e)
             }
-            C2RError(Kind::Io, Reason::Not("not a directory"), _) => {
+            Error(Kind::Io, Reason::Not("not a directory"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotADirectory, e)
             }
-            C2RError(Kind::Io, Reason::Not("not connected"), _) => {
+            Error(Kind::Io, Reason::Not("not connected"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotConnected, e)
             }
-            C2RError(Kind::Io, Reason::Not("unspecified io entity not found"), _) => {
+            Error(Kind::Io, Reason::Not("unspecified io entity not found"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotFound, e)
             }
-            C2RError(Kind::Io, Reason::Not("not seekable"), _) => {
+            Error(Kind::Io, Reason::Not("not seekable"), _) => {
                 std::io::Error::new(std::io::ErrorKind::NotSeekable, e)
             }
-            C2RError(Kind::Io, Reason::OutOf("out of memory"), _) => {
+            Error(Kind::Io, Reason::OutOf("out of memory"), _) => {
                 std::io::Error::new(std::io::ErrorKind::OutOfMemory, e)
             }
-            C2RError(Kind::Io, Reason::Permission("permission denied"), _) => {
+            Error(Kind::Io, Reason::Permission("permission denied"), _) => {
                 std::io::Error::new(std::io::ErrorKind::PermissionDenied, e)
             }
-            C2RError(Kind::Io, Reason::Quota("quota exceeded"), _) => {
+            Error(Kind::Io, Reason::Quota("quota exceeded"), _) => {
                 std::io::Error::new(std::io::ErrorKind::QuotaExceeded, e)
             }
-            C2RError(Kind::Io, Reason::Filesystem("filesystem is read-only"), _) => {
+            Error(Kind::Io, Reason::Filesystem("filesystem is read-only"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ReadOnlyFilesystem, e)
             }
-            C2RError(Kind::Io, Reason::Resource("resource is busy"), _) => {
+            Error(Kind::Io, Reason::Resource("resource is busy"), _) => {
                 std::io::Error::new(std::io::ErrorKind::ResourceBusy, e)
             }
-            C2RError(Kind::Io, Reason::Stale("network file handle stale"), _) => {
+            Error(Kind::Io, Reason::Stale("network file handle stale"), _) => {
                 std::io::Error::new(std::io::ErrorKind::StaleNetworkFileHandle, e)
             }
-            C2RError(Kind::Io, Reason::Storage("storage full"), _) => {
+            Error(Kind::Io, Reason::Storage("storage full"), _) => {
                 std::io::Error::new(std::io::ErrorKind::StorageFull, e)
             }
-            C2RError(Kind::Io, Reason::Timeout("timed out"), _) => {
+            Error(Kind::Io, Reason::Timeout("timed out"), _) => {
                 std::io::Error::new(std::io::ErrorKind::TimedOut, e)
             }
-            C2RError(Kind::Io, Reason::Exceeded("max number of links exceeded"), _) => {
+            Error(Kind::Io, Reason::Exceeded("max number of links exceeded"), _) => {
                 std::io::Error::new(std::io::ErrorKind::TooManyLinks, e)
             }
-            C2RError(Kind::Io, Reason::Unexpected("unexpected end of file"), _) => {
+            Error(Kind::Io, Reason::Unexpected("unexpected end of file"), _) => {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, e)
             }
-            C2RError(Kind::Io, Reason::Unsupported("unsupported io operation"), _) => {
+            Error(Kind::Io, Reason::Unsupported("unsupported io operation"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Unsupported, e)
             }
-            C2RError(Kind::Io, Reason::Conflict("io operation would block"), _) => {
+            Error(Kind::Io, Reason::Conflict("io operation would block"), _) => {
                 std::io::Error::new(std::io::ErrorKind::WouldBlock, e)
             }
-            C2RError(Kind::Io, Reason::Write("would write zero bytes"), _) => {
+            Error(Kind::Io, Reason::Write("would write zero bytes"), _) => {
                 std::io::Error::new(std::io::ErrorKind::WriteZero, e)
             }
-            C2RError(Kind::Io, Reason::Unknown("unknown io error"), _) => {
+            Error(Kind::Io, Reason::Unknown("unknown io error"), _) => {
                 std::io::Error::new(std::io::ErrorKind::Other, e)
             }
             _ => std::io::Error::new(std::io::ErrorKind::Other, e),
         }
     }
 }
-impl From<std::num::TryFromIntError> for C2RError {
+impl From<std::num::TryFromIntError> for Error {
     fn from(error: std::num::TryFromIntError) -> Self {
-        C2RError::new(
+        Error::new(
             Kind::Int,
             Reason::Failed("try from int error"),
             Some(error.to_string()),
         )
     }
 }
-impl From<Box<dyn std::error::Error + Send + Sync>> for C2RError {
+impl From<Box<dyn std::error::Error + Send + Sync>> for Error {
     fn from(e: Box<dyn std::error::Error + Send + Sync>) -> Self {
-        C2RError::new(Kind::Other, Reason::Unknown("error"), Some(e.to_string()))
+        Error::new(Kind::Other, Reason::Unknown("error"), Some(e.to_string()))
     }
 }
 impl Kind {
@@ -1260,11 +1260,82 @@ impl From<Reason> for std::num::IntErrorKind {
 }
 pub fn err<T>(kind: Kind, reason: Reason, message: &str) -> Result<T> {
     if message.is_empty() {
-        return Err(C2RError::new(
-            kind,
-            reason,
-            Some("unknown error".to_string()),
-        ));
+        return Err(Error::new(kind, reason, Some("unknown error".to_string())));
     }
-    Err(C2RError::new(kind, reason, Some(message.to_string())))
+    Err(Error::new(kind, reason, Some(message.to_string())))
+}
+
+// ============================================================================
+// Database Integration
+// ============================================================================
+
+use crate::db::web::{Build, Entry};
+use std::collections::HashMap as StdHashMap;
+
+impl Build for Error {
+    fn to_entry(&self) -> Entry {
+        let mut attrs = StdHashMap::new();
+        attrs.insert("kind".to_string(), Entry::string(self.0.as_str()));
+        attrs.insert("reason".to_string(), Entry::string(self.1.as_str()));
+        if let Some(ref msg) = self.2 {
+            attrs.insert("message".to_string(), Entry::string(msg.clone()));
+        }
+        attrs.insert(
+            "timestamp".to_string(),
+            Entry::string(format!("{:?}", std::time::Instant::now())),
+        );
+
+        Entry::node_with_attrs("error", self.0.as_str(), attrs)
+    }
+
+    fn kind(&self) -> &str {
+        "error"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(self.0.as_str())
+    }
+
+    fn category(&self) -> Option<&str> {
+        // Group errors by their kind category
+        Some(match self.0 {
+            Kind::IoRead
+            | Kind::IoWrite
+            | Kind::IoAccess
+            | Kind::IoNotFound
+            | Kind::IoPermission
+            | Kind::Io => "io",
+            Kind::NetworkConnection | Kind::NetworkTimeout | Kind::NetworkHost | Kind::Network => {
+                "network"
+            }
+            Kind::ParseInt | Kind::ParseFloat | Kind::ParseJson => "parse",
+            Kind::Memory | Kind::MemoryLeak | Kind::MemoryAccess => "memory",
+            Kind::Thread | Kind::ThreadLock | Kind::ThreadMutex => "thread",
+            Kind::File | Kind::FileOpen | Kind::FileClose => "file",
+            Kind::Database | Kind::DatabaseConnection | Kind::DatabaseQuery => "database",
+            Kind::Config | Kind::ConfigMissing | Kind::ConfigInvalid => "config",
+            Kind::Auth | Kind::AuthPermission | Kind::AuthAccess => "auth",
+            Kind::Cache | Kind::CacheExpired | Kind::CacheMiss => "cache",
+            _ => "general",
+        })
+    }
+
+    fn priority(&self) -> i16 {
+        // Higher priority for more severe error types
+        match self.0 {
+            Kind::Memory | Kind::MemoryLeak | Kind::MemoryAccess => 100,
+            Kind::Thread | Kind::ThreadLock | Kind::ThreadMutex | Kind::Deadlock => 90,
+            Kind::IoRead | Kind::IoWrite | Kind::IoNotFound => 80,
+            Kind::NetworkConnection | Kind::NetworkTimeout => 70,
+            Kind::Database | Kind::DatabaseConnection | Kind::DatabaseQuery => 60,
+            Kind::ParseInt | Kind::ParseFloat | Kind::ParseJson => 50,
+            Kind::Config | Kind::ConfigMissing | Kind::ConfigInvalid => 40,
+            _ => 0,
+        }
+    }
+}
+
+/// Convert a C2RError to an Entry for storage in Web database
+pub fn error_to_entry(error: &Error) -> Entry {
+    error.to_entry()
 }

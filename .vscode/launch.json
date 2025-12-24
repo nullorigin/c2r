@@ -1,0 +1,67 @@
+{
+  // Use IntelliSense to learn about possible attributes.
+  // Hover to view descriptions of existing attributes.
+  // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in library 'c2r'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--lib",
+          "--package=c2r"
+        ],
+        "filter": {
+          "name": "c2r",
+          "kind": "lib"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug executable 'c2r'",
+      "cargo": {
+        "args": [
+          "build",
+          "--bin=c2r",
+          "--package=c2r"
+        ],
+        "filter": {
+          "name": "c2r",
+          "kind": "bin"
+        }
+      },
+      "args": [
+        "convert",
+        "test_files/comprehensive_test.c"
+      ],
+      "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug unit tests in executable 'c2r'",
+      "cargo": {
+        "args": [
+          "test",
+          "--no-run",
+          "--bin=c2r",
+          "--package=c2r"
+        ],
+        "filter": {
+          "name": "c2r",
+          "kind": "bin"
+        }
+      },
+      "args": [],
+      "cwd": "${workspaceFolder}"
+    }
+  ]
+}

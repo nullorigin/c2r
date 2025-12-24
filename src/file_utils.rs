@@ -1,4 +1,4 @@
-use crate::error::C2RError;
+use crate::error::Error;
 use crate::{Kind, Reason, Result};
 use core::result::Result::{Err, Ok};
 use std::fs;
@@ -13,7 +13,7 @@ impl FileUtils {
         let result = fs::read_to_string(path);
         match result {
             Ok(content) => Ok(content),
-            Err(err) => Err(C2RError::new(
+            Err(err) => Err(Error::new(
                 Kind::Io,
                 Reason::Read("error"),
                 Some(format!("Failed to read file {}: {}", path, err)),
@@ -63,7 +63,7 @@ impl FileUtils {
     pub fn read_file_content(path: &Path) -> Result<String> {
         match fs::read_to_string(path) {
             Ok(content) => Ok(content),
-            Err(err) => Err(C2RError::new(
+            Err(err) => Err(Error::new(
                 Kind::Io,
                 Reason::Read("io error"),
                 Some(format!("Failed to read file {:?}: {}", path, err)),
@@ -91,7 +91,7 @@ impl FileUtils {
         let entries = match fs::read_dir(dir) {
             Ok(entries) => entries,
             Err(err) => {
-                return Err(C2RError::new(
+                return Err(Error::new(
                     Kind::Io,
                     Reason::Read("io error"),
                     Some(format!("Failed to read directory {:?}: {}", dir, err)),
@@ -103,7 +103,7 @@ impl FileUtils {
             let entry = match entry {
                 Ok(e) => e,
                 Err(err) => {
-                    return Err(C2RError::new(
+                    return Err(Error::new(
                         Kind::Io,
                         Reason::Read("error"),
                         Some(format!("Failed to read directory entry: {}", err)),

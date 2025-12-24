@@ -1,0 +1,23 @@
+{
+  "performance.gcInterval": 30000,
+  "performance.memoryThreshold": 0.8,
+  "ai.maxConcurrentRequests": 3,
+  "ai.throttleDelay": 100,
+  "network.keepAlive": true,
+  "network.maxConnections": 10,
+  "network.timeout": 5000,
+  "ai.compression": true,
+  "ai.compressionLevel": 6,
+  "ai.privacy": {
+    "excludeFiles": [
+      "*.key",
+      "*.pem",
+      "*secret*",
+      "config/database.yml"
+    ],
+    "localProcessing": true,
+    "dataRetention": "none"
+  },
+  "docker.lsp.telemetry": "off",
+  "workbench.settings.enableNaturalLanguageSearch": false
+}

@@ -23,95 +23,14 @@ macro_rules! function_name {
         let name = type_name_of(f);
         // Extract just the function name from the full path
         // e.g., "module::submodule::function::f" -> "function"
-        name.strip_suffix("::f").unwrap_or(name)
-            .rsplit("::").next().unwrap_or(name)
+        name.strip_suffix("::f")
+            .unwrap_or(name)
+            .rsplit("::")
+            .next()
+            .unwrap_or(name)
     }};
 }
 
-/// Convenient macro for creating and adding handler reports to the centralized system
-///
-/// Usage examples:
-/// ```
-//// With explicit function name:
-//// report!(context, "function_handler", "my_function", Info, Processing, "Processing function declaration", true);
-////
-//// With automatic function name detection:
-//// report!(context, "function_handler", Info, Processing, "Processing function declaration", true);
-/// ```
-#[macro_export]
-macro_rules! report {
-    // Automatic function name detection - no function_name parameter needed
-    ($context:expr, $handler_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr) => {
-        $context.registry.add_report($crate::Report::new(
-            $crate::Id::get(&format!("report_{}_{}", $handler_name, $crate::function_name!())),
-            Some($crate::Id::get($handler_name)),
-            $crate::function_name!().to_string(),
-            $message.to_string(),
-            $level,
-            $phase,
-        ).with_success($success))
-    };
-    
-    // Manual function name - for backward compatibility
-    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr) => {
-        $context.registry.add_report($crate::Report::new(
-            $crate::Id::get(&format!("report_{}_{}", $handler_name, $function_name)),
-            Some($crate::Id::get($handler_name)),
-            $function_name.to_string(),
-            $message.to_string(),
-            $level,
-            $phase,
-        ).with_success($success))
-    };
-
-    // Report with token counts
-    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
-     $tokens_processed:expr, $tokens_consumed:expr) => {
-        $context.registry.add_report($crate::Report::new(
-            $crate::Id::get(&format!("report_{}_{}", $handler_name, $function_name)),
-            Some($crate::Id::get($handler_name)),
-            $function_name.to_string(),
-            $message.to_string(),
-            $level,
-            $phase,
-        ).with_tokens($tokens_processed, $tokens_consumed).with_success($success))
-    };
-
-    // Report with metadata key-value pairs
-    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
-     $(($key:expr, $value:expr)),+) => {
-        {
-            let metadata_str: String = vec![$(format!("{}={}", $key, $value)),+].join(", ");
-            let enhanced_message = format!("{} [{}]", $message, metadata_str);
-            $context.registry.add_report($crate::Report::new(
-                $crate::Id::get(&format!("report_{}_{}", $handler_name, $function_name)),
-                Some($crate::Id::get($handler_name)),
-                $function_name.to_string(),
-                enhanced_message,
-                $level,
-                $phase,
-            ).with_success($success));
-        }
-    };
-
-    // Full report with token counts and metadata
-    ($context:expr, $handler_name:expr, $function_name:expr, $level:expr, $phase:expr, $message:expr, $success:expr,
-     $tokens_processed:expr, $tokens_consumed:expr, $(($key:expr, $value:expr)),+) => {
-        {
-            let metadata_str: String = vec![$(format!("{}={}", $key, $value)),+].join(", ");
-            let enhanced_message = format!("{} [{}]", $message, metadata_str);
-            $context.registry.add_report($crate::Report::new(
-                $crate::Id::get(&format!("report_{}_{}", $handler_name, $function_name)),
-                Some($crate::Id::get($handler_name)),
-                $function_name.to_string(),
-                enhanced_message,
-                $level,
-                $phase,
-            ).with_tokens($tokens_processed, $tokens_consumed)
-             .with_success($success));
-        }
-    };
-}
 /// Optimized macro for arbitrary-precision numeric types
 ///
 /// Usage:
@@ -127,16 +46,16 @@ macro_rules! impl_number_type {
         impl_number_type!(@base $name, $byte_count);
         impl_number_type!(@signed_extras $name, $byte_count);
     };
-    
+
     ($name:ident, $byte_count:expr, unsigned) => {
         impl_number_type!(@base $name, $byte_count);
         impl_number_type!(@unsigned_extras $name, $byte_count);
     };
-    
+
     ($name:ident, $byte_count:expr, float) => {
         impl_number_type!(@float_impl $name, $byte_count);
     };
-    
+
     // Legacy aliases for backward compatibility
     ($name:ident, $byte_count:expr, signed_int) => {
         impl_number_type!($name, $byte_count, signed);
@@ -205,7 +124,7 @@ macro_rules! impl_number_type {
                     let mut carry = 0u16;
                     for j in 0..$byte_count {
                         if i + j < $byte_count {
-                            let prod = self.0[i] as u16 * other.0[j] as u16 
+                            let prod = self.0[i] as u16 * other.0[j] as u16
                                      + result[i + j] as u16 + carry;
                             result[i + j] = prod as u8;
                             carry = prod >> 8;
@@ -222,7 +141,7 @@ macro_rules! impl_number_type {
                 for bit_pos in (0..$byte_count * 8).rev() {
                     let byte_idx = bit_pos / 8;
                     let bit_idx = bit_pos % 8;
-                    
+
                     // Shift remainder left
                     let mut carry = 0u8;
                     for i in 0..$byte_count {
@@ -448,10 +367,10 @@ macro_rules! impl_number_type {
 
             #[inline]
             pub fn abs(self) -> Self {
-                if self.is_negative() { 
+                if self.is_negative() {
                     self.bitnot().wrapping_add(Self::from_bytes(&[1]))
-                } else { 
-                    self 
+                } else {
+                    self
                 }
             }
 

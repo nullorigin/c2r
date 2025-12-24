@@ -12,15 +12,15 @@
  * - Zero external dependencies beyond std
  */
 
-use crate::{Maybe, MaybeLock};
 use core::ops::{Fn, FnOnce};
-use core::option::Option::Some;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use crate::lock::LazyRwLock;
 
 /// A task that can be executed by the thread pool
 pub type Task = Box<dyn FnOnce() + Send + Sync + 'static>;
@@ -133,7 +133,7 @@ impl PartialEq for ThreadTasks {
     fn eq(&self, other: &Self) -> bool {
         self.receiver.is_poisoned() == other.receiver.is_poisoned()
             && self.active_tasks.load(Ordering::Relaxed)
-            == other.active_tasks.load(Ordering::Relaxed)
+                == other.active_tasks.load(Ordering::Relaxed)
             && self.shutdown.load(Ordering::Relaxed) == other.shutdown.load(Ordering::Relaxed)
     }
 }
@@ -193,8 +193,13 @@ impl ThreadPool {
     where
         F: FnOnce() + Send + Sync + 'static,
     {
+        // Increment active task counter BEFORE sending to prevent race
+        self.tasks.active_tasks.fetch_add(1, Ordering::SeqCst);
         let task = Box::new(f);
-        let _ = self.tasks.sender.send(task);
+        if self.tasks.sender.send(task).is_err() {
+            // If send fails, decrement the counter
+            self.tasks.active_tasks.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 
     /// Get the number of worker threads
@@ -264,14 +269,12 @@ impl Worker {
 
                     match task {
                         Ok(task) => {
-                            // Increment active task counter
-                            active_tasks.fetch_add(1, Ordering::Relaxed);
-
+                            // Counter was already incremented by execute()
                             // Execute the task
                             task();
 
-                            // Decrement active task counter
-                            active_tasks.fetch_sub(1, Ordering::Relaxed);
+                            // Decrement active task counter after completion
+                            active_tasks.fetch_sub(1, Ordering::SeqCst);
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {
                             // Timeout occurred, continue loop to check shutdown flag
@@ -321,7 +324,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
         T: Clone,
     {
         let f = Arc::new(f);
-        let results: MaybeLock<Vec<Option<U>>> = MaybeLock::some(vec![None; self.items.len()]);
+        let results: LazyRwLock<Vec<Option<U>>> = LazyRwLock::some(vec![None; self.items.len()]);
 
         for (index, item) in self.items.into_iter().enumerate() {
             let f_clone = Arc::clone(&f);
@@ -330,16 +333,14 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
             self.pool.execute(move || {
                 let result = f_clone(item);
                 let mut results_guard = results_clone.write();
-                let results_vec = results_guard.as_mut();
-                results_vec[index] = Some(result);
+                results_guard[index] = Some(result);
             });
         }
 
         self.pool.wait_for_completion();
 
         let results_guard = results.read();
-        let results_vec = results_guard.as_ref();
-        results_vec.iter().filter_map(|opt| opt.clone()).collect()
+        results_guard.iter().filter_map(|opt| opt.clone()).collect()
     }
 
     /// Filter items in parallel and collect results
@@ -349,16 +350,15 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
         T: Clone,
     {
         let predicate = Arc::new(predicate);
-        let results: MaybeLock<Vec<T>> = MaybeLock::some(Vec::new());
+        let results: Arc<std::sync::Mutex<Vec<T>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         for item in self.items {
             let predicate_clone = Arc::clone(&predicate);
-            let mut results_clone = results.clone();
+            let results_clone = Arc::clone(&results);
 
             self.pool.execute(move || {
                 if predicate_clone(&item) {
-                    let mut results_guard = results_clone.write();
-                    let results_vec = results_guard.as_mut();
+                    let mut results_vec = results_clone.lock().unwrap();
                     results_vec.push(item);
                 }
             });
@@ -366,8 +366,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
 
         self.pool.wait_for_completion();
 
-        let results_guard = results.read();
-        let results_vec = results_guard.as_ref();
+        let results_vec = results.lock().unwrap();
         results_vec.clone()
     }
 
@@ -379,7 +378,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
         T: Clone,
     {
         let f = Arc::new(f);
-        let results: MaybeLock<Vec<U>> = MaybeLock::some(Vec::new());
+        let results: LazyRwLock<Vec<U>> = LazyRwLock::some(Vec::new());
 
         for item in self.items {
             let f_clone = Arc::clone(&f);
@@ -388,8 +387,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
             self.pool.execute(move || {
                 if let Some(result) = f_clone(item) {
                     let mut results_guard = results_clone.write();
-                    let results_vec = results_guard.as_mut();
-                    results_vec.push(result);
+                    results_guard.push(result);
                 }
             });
         }
@@ -397,8 +395,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
         self.pool.wait_for_completion();
 
         let results_guard = results.read();
-        let results_vec = results_guard.as_ref();
-        results_vec.clone()
+        results_guard.clone()
     }
 
     /// Collect results into a vector
@@ -418,7 +415,7 @@ impl<T: Send + Sync + 'static> Iterizer<T> {
 }
 
 /// Extension trait to add parallel capabilities to iterators
-pub trait Parallizer<T: Send + Sync + 'static>: Iterator<Item=T> + Sized {
+pub trait Parallizer<T: Send + Sync + 'static>: Iterator<Item = T> + Sized {
     fn parallel(self) -> Iterizer<T> {
         Iterizer::from_vec(self.collect())
     }
@@ -430,15 +427,16 @@ pub trait Parallizer<T: Send + Sync + 'static>: Iterator<Item=T> + Sized {
 
 impl<I, T> Parallizer<T> for I
 where
-    I: Iterator<Item=T>,
+    I: Iterator<Item = T>,
     T: Send + Sync + 'static,
-{}
+{
+}
 
 /// Work-stealing queue for advanced task distribution
 
 #[derive(Debug)]
 pub struct WorkStealer<T> {
-    queues: Vec<MaybeLock<VecDeque<T>>>,
+    queues: Vec<LazyRwLock<VecDeque<T>>>,
     current_queue: AtomicUsize,
 }
 impl<T: Clone> Clone for WorkStealer<T> {
@@ -451,9 +449,9 @@ impl<T: Clone> Clone for WorkStealer<T> {
 }
 impl<T: PartialEq> PartialEq for WorkStealer<T> {
     fn eq(&self, other: &Self) -> bool {
-        self.queues == other.queues
+        self.queues.len() == other.queues.len()
             && self.current_queue.load(Ordering::Relaxed)
-            == other.current_queue.load(Ordering::Relaxed)
+                == other.current_queue.load(Ordering::Relaxed)
     }
 }
 impl<T: PartialEq> Eq for WorkStealer<T> {}
@@ -473,7 +471,7 @@ impl<T: Send + 'static> WorkStealer<T> {
     pub fn new(num_queues: usize) -> Self {
         let mut queues = Vec::with_capacity(num_queues);
         for _ in 0..num_queues {
-            queues.push(MaybeLock::some(VecDeque::<T>::new()));
+            queues.push(LazyRwLock::some(VecDeque::<T>::new()));
         }
 
         WorkStealer {
@@ -485,35 +483,32 @@ impl<T: Send + 'static> WorkStealer<T> {
     pub fn push(&mut self, item: T) {
         let queue_idx = self.current_queue.fetch_add(1, Ordering::Relaxed) % self.queues.len();
         let mut queue = self.queues[queue_idx].write();
-        let deque = queue.as_mut();
-        deque.push_back(item);
+        queue.push_back(item);
     }
 
-    pub fn steal(&mut self, preferred_queue: usize) -> Maybe<T> {
+    pub fn steal(&mut self, preferred_queue: usize) -> Option<T> {
         if preferred_queue < self.queues.len() {
             let mut queue = self.queues[preferred_queue].write();
-            let deque = queue.as_mut();
-            if let Some(item) = deque.pop_front() {
-                return Maybe::Some(item);
+            if let Some(item) = queue.pop_front() {
+                return Some(item);
             }
         }
 
         for i in 0..self.queues.len() {
             if i != preferred_queue {
                 let mut queue = self.queues[i].write();
-                let deque = queue.as_mut();
-                if let Some(item) = deque.pop_back() {
-                    return Maybe::Some(item);
+                if let Some(item) = queue.pop_back() {
+                    return Some(item);
                 }
             }
         }
 
-        Maybe::None
+        None
     }
 }
 
 /// Global thread pool instance using MaybeLock for safe initialization
-static GLOBAL_POOL: MaybeLock<ThreadPool> = MaybeLock::new();
+static GLOBAL_POOL: LazyRwLock<ThreadPool> = LazyRwLock::new();
 
 /// Get or initialize the global thread pool
 pub fn global_pool() -> &'static ThreadPool {
@@ -523,7 +518,7 @@ pub fn global_pool() -> &'static ThreadPool {
 /// Shutdown the global thread pool - call this before program exit
 pub fn shutdown_global_pool() {
     // Signal shutdown to the global pool if it exists
-    if let Maybe::Some(pool) = GLOBAL_POOL.try_get() {
+    if let Some(pool) = GLOBAL_POOL.try_get() {
         pool.tasks.shutdown.store(true, Ordering::SeqCst);
     }
 }
@@ -544,23 +539,21 @@ where
     T: Clone + Send + Sync + 'static,
 {
     let pool = global_pool();
-    let results: MaybeLock<Vec<Option<T>>> = MaybeLock::some(vec![None; tasks.len()]);
+    let results: LazyRwLock<Vec<Option<T>>> = LazyRwLock::some(vec![None; tasks.len()]);
 
     for (index, task) in tasks.into_iter().enumerate() {
         let mut results_clone = results.clone();
         pool.execute(move || {
             let result = task();
             let mut results_guard = results_clone.write();
-            let results_vec = results_guard.as_mut();
-            results_vec[index] = Some(result);
+            results_guard[index] = Some(result);
         });
     }
 
     pool.wait_for_completion();
 
     let results_guard = results.read();
-    let results_vec = results_guard.as_ref();
-    results_vec.iter().filter_map(|opt| opt.clone()).collect()
+    results_guard.iter().filter_map(|opt| opt.clone()).collect()
 }
 
 #[cfg(test)]
@@ -631,10 +624,10 @@ impl Default for RecoveryStats {
 /// Watchdog system for monitoring and recovering threads
 #[derive(Debug)]
 pub struct Watcher {
-    thread_health: MaybeLock<HashMap<usize, ThreadHealth>>,
-    thread_heartbeats: MaybeLock<HashMap<usize, Instant>>,
-    recovery_stats: MaybeLock<HashMap<usize, RecoveryStats>>,
-    watchdog_handle: MaybeLock<Option<JoinHandle<()>>>,
+    thread_health: LazyRwLock<HashMap<usize, ThreadHealth>>,
+    thread_heartbeats: LazyRwLock<HashMap<usize, Instant>>,
+    recovery_stats: LazyRwLock<HashMap<usize, RecoveryStats>>,
+    watchdog_handle: LazyRwLock<Option<JoinHandle<()>>>,
     shutdown: Arc<AtomicBool>,
     check_interval: Duration,
     timeout_threshold: Duration,
@@ -646,7 +639,7 @@ impl Clone for Watcher {
             thread_health: self.thread_health.clone(),
             thread_heartbeats: self.thread_heartbeats.clone(),
             recovery_stats: self.recovery_stats.clone(),
-            watchdog_handle: MaybeLock::some(None),
+            watchdog_handle: LazyRwLock::some(None),
             shutdown: self.shutdown.clone(),
             check_interval: self.check_interval,
             timeout_threshold: self.timeout_threshold,
@@ -656,10 +649,7 @@ impl Clone for Watcher {
 
 impl PartialEq for Watcher {
     fn eq(&self, other: &Self) -> bool {
-        self.thread_health == other.thread_health
-            && self.thread_heartbeats == other.thread_heartbeats
-            && self.recovery_stats == other.recovery_stats
-            && self.shutdown.load(Ordering::Relaxed) == other.shutdown.load(Ordering::Relaxed)
+        self.shutdown.load(Ordering::Relaxed) == other.shutdown.load(Ordering::Relaxed)
             && self.check_interval == other.check_interval
             && self.timeout_threshold == other.timeout_threshold
     }
@@ -669,15 +659,15 @@ impl Eq for Watcher {}
 
 impl std::hash::Hash for Watcher {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.thread_health.iter().for_each(|(k, v)| {
+        self.thread_health.get().iter().for_each(|(k, v)| {
             k.hash(state);
             v.hash(state);
         });
-        self.thread_heartbeats.iter().for_each(|(k, v)| {
+        self.thread_heartbeats.get().iter().for_each(|(k, v)| {
             k.hash(state);
             v.hash(state);
         });
-        self.recovery_stats.iter().for_each(|(k, v)| {
+        self.recovery_stats.get().iter().for_each(|(k, v)| {
             k.hash(state);
             v.hash(state);
         });
@@ -696,10 +686,10 @@ impl Watcher {
     /// Create a watchdog with custom intervals
     pub fn with_intervals(check_interval: Duration, timeout_threshold: Duration) -> Self {
         Watcher {
-            thread_health: MaybeLock::some(HashMap::new()),
-            thread_heartbeats: MaybeLock::some(HashMap::new()),
-            recovery_stats: MaybeLock::some(HashMap::new()),
-            watchdog_handle: MaybeLock::some(None),
+            thread_health: LazyRwLock::some(HashMap::new()),
+            thread_heartbeats: LazyRwLock::some(HashMap::new()),
+            recovery_stats: LazyRwLock::some(HashMap::new()),
+            watchdog_handle: LazyRwLock::some(None),
             shutdown: Arc::new(AtomicBool::new(false)),
             check_interval,
             timeout_threshold,
@@ -711,26 +701,23 @@ impl Watcher {
         // Initialize health tracking for all threads
         {
             let mut health_guard = self.thread_health.write();
-            let health_map = health_guard.as_mut();
-            health_map.clear();
+            health_guard.clear();
             for i in 0..thread_count {
-                health_map.insert(i, ThreadHealth::Healthy);
+                health_guard.insert(i, ThreadHealth::Healthy);
             }
         }
         {
             let mut heartbeat_guard = self.thread_heartbeats.write();
-            let heartbeat_map = heartbeat_guard.as_mut();
-            heartbeat_map.clear();
+            heartbeat_guard.clear();
             for i in 0..thread_count {
-                heartbeat_map.insert(i, Instant::now());
+                heartbeat_guard.insert(i, Instant::now());
             }
         }
         {
             let mut stats_guard = self.recovery_stats.write();
-            let stats_map = stats_guard.as_mut();
-            stats_map.clear();
+            stats_guard.clear();
             for i in 0..thread_count {
-                stats_map.insert(i, RecoveryStats::default());
+                stats_guard.insert(i, RecoveryStats::default());
             }
         }
 
@@ -750,17 +737,11 @@ impl Watcher {
                 let heartbeat_guard = thread_heartbeats.read();
                 let mut stats_guard = recovery_stats.write();
 
-                let (heartbeat_map, health_map, stats_map) = (
-                    heartbeat_guard.as_ref(),
-                    health_guard.as_mut(),
-                    stats_guard.as_mut(),
-                );
-
-                for (&thread_id, &last_heartbeat) in heartbeat_map.iter() {
+                for (&thread_id, &last_heartbeat) in heartbeat_guard.iter() {
                     let elapsed = now.duration_since(last_heartbeat);
 
                     if elapsed > timeout_threshold {
-                        if let Some(health) = health_map.get_mut(&thread_id) {
+                        if let Some(health) = health_guard.get_mut(&thread_id) {
                             match *health {
                                 ThreadHealth::Healthy => {
                                     *health = ThreadHealth::Unresponsive;
@@ -768,7 +749,7 @@ impl Watcher {
                                 }
                                 ThreadHealth::Unresponsive => {
                                     *health = ThreadHealth::Failed;
-                                    if let Some(stats) = stats_map.get_mut(&thread_id) {
+                                    if let Some(stats) = stats_guard.get_mut(&thread_id) {
                                         stats.failures += 1;
                                         stats.last_failure = Some(now);
                                     }
@@ -783,18 +764,16 @@ impl Watcher {
         });
 
         let mut handle_guard = self.watchdog_handle.write();
-        *handle_guard.as_mut() = Some(handle);
+        *handle_guard = Some(handle);
     }
 
     /// Signal that a thread is alive and working
     pub fn heartbeat(&mut self, thread_id: usize) {
         let mut heartbeat_guard = self.thread_heartbeats.write();
-        let heartbeat_map = heartbeat_guard.as_mut();
-        heartbeat_map.insert(thread_id, Instant::now());
+        heartbeat_guard.insert(thread_id, Instant::now());
 
         let mut health_guard = self.thread_health.write();
-        let health_map = health_guard.as_mut();
-        if let Some(health) = health_map.get_mut(&thread_id) {
+        if let Some(health) = health_guard.get_mut(&thread_id) {
             if *health == ThreadHealth::Unresponsive {
                 *health = ThreadHealth::Healthy;
                 println!("Info: Thread {} recovered", thread_id);
@@ -806,8 +785,7 @@ impl Watcher {
     pub fn task_completed(&mut self, thread_id: usize) {
         self.heartbeat(thread_id);
         let mut stats_guard = self.recovery_stats.write();
-        let stats_map = stats_guard.as_mut();
-        if let Some(stats) = stats_map.get_mut(&thread_id) {
+        if let Some(stats) = stats_guard.get_mut(&thread_id) {
             stats.total_tasks_completed += 1;
         }
     }
@@ -815,15 +793,13 @@ impl Watcher {
     /// Get the health status of a specific thread
     pub fn get_thread_health(&self, thread_id: usize) -> Option<ThreadHealth> {
         let health_guard = self.thread_health.read();
-        let health_map = health_guard.as_ref();
-        health_map.get(&thread_id).copied()
+        health_guard.get(&thread_id).copied()
     }
 
     /// Get recovery statistics for a thread
     pub fn get_recovery_stats(&self, thread_id: usize) -> Option<RecoveryStats> {
         let stats_guard = self.recovery_stats.read();
-        let stats_map = stats_guard.as_ref();
-        stats_map.get(&thread_id).cloned()
+        stats_guard.get(&thread_id).cloned()
     }
 
     /// Get overall system health report
@@ -832,11 +808,8 @@ impl Watcher {
         let health_guard = self.thread_health.read();
         let stats_guard = self.recovery_stats.read();
 
-        let health_map = health_guard.as_ref();
-        let stats_map = stats_guard.as_ref();
-
-        for (&thread_id, &health) in health_map.iter() {
-            if let Some(stats) = stats_map.get(&thread_id) {
+        for (&thread_id, &health) in health_guard.iter() {
+            if let Some(stats) = stats_guard.get(&thread_id) {
                 report.insert(thread_id, (health, stats.clone()));
             }
         }
@@ -848,19 +821,16 @@ impl Watcher {
     pub fn recover_thread(&mut self, thread_id: usize) -> bool {
         let mut recovered = false;
         let mut health_guard = self.thread_health.write();
-        let health_map = health_guard.as_mut();
-        if let Some(health) = health_map.get_mut(&thread_id) {
+        if let Some(health) = health_guard.get_mut(&thread_id) {
             if *health == ThreadHealth::Failed {
                 *health = ThreadHealth::Healthy;
 
                 // Reset heartbeat for recovered thread
                 let mut heartbeat_guard = self.thread_heartbeats.write();
-                let heartbeat_map = heartbeat_guard.as_mut();
-                heartbeat_map.insert(thread_id, Instant::now());
+                heartbeat_guard.insert(thread_id, Instant::now());
 
                 let mut stats_guard = self.recovery_stats.write();
-                let stats_map = stats_guard.as_mut();
-                if let Some(stats) = stats_map.get_mut(&thread_id) {
+                if let Some(stats) = stats_guard.get_mut(&thread_id) {
                     stats.restarts += 1;
                 }
                 println!("Info: Thread {} recovery attempted successfully", thread_id);
@@ -875,7 +845,7 @@ impl Watcher {
         self.shutdown.store(true, Ordering::SeqCst);
 
         // Safely extract handle to avoid double-drop
-        if let Maybe::Some(mut handle_opt) = self.watchdog_handle.take() {
+        if let Some(mut handle_opt) = self.watchdog_handle.take() {
             if let Some(handle) = handle_opt.take() {
                 let _ = handle.join();
             }
@@ -887,15 +857,15 @@ impl Watcher {
 #[derive(Debug)]
 pub struct ResilientThreadPool {
     pool: ThreadPool,
-    watchdog: MaybeLock<Watcher>,
-    incremental_results: MaybeLock<Vec<Vec<u8>>>, // For incremental processing
+    watchdog: LazyRwLock<Watcher>,
+    incremental_results: LazyRwLock<Vec<Vec<u8>>>, // For incremental processing
     sync_barrier: Arc<AtomicUsize>,
 }
 
 impl Drop for ResilientThreadPool {
     fn drop(&mut self) {
         // Safely shutdown watchdog only if it's initialized
-        if let Maybe::Some(mut watchdog) = self.watchdog.take() {
+        if let Some(mut watchdog) = self.watchdog.take() {
             watchdog.shutdown();
         }
         // ThreadPool will be dropped automatically by its own Drop impl
@@ -905,10 +875,8 @@ impl Drop for ResilientThreadPool {
 impl PartialEq for ResilientThreadPool {
     fn eq(&self, other: &Self) -> bool {
         self.pool == other.pool
-            && self.watchdog == other.watchdog
-            && self.incremental_results == other.incremental_results
             && self.sync_barrier.load(Ordering::Relaxed)
-            == other.sync_barrier.load(Ordering::Relaxed)
+                == other.sync_barrier.load(Ordering::Relaxed)
     }
 }
 
@@ -917,8 +885,6 @@ impl Eq for ResilientThreadPool {}
 impl std::hash::Hash for ResilientThreadPool {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.pool.hash(state);
-        self.watchdog.hash(state);
-        self.incremental_results.hash(state);
         self.sync_barrier.load(Ordering::Relaxed).hash(state);
     }
 }
@@ -936,16 +902,16 @@ impl ResilientThreadPool {
     /// Create with custom configuration
     pub fn with_config(config: ThreadPoolConfig) -> Self {
         let pool = ThreadPool::with_config(config.clone());
-        let mut watchdog = MaybeLock::some(Watcher::new());
+        let watchdog = LazyRwLock::some(Watcher::new());
         {
             let mut watchdog_guard = watchdog.write();
-            watchdog_guard.as_mut().start(config.worker_count);
+            watchdog_guard.start(config.worker_count);
         }
 
         ResilientThreadPool {
             pool,
             watchdog,
-            incremental_results: MaybeLock::some(Vec::new()),
+            incremental_results: LazyRwLock::some(Vec::new()),
             sync_barrier: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -953,7 +919,7 @@ impl ResilientThreadPool {
     /// Shutdown the resilient thread pool
     pub fn shutdown(&mut self) {
         // Shutdown watchdog first
-        if let Maybe::Some(mut watchdog) = self.watchdog.take() {
+        if let Some(mut watchdog) = self.watchdog.take() {
             watchdog.shutdown();
         }
         // Signal shutdown to the underlying pool
@@ -971,7 +937,7 @@ impl ResilientThreadPool {
             // Heartbeat before starting
             {
                 let mut watchdog_guard = watchdog.write();
-                watchdog_guard.as_mut().heartbeat(thread_id);
+                watchdog_guard.heartbeat(thread_id);
             }
 
             // Execute the task with panic recovery
@@ -983,13 +949,13 @@ impl ResilientThreadPool {
                 Ok(()) => {
                     // Mark task completed successfully
                     let mut watchdog_guard = watchdog.write();
-                    watchdog_guard.as_mut().task_completed(thread_id);
+                    watchdog_guard.task_completed(thread_id);
                 }
                 Err(_) => {
                     println!("Error: Thread {} panicked during task execution", thread_id);
                     // Attempt recovery
                     let mut watchdog_guard = watchdog.write();
-                    watchdog_guard.as_mut().recover_thread(thread_id);
+                    watchdog_guard.recover_thread(thread_id);
                 }
             }
         });
@@ -1050,4 +1016,326 @@ impl Clone for ResilientThreadPool {
     fn clone(&self) -> Self {
         Self::new()
     }
+}
+use std::sync::atomic::AtomicU64;
+
+pub const FUTEX_WAIT: i32 = 0;
+pub const FUTEX_WAKE: i32 = 1;
+pub const FUTEX_WAIT_BITSET: i32 = 9;
+pub const FUTEX_PRIVATE_FLAG: i32 = 128;
+#[allow(non_upper_case_globals)]
+pub const SYS_futex: i32 = 202;
+pub const CLOCK_MONOTONIC: i32 = 1;
+pub const ETIMEDOUT: i32 = 110;
+pub const EINTR: i32 = 4;
+
+/// No thread owns the lock
+const NO_OWNER: u64 = 0;
+
+/// Get a unique numeric ID for the current thread
+fn current_thread_id() -> u64 {
+    // Use thread-local storage to get a stable ID
+    thread_local! {
+        static THREAD_ID: u64 = {
+            use std::hash::{Hash, Hasher};
+            let id = std::thread::current().id();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            id.hash(&mut hasher);
+            let hash = hasher.finish();
+            // Ensure it's never 0 (reserved for NO_OWNER)
+            if hash == 0 { 1 } else { hash }
+        };
+    }
+    THREAD_ID.with(|id| *id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(C)]
+struct Timespec {
+    pub tv_sec: i64,
+    pub tv_nsec: i64,
+}
+
+/// Reentrant Futex - allows the same thread to acquire the lock multiple times
+#[derive(Debug)]
+pub struct Futex {
+    pub inner: AtomicUsize,
+    /// Thread ID of the current owner (0 = no owner)
+    owner: AtomicU64,
+    /// Reentrant lock count
+    count: AtomicUsize,
+}
+
+impl Futex {
+    pub const fn new() -> Self {
+        Self {
+            inner: AtomicUsize::new(0),
+            owner: AtomicU64::new(NO_OWNER),
+            count: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn store(&self, value: usize, ordering: Ordering) {
+        self.inner.store(value, ordering);
+    }
+
+    pub fn load(&self, ordering: Ordering) -> usize {
+        self.inner.load(ordering)
+    }
+
+    pub fn lock(&self) {
+        let current = current_thread_id();
+
+        // Check if we already own the lock (reentrant case)
+        if self.owner.load(Ordering::Acquire) == current {
+            // Already own it, just increment count
+            self.count.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+
+        // Try to acquire the lock with compare_exchange
+        if self
+            .inner
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.owner.store(current, Ordering::Release);
+            self.count.store(1, Ordering::Relaxed);
+            return;
+        }
+
+        // If that fails, fall back to the slow path
+        self.lock_slow(current);
+    }
+
+    fn lock_slow(&self, current: u64) {
+        loop {
+            // Check for reentrant acquisition while waiting
+            if self.owner.load(Ordering::Acquire) == current {
+                self.count.fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+
+            // Wait for the lock to be released
+            while self.inner.load(Ordering::Relaxed) != 0 {
+                // Double-check owner in case of reentrant call
+                if self.owner.load(Ordering::Acquire) == current {
+                    self.count.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                self.futex_wait(1, None);
+            }
+
+            // Try to acquire the lock again
+            if self
+                .inner
+                .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+            {
+                self.owner.store(current, Ordering::Release);
+                self.count.store(1, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+
+    pub fn unlock(&self) {
+        let current = current_thread_id();
+
+        // Only the owner can unlock
+        if self.owner.load(Ordering::Acquire) != current {
+            // Not the owner - silently ignore in release, panic in debug
+            #[cfg(debug_assertions)]
+            panic!("Futex::unlock called by non-owner thread");
+            #[cfg(not(debug_assertions))]
+            return;
+        }
+
+        // Decrement the reentrant count
+        let prev_count = self.count.fetch_sub(1, Ordering::Relaxed);
+
+        // Only actually release if count goes to 0
+        if prev_count == 1 {
+            self.owner.store(NO_OWNER, Ordering::Release);
+            self.inner.store(0, Ordering::Release);
+            self.futex_wake();
+        }
+    }
+
+    pub fn try_lock(&self) -> bool {
+        let current = current_thread_id();
+
+        // Check if we already own the lock (reentrant case)
+        if self.owner.load(Ordering::Acquire) == current {
+            self.count.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+
+        if self
+            .inner
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
+            self.owner.store(current, Ordering::Release);
+            self.count.store(1, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn futex_wait(&self, expected: usize, timeout: Option<std::time::Duration>) -> bool {
+        let mut timespec = None;
+        // Calculate the timeout as an absolute timespec.
+        if let Some(duration) = timeout {
+            timespec = Some(
+                Timespec::now(CLOCK_MONOTONIC)
+                    .checked_add_duration(&duration)
+                    .expect("overflow"),
+            );
+        }
+        loop {
+            // No need to wait if the value already changed.
+            if self.inner.load(Ordering::Relaxed) != expected {
+                return true;
+            }
+
+            let timespec_ptr = match &timespec {
+                Some(ts) => ts as *const Timespec,
+                None => core::ptr::null(),
+            };
+
+            let r = unsafe {
+                syscall(
+                    SYS_futex,
+                    self.inner.as_ptr(),
+                    FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG,
+                    expected,
+                    timespec_ptr,
+                    core::ptr::null::<usize>(),
+                    !0usize,
+                )
+            };
+
+            if r < 0 {
+                let errno = unsafe { *__errno_location() };
+                match errno {
+                    ETIMEDOUT => return false,
+                    EINTR => continue,
+                    _ => return true,
+                }
+            } else {
+                return true;
+            }
+        }
+    }
+
+    pub fn futex_wake(&self) -> bool {
+        let ptr = self.inner.as_ptr();
+        let op = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
+        unsafe { syscall(SYS_futex, ptr, op, 1) > 0 }
+    }
+
+    pub fn futex_wake_all(&self) {
+        let ptr = self.inner.as_ptr();
+        let op = FUTEX_WAKE | FUTEX_PRIVATE_FLAG;
+        unsafe {
+            syscall(SYS_futex, ptr, op, i32::MAX);
+        }
+    }
+
+    pub fn get(&self) -> usize {
+        self.inner.load(Ordering::Relaxed)
+    }
+
+    pub fn set(&self, value: usize) {
+        self.inner.store(value, Ordering::Relaxed);
+    }
+}
+impl Clone for Futex {
+    fn clone(&self) -> Self {
+        Self {
+            inner: AtomicUsize::new(self.inner.load(Ordering::Relaxed)),
+            owner: AtomicU64::new(NO_OWNER),
+            count: AtomicUsize::new(0),
+        }
+    }
+}
+impl PartialEq for Futex {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.load(Ordering::Relaxed) == other.inner.load(Ordering::Relaxed)
+    }
+}
+impl Eq for Futex {}
+impl PartialOrd for Futex {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Futex {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.inner
+            .load(Ordering::Relaxed)
+            .cmp(&other.inner.load(Ordering::Relaxed))
+    }
+}
+impl Default for Futex {
+    fn default() -> Self {
+        Self {
+            inner: AtomicUsize::new(0),
+            owner: AtomicU64::new(NO_OWNER),
+            count: AtomicUsize::new(0),
+        }
+    }
+}
+impl Drop for Futex {
+    fn drop(&mut self) {
+        self.owner.store(NO_OWNER, Ordering::Relaxed);
+        self.count.store(0, Ordering::Relaxed);
+        self.inner.store(0, Ordering::Relaxed);
+    }
+}
+impl Timespec {
+    pub fn now(clock_id: i32) -> Self {
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        unsafe {
+            syscall(228, clock_id, &mut ts); // SYS_clock_gettime
+        }
+        ts
+    }
+
+    pub fn checked_add_duration(&self, duration: &core::time::Duration) -> Option<Timespec> {
+        let secs = duration.as_secs() as i64;
+        let nanos = duration.subsec_nanos() as i64;
+
+        let new_sec = self.tv_sec.checked_add(secs).unwrap_or_default();
+        let new_nsec = self.tv_nsec + nanos;
+
+        if new_nsec >= 1_000_000_000 {
+            Some(Timespec {
+                tv_sec: new_sec.checked_add(1).unwrap_or_default(),
+                tv_nsec: new_nsec - 1_000_000_000,
+            })
+        } else {
+            Some(Timespec {
+                tv_sec: new_sec,
+                tv_nsec: new_nsec,
+            })
+        }
+    }
+
+    pub fn to_timespec(&self) -> Option<Timespec> {
+        Some(self.clone())
+    }
+}
+
+unsafe extern "C" {
+    pub fn syscall(num: i32, ...) -> i32;
+}
+
+unsafe extern "C" {
+    fn __errno_location() -> *mut i32;
 }
