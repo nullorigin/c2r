@@ -309,7 +309,22 @@ impl TypeConverter {
         }
 
         // Standard type lookup
-        self.type_map.get(source).map(|meta| meta.to_target_type())
+        if let Some(meta) = self.type_map.get(source) {
+            return Some(meta.to_target_type());
+        }
+        
+        // Check for registered user-defined types in System database
+        if let Some(rust_name) = self.lookup_registered_type(source) {
+            return Some(rust_name);
+        }
+        
+        None
+    }
+    
+    /// Look up a type in the System's registered types database
+    fn lookup_registered_type(&self, source: &str) -> Option<String> {
+        // Use system_mut() to look up registered types
+        crate::system::system().lookup_type(source)
     }
 
     /// Normalize type string
@@ -686,6 +701,331 @@ pub fn convert_operator(op: &str) -> &str {
 }
 
 // ============================================================================
+// Identifier Conversion System
+// ============================================================================
+
+/// Category classification for identifiers
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum IdentifierCategory {
+    /// Function names
+    Function,
+    /// Variable names
+    Variable,
+    /// Constant names
+    Constant,
+    /// Type/struct/enum names
+    TypeName,
+    /// Macro names
+    Macro,
+    /// Standard library function
+    StdLibFunction,
+    /// Custom category
+    Custom(String),
+}
+
+impl IdentifierCategory {
+    pub fn as_str(&self) -> &str {
+        match self {
+            IdentifierCategory::Function => "function",
+            IdentifierCategory::Variable => "variable",
+            IdentifierCategory::Constant => "constant",
+            IdentifierCategory::TypeName => "type_name",
+            IdentifierCategory::Macro => "macro",
+            IdentifierCategory::StdLibFunction => "stdlib_function",
+            IdentifierCategory::Custom(s) => s.as_str(),
+        }
+    }
+    
+    /// Get the target case for this category
+    pub fn target_case(&self) -> IdentifierCase {
+        match self {
+            IdentifierCategory::Function => IdentifierCase::SnakeCase,
+            IdentifierCategory::Variable => IdentifierCase::SnakeCase,
+            IdentifierCategory::Constant => IdentifierCase::ScreamingSnakeCase,
+            IdentifierCategory::TypeName => IdentifierCase::PascalCase,
+            IdentifierCategory::Macro => IdentifierCase::SnakeCase, // Rust macros use snake_case!
+            IdentifierCategory::StdLibFunction => IdentifierCase::SnakeCase,
+            IdentifierCategory::Custom(_) => IdentifierCase::SnakeCase,
+        }
+    }
+}
+
+/// Metadata for identifier conversions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IdentifierMetadata {
+    /// Source identifier name
+    pub source_name: String,
+    /// Target identifier name
+    pub target_name: String,
+    /// Identifier category
+    pub category: IdentifierCategory,
+    /// Whether this requires special handling
+    pub is_special: bool,
+    /// Notes about the conversion
+    pub notes: Option<String>,
+}
+
+impl IdentifierMetadata {
+    /// Create new identifier metadata
+    pub fn new(source: &str, target: &str, category: IdentifierCategory) -> Self {
+        Self {
+            source_name: source.to_string(),
+            target_name: target.to_string(),
+            category,
+            is_special: false,
+            notes: None,
+        }
+    }
+    
+    /// Mark as special (requires attention)
+    pub fn as_special(mut self) -> Self {
+        self.is_special = true;
+        self
+    }
+    
+    /// Add notes
+    pub fn with_notes(mut self, notes: &str) -> Self {
+        self.notes = Some(notes.to_string());
+        self
+    }
+    
+    /// Convert to an Entry representation
+    pub fn to_entry(&self) -> Entry {
+        let mut node = Entry::node("IdentifierMetadata", &self.source_name);
+        node.set_attr("target_name", Entry::string(&self.target_name));
+        node.set_attr("category", Entry::string(self.category.as_str()));
+        node.set_attr("is_special", Entry::bool(self.is_special));
+        if let Some(ref notes) = self.notes {
+            node.set_attr("notes", Entry::string(notes));
+        }
+        node
+    }
+}
+
+/// Identifier conversion engine
+/// 
+/// Converts C identifiers to Rust equivalents, handling:
+/// - Standard library function name mappings (printf -> print!, etc.)
+/// - Case conversion based on category (snake_case, PascalCase, etc.)
+/// - Rust keyword sanitization
+/// - Common C naming conventions
+#[derive(Debug, Clone)]
+pub struct IdentifierConverter {
+    /// Identifier mappings (source -> metadata)
+    id_map: HashMap<String, IdentifierMetadata>,
+    /// Category index for quick lookups
+    category_index: HashMap<IdentifierCategory, Vec<String>>,
+    /// Cached conversions for performance
+    conversion_cache: HashMap<String, String>,
+    /// Identifier aliases
+    aliases: HashMap<String, String>,
+}
+
+impl IdentifierConverter {
+    /// Create a new identifier converter
+    pub fn new() -> Self {
+        let mut converter = Self {
+            id_map: HashMap::new(),
+            category_index: HashMap::new(),
+            conversion_cache: HashMap::new(),
+            aliases: HashMap::new(),
+        };
+        converter.initialize_stdlib_mappings();
+        converter.initialize_common_mappings();
+        converter
+    }
+    
+    /// Initialize standard library function mappings
+    fn initialize_stdlib_mappings(&mut self) {
+        // I/O functions
+        self.add_identifier("printf", "print!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("fprintf", "write!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("sprintf", "format!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("snprintf", "format!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("puts", "println!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("putchar", "print!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("getchar", "std::io::stdin().bytes().next()", IdentifierCategory::StdLibFunction);
+        self.add_identifier("fgets", "std::io::stdin().read_line", IdentifierCategory::StdLibFunction);
+        
+        // Memory functions
+        self.add_identifier("malloc", "Box::new", IdentifierCategory::StdLibFunction);
+        self.add_identifier("calloc", "vec![0; n]", IdentifierCategory::StdLibFunction);
+        self.add_identifier("realloc", "Vec::resize", IdentifierCategory::StdLibFunction);
+        self.add_identifier("free", "drop", IdentifierCategory::StdLibFunction);
+        self.add_identifier("memcpy", "copy_from_slice", IdentifierCategory::StdLibFunction);
+        self.add_identifier("memmove", "copy_within", IdentifierCategory::StdLibFunction);
+        self.add_identifier("memset", "fill", IdentifierCategory::StdLibFunction);
+        self.add_identifier("memcmp", "eq", IdentifierCategory::StdLibFunction);
+        
+        // String functions
+        self.add_identifier("strlen", "len", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strcpy", "clone", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strncpy", "clone", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strcat", "push_str", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strcmp", "cmp", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strncmp", "starts_with", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strchr", "find", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strstr", "contains", IdentifierCategory::StdLibFunction);
+        self.add_identifier("strtok", "split", IdentifierCategory::StdLibFunction);
+        
+        // Math functions
+        self.add_identifier("abs", "abs", IdentifierCategory::StdLibFunction);
+        self.add_identifier("fabs", "abs", IdentifierCategory::StdLibFunction);
+        self.add_identifier("sqrt", "sqrt", IdentifierCategory::StdLibFunction);
+        self.add_identifier("pow", "powf", IdentifierCategory::StdLibFunction);
+        self.add_identifier("floor", "floor", IdentifierCategory::StdLibFunction);
+        self.add_identifier("ceil", "ceil", IdentifierCategory::StdLibFunction);
+        self.add_identifier("round", "round", IdentifierCategory::StdLibFunction);
+        self.add_identifier("sin", "sin", IdentifierCategory::StdLibFunction);
+        self.add_identifier("cos", "cos", IdentifierCategory::StdLibFunction);
+        self.add_identifier("tan", "tan", IdentifierCategory::StdLibFunction);
+        self.add_identifier("log", "ln", IdentifierCategory::StdLibFunction);
+        self.add_identifier("log10", "log10", IdentifierCategory::StdLibFunction);
+        self.add_identifier("exp", "exp", IdentifierCategory::StdLibFunction);
+        
+        // Utility functions
+        self.add_identifier("sizeof", "std::mem::size_of", IdentifierCategory::StdLibFunction);
+        self.add_identifier("offsetof", "std::mem::offset_of!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("exit", "std::process::exit", IdentifierCategory::StdLibFunction);
+        self.add_identifier("abort", "std::process::abort", IdentifierCategory::StdLibFunction);
+        self.add_identifier("assert", "assert!", IdentifierCategory::StdLibFunction);
+        self.add_identifier("atoi", "parse::<i32>", IdentifierCategory::StdLibFunction);
+        self.add_identifier("atof", "parse::<f64>", IdentifierCategory::StdLibFunction);
+        self.add_identifier("atol", "parse::<i64>", IdentifierCategory::StdLibFunction);
+    }
+    
+    /// Initialize common identifier mappings
+    fn initialize_common_mappings(&mut self) {
+        // Common constants
+        self.add_identifier("NULL", "std::ptr::null()", IdentifierCategory::Constant);
+        self.add_identifier("TRUE", "true", IdentifierCategory::Constant);
+        self.add_identifier("FALSE", "false", IdentifierCategory::Constant);
+        self.add_identifier("EOF", "None", IdentifierCategory::Constant);
+        
+        // Common macros
+        self.add_identifier("MIN", "min", IdentifierCategory::Macro);
+        self.add_identifier("MAX", "max", IdentifierCategory::Macro);
+        self.add_identifier("ABS", "abs", IdentifierCategory::Macro);
+        
+        // File handles
+        self.add_identifier("stdin", "std::io::stdin()", IdentifierCategory::Variable);
+        self.add_identifier("stdout", "std::io::stdout()", IdentifierCategory::Variable);
+        self.add_identifier("stderr", "std::io::stderr()", IdentifierCategory::Variable);
+    }
+    
+    /// Add an identifier mapping
+    fn add_identifier(&mut self, source: &str, target: &str, category: IdentifierCategory) {
+        let metadata = IdentifierMetadata::new(source, target, category.clone());
+        
+        self.category_index
+            .entry(category)
+            .or_default()
+            .push(source.to_string());
+        
+        self.id_map.insert(source.to_string(), metadata);
+    }
+    
+    /// Convert an identifier to its Rust equivalent
+    pub fn convert(&mut self, source: &str) -> Option<String> {
+        // Check cache first
+        if let Some(cached) = self.conversion_cache.get(source) {
+            return Some(cached.clone());
+        }
+        
+        let result = self.convert_internal(source)?;
+        
+        // Cache the result
+        self.conversion_cache.insert(source.to_string(), result.clone());
+        
+        Some(result)
+    }
+    
+    /// Internal conversion logic
+    fn convert_internal(&self, source: &str) -> Option<String> {
+        // Check for direct mapping
+        if let Some(metadata) = self.id_map.get(source) {
+            return Some(metadata.target_name.clone());
+        }
+        
+        // Check aliases
+        if let Some(alias) = self.aliases.get(source) {
+            return Some(alias.clone());
+        }
+        
+        // Check System database for registered functions
+        if let Some(rust_name) = self.lookup_registered_function(source) {
+            return Some(rust_name);
+        }
+        
+        // No direct mapping - just sanitize for Rust keywords
+        Some(sanitize_rust_identifier(source))
+    }
+    
+    /// Look up a function in the System's registered functions database
+    fn lookup_registered_function(&self, source: &str) -> Option<String> {
+        crate::system::system().lookup_function(source)
+    }
+    
+    /// Convert with category-appropriate case conversion
+    pub fn convert_with_case(&mut self, source: &str, category: IdentifierCategory) -> String {
+        // Check for direct mapping first
+        if let Some(metadata) = self.id_map.get(source) {
+            return metadata.target_name.clone();
+        }
+        
+        // Apply case conversion based on category
+        let case = category.target_case();
+        let converted = convert_identifier(source, case);
+        
+        // Sanitize for Rust keywords
+        sanitize_rust_identifier(&converted)
+    }
+    
+    /// Get metadata for an identifier
+    pub fn get_metadata(&self, source: &str) -> Option<&IdentifierMetadata> {
+        self.id_map.get(source)
+    }
+    
+    /// Check if an identifier has a known mapping
+    pub fn has_mapping(&self, source: &str) -> bool {
+        self.id_map.contains_key(source)
+    }
+    
+    /// Get all identifiers in a category
+    pub fn by_category(&self, category: &IdentifierCategory) -> Option<&Vec<String>> {
+        self.category_index.get(category)
+    }
+    
+    /// Add a custom identifier mapping
+    pub fn add_custom(&mut self, source: String, target: String, category: IdentifierCategory) {
+        self.add_identifier(&source, &target, category);
+    }
+    
+    /// Add an alias
+    pub fn add_alias(&mut self, alias: String, target: String) {
+        self.aliases.insert(alias, target);
+    }
+    
+    /// Clear the conversion cache
+    pub fn clear_cache(&mut self) {
+        self.conversion_cache.clear();
+    }
+    
+    /// Check if source is a stdlib function
+    pub fn is_stdlib_function(&self, source: &str) -> bool {
+        self.id_map.get(source)
+            .map(|m| m.category == IdentifierCategory::StdLibFunction)
+            .unwrap_or(false)
+    }
+}
+
+impl Default for IdentifierConverter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -803,5 +1143,68 @@ mod tests {
     fn test_convert_operator() {
         assert_eq!(convert_operator("~"), "!");
         assert_eq!(convert_operator("+"), "+");
+    }
+    
+    #[test]
+    fn test_identifier_converter_stdlib() {
+        let mut converter = IdentifierConverter::new();
+        
+        assert_eq!(converter.convert("printf"), Some("print!".to_string()));
+        assert_eq!(converter.convert("malloc"), Some("Box::new".to_string()));
+        assert_eq!(converter.convert("strlen"), Some("len".to_string()));
+        assert_eq!(converter.convert("sizeof"), Some("std::mem::size_of".to_string()));
+    }
+    
+    #[test]
+    fn test_identifier_converter_constants() {
+        let mut converter = IdentifierConverter::new();
+        
+        assert_eq!(converter.convert("NULL"), Some("std::ptr::null()".to_string()));
+        assert_eq!(converter.convert("TRUE"), Some("true".to_string()));
+        assert_eq!(converter.convert("FALSE"), Some("false".to_string()));
+    }
+    
+    #[test]
+    fn test_identifier_converter_keywords() {
+        let mut converter = IdentifierConverter::new();
+        
+        // Rust keywords should be prefixed with r#
+        assert_eq!(converter.convert("type"), Some("r#type".to_string()));
+        assert_eq!(converter.convert("match"), Some("r#match".to_string()));
+        
+        // Non-keywords pass through
+        assert_eq!(converter.convert("my_var"), Some("my_var".to_string()));
+    }
+    
+    #[test]
+    fn test_identifier_converter_with_case() {
+        let mut converter = IdentifierConverter::new();
+        
+        // Function names should be snake_case
+        assert_eq!(
+            converter.convert_with_case("MyFunction", IdentifierCategory::Function),
+            "my_function"
+        );
+        
+        // Type names should be PascalCase
+        assert_eq!(
+            converter.convert_with_case("my_struct", IdentifierCategory::TypeName),
+            "MyStruct"
+        );
+        
+        // Constants should be SCREAMING_SNAKE_CASE
+        assert_eq!(
+            converter.convert_with_case("maxValue", IdentifierCategory::Constant),
+            "MAX_VALUE"
+        );
+    }
+    
+    #[test]
+    fn test_identifier_converter_is_stdlib() {
+        let converter = IdentifierConverter::new();
+        
+        assert!(converter.is_stdlib_function("printf"));
+        assert!(converter.is_stdlib_function("malloc"));
+        assert!(!converter.is_stdlib_function("my_function"));
     }
 }

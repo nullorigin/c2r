@@ -54,6 +54,8 @@ pub const KIND_STRINGS: &[&str] = &[
     "Sample",
     "Keyword",
     "Token",
+    "TokenSet",
+    "Config",
     "Node",
     "Branch",
     "Root",
@@ -107,10 +109,12 @@ pub enum Kind {
     Sample = 40,
     Keyword = 41,
     Token = 42,
-    Node = 43,
-    Branch = 44,
-    Root = 45,
-    Unknown = 46,
+    TokenSet = 43,
+    Config = 44,
+    Node = 45,
+    Branch = 46,
+    Root = 47,
+    Unknown = 48,
 }
 
 impl Kind {
@@ -226,6 +230,8 @@ pub const CATEGORY_STRINGS: &[&str] = &[
     "report",
     "pattern",
     "sample",
+    "token",
+    "config",
     "metadata",
     "annotation",
     "attribute",
@@ -285,10 +291,12 @@ pub enum Category {
     Report = 46,
     Pattern = 47,
     Sample = 48,
-    Metadata = 49,
-    Annotation = 50,
-    Attribute = 51,
-    Unknown = 52,
+    Token = 49,
+    Config = 50,
+    Metadata = 51,
+    Annotation = 52,
+    Attribute = 53,
+    Unknown = 54,
 }
 
 impl Category {

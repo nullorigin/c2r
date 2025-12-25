@@ -5,13 +5,12 @@
 //!
 //! Key components:
 //! - `Pattern`: Unified enum for all pattern types (Definition, Literal, Predicate, Sequence)
-//! - `PatternCore`: Common fields shared across all pattern variants
-//! - `Patterns`: Container for pattern collections with builder methods
-//! - `PatternDB`: Database of pattern definitions
+//! - `PatternRule`: Individual rules within Definition patterns
 //! - `PatternMachine`: Hybrid automaton for pattern matching
 //! - `PatternMatch`: Result of a successful match
+//!
+//! Patterns are stored in Web database via the Build trait.
 
-use crate::db::store::IndexedStore;
 use crate::db::web::{Entry, Build};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{self, Debug};
@@ -39,8 +38,6 @@ pub enum RuleType {
     Any,
     /// Custom validator function (stored as name)
     Custom(String),
-    /// Branch pattern - takes different paths based on logical operations
-    Branch(BranchPattern),
 }
 
 /// Logical operations for branch patterns
@@ -114,85 +111,6 @@ impl LogicalOp {
             LogicalOp::AndNot => left && !right,
             LogicalOp::NotAnd => !left && right,
         }
-    }
-}
-
-/// Branch pattern for non-linear pattern matching
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BranchPattern {
-    /// The logical operation to perform
-    pub operation: LogicalOp,
-    /// Left operand
-    pub left: Box<BranchOperand>,
-    /// Right operand
-    pub right: Box<BranchOperand>,
-    /// Pattern to follow if condition is true
-    pub true_path: Vec<PatternRule>,
-    /// Pattern to follow if condition is false
-    pub false_path: Vec<PatternRule>,
-    /// Optional description for debugging
-    pub description: Option<String>,
-}
-
-/// Operand for branch operations
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BranchOperand {
-    /// Reference to another pattern by name
-    PatternRef(String),
-    /// Nested branch operation
-    NestedBranch(BranchPattern),
-    /// Direct rule evaluation
-    Rule(PatternRule),
-}
-
-impl BranchPattern {
-    /// Create a new branch pattern
-    pub fn new(operation: LogicalOp, left: BranchOperand, right: BranchOperand) -> Self {
-        Self {
-            operation,
-            left: Box::new(left),
-            right: Box::new(right),
-            true_path: Vec::new(),
-            false_path: Vec::new(),
-            description: None,
-        }
-    }
-
-    /// Add true path rules
-    pub fn with_true_path(mut self, rules: Vec<PatternRule>) -> Self {
-        self.true_path = rules;
-        self
-    }
-
-    /// Add false path rules
-    pub fn with_false_path(mut self, rules: Vec<PatternRule>) -> Self {
-        self.false_path = rules;
-        self
-    }
-
-    /// Add description
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    /// Evaluate the logical operation
-    pub fn evaluate(&self, left_result: bool, right_result: bool) -> bool {
-        self.operation.evaluate(left_result, right_result)
-    }
-}
-
-impl BranchOperand {
-    pub fn pattern_ref(name: impl Into<String>) -> Self {
-        Self::PatternRef(name.into())
-    }
-
-    pub fn nested_branch(branch: BranchPattern) -> Self {
-        Self::NestedBranch(branch)
-    }
-
-    pub fn rule(rule: PatternRule) -> Self {
-        Self::Rule(rule)
     }
 }
 
@@ -296,31 +214,6 @@ impl PatternRule {
         }
     }
 
-    /// Create branch rule
-    pub fn branch(
-        operation: LogicalOp,
-        left: BranchOperand,
-        right: BranchOperand,
-        true_path: Vec<PatternRule>,
-        false_path: Vec<PatternRule>,
-    ) -> Self {
-        Self {
-            rule_type: RuleType::Branch(BranchPattern {
-                operation,
-                left: Box::new(left),
-                right: Box::new(right),
-                true_path,
-                false_path,
-                description: None,
-            }),
-            value: format!("{:?}", operation),
-            optional: false,
-            can_repeat: false,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
-        }
-    }
-
     /// Make rule optional
     pub fn optional(mut self) -> Self {
         self.optional = true;
@@ -381,172 +274,172 @@ pub struct PatternStats {
 // Unified Pattern System
 // ============================================================================
 
-/// Common fields shared across all pattern types.
-/// Extract these to avoid duplicating code for each variant.
-#[derive(Debug, Clone)]
-pub struct PatternCore {
-    /// Unique pattern identifier
-    pub id: usize,
-    /// Pattern name
-    pub name: String,
-    /// Category for grouping
-    pub category: String,
-    /// Priority for matching order (higher = matched first)
-    pub priority: i32,
-    /// Minimum tokens required to match
-    pub min_tokens: usize,
-    /// Optional description
-    pub description: String,
-    /// Example usages
-    pub examples: Vec<String>,
-    /// Runtime statistics
-    pub stats: Option<PatternStats>,
-    /// User-defined data
-    pub data: u64,
-}
-
-impl PatternCore {
-    /// Create a new pattern core with required fields
-    pub fn new(id: usize, name: impl Into<String>) -> Self {
-        Self {
-            id,
-            name: name.into(),
-            category: String::new(),
-            priority: 0,
-            min_tokens: 1,
-            description: String::new(),
-            examples: Vec::new(),
-            stats: None,
-            data: 0,
-        }
-    }
-
-    /// Set category
-    pub fn with_category(mut self, category: impl Into<String>) -> Self {
-        self.category = category.into();
-        self
-    }
-
-    /// Set priority
-    pub fn with_priority(mut self, priority: i32) -> Self {
-        self.priority = priority;
-        self
-    }
-
-    /// Set minimum tokens
-    pub fn with_min_tokens(mut self, min_tokens: usize) -> Self {
-        self.min_tokens = min_tokens;
-        self
-    }
-
-    /// Set description
-    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
-        self.description = desc.into();
-        self
-    }
-
-    /// Add examples
-    pub fn with_examples(mut self, examples: Vec<String>) -> Self {
-        self.examples = examples;
-        self
-    }
-
-    /// Set user data
-    pub fn with_data(mut self, data: u64) -> Self {
-        self.data = data;
-        self
-    }
-}
-
-impl Default for PatternCore {
-    fn default() -> Self {
-        Self::new(0, "")
-    }
-}
-
-/// Unified pattern enum containing all pattern variants.
-/// Each variant shares common fields via PatternCore.
+/// Unified pattern enum containing all pattern variants with common fields inline.
 #[derive(Debug, Clone)]
 pub enum Pattern<T = String> {
-    /// Rule-based pattern definition (from PatternDef)
+    /// Rule-based pattern definition
     Definition {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         rules: Vec<PatternRule>,
     },
-    /// Literal/exact sequence match (from MachinePattern)
+    /// Literal/exact sequence match
     Literal {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         elements: Vec<T>,
     },
     /// Predicate-based pattern
     Predicate {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         predicate_name: &'static str,
     },
     /// Wildcard pattern - matches any sequence
     Wildcard {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
     },
     /// Sequence of sub-patterns
     Sequence {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         patterns: Vec<Pattern<T>>,
     },
     /// Choice between patterns (matches first successful)
     Choice {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         alternatives: Vec<Pattern<T>>,
     },
     /// Optional pattern (zero or one)
     Optional {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         inner: Box<Pattern<T>>,
     },
     /// Repeating pattern (zero or more)
     Repeat {
-        core: PatternCore,
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
         inner: Box<Pattern<T>>,
-        min: usize,
-        max: Option<usize>,
+        min_repeat: usize,
+        max_repeat: Option<usize>,
+    },
+    /// Branch pattern - conditional matching with logical operations
+    Branch {
+        id: usize,
+        name: String,
+        category: String,
+        priority: i32,
+        min_tokens: usize,
+        description: String,
+        /// The logical operation to evaluate
+        operation: LogicalOp,
+        /// Left pattern to evaluate
+        left: Box<Pattern<T>>,
+        /// Right pattern to evaluate
+        right: Box<Pattern<T>>,
+        /// Pattern to follow if condition is true
+        true_path: Box<Pattern<T>>,
+        /// Pattern to follow if condition is false
+        false_path: Box<Pattern<T>>,
     },
 }
 
 impl<T> Pattern<T> {
-    /// Get the core fields (common across all variants)
-    pub fn core(&self) -> &PatternCore {
-        match self {
-            Pattern::Definition { core, .. } => core,
-            Pattern::Literal { core, .. } => core,
-            Pattern::Predicate { core, .. } => core,
-            Pattern::Wildcard { core } => core,
-            Pattern::Sequence { core, .. } => core,
-            Pattern::Choice { core, .. } => core,
-            Pattern::Optional { core, .. } => core,
-            Pattern::Repeat { core, .. } => core,
-        }
-    }
-
-    /// Get mutable core fields
-    pub fn core_mut(&mut self) -> &mut PatternCore {
-        match self {
-            Pattern::Definition { core, .. } => core,
-            Pattern::Literal { core, .. } => core,
-            Pattern::Predicate { core, .. } => core,
-            Pattern::Wildcard { core } => core,
-            Pattern::Sequence { core, .. } => core,
-            Pattern::Choice { core, .. } => core,
-            Pattern::Optional { core, .. } => core,
-            Pattern::Repeat { core, .. } => core,
-        }
-    }
-
     /// Convenience accessors for common fields
-    pub fn id(&self) -> usize { self.core().id }
-    pub fn name(&self) -> &str { &self.core().name }
-    pub fn category(&self) -> &str { &self.core().category }
-    pub fn priority(&self) -> i32 { self.core().priority }
-    pub fn min_tokens(&self) -> usize { self.core().min_tokens }
-    pub fn description(&self) -> &str { &self.core().description }
+    pub fn id(&self) -> usize {
+        match self {
+            Pattern::Definition { id, .. } | Pattern::Literal { id, .. } |
+            Pattern::Predicate { id, .. } | Pattern::Wildcard { id, .. } |
+            Pattern::Sequence { id, .. } | Pattern::Choice { id, .. } |
+            Pattern::Optional { id, .. } | Pattern::Repeat { id, .. } |
+            Pattern::Branch { id, .. } => *id,
+        }
+    }
+    
+    pub fn name(&self) -> &str {
+        match self {
+            Pattern::Definition { name, .. } | Pattern::Literal { name, .. } |
+            Pattern::Predicate { name, .. } | Pattern::Wildcard { name, .. } |
+            Pattern::Sequence { name, .. } | Pattern::Choice { name, .. } |
+            Pattern::Optional { name, .. } | Pattern::Repeat { name, .. } |
+            Pattern::Branch { name, .. } => name,
+        }
+    }
+    
+    pub fn category(&self) -> &str {
+        match self {
+            Pattern::Definition { category, .. } | Pattern::Literal { category, .. } |
+            Pattern::Predicate { category, .. } | Pattern::Wildcard { category, .. } |
+            Pattern::Sequence { category, .. } | Pattern::Choice { category, .. } |
+            Pattern::Optional { category, .. } | Pattern::Repeat { category, .. } |
+            Pattern::Branch { category, .. } => category,
+        }
+    }
+    
+    pub fn priority(&self) -> i32 {
+        match self {
+            Pattern::Definition { priority, .. } | Pattern::Literal { priority, .. } |
+            Pattern::Predicate { priority, .. } | Pattern::Wildcard { priority, .. } |
+            Pattern::Sequence { priority, .. } | Pattern::Choice { priority, .. } |
+            Pattern::Optional { priority, .. } | Pattern::Repeat { priority, .. } |
+            Pattern::Branch { priority, .. } => *priority,
+        }
+    }
+    
+    pub fn min_tokens(&self) -> usize {
+        match self {
+            Pattern::Definition { min_tokens, .. } | Pattern::Literal { min_tokens, .. } |
+            Pattern::Predicate { min_tokens, .. } | Pattern::Wildcard { min_tokens, .. } |
+            Pattern::Sequence { min_tokens, .. } | Pattern::Choice { min_tokens, .. } |
+            Pattern::Optional { min_tokens, .. } | Pattern::Repeat { min_tokens, .. } |
+            Pattern::Branch { min_tokens, .. } => *min_tokens,
+        }
+    }
+    
+    pub fn description(&self) -> &str {
+        match self {
+            Pattern::Definition { description, .. } | Pattern::Literal { description, .. } |
+            Pattern::Predicate { description, .. } | Pattern::Wildcard { description, .. } |
+            Pattern::Sequence { description, .. } | Pattern::Choice { description, .. } |
+            Pattern::Optional { description, .. } | Pattern::Repeat { description, .. } |
+            Pattern::Branch { description, .. } => description,
+        }
+    }
 
     /// Check if this is a definition pattern
     pub fn is_definition(&self) -> bool { matches!(self, Pattern::Definition { .. }) }
@@ -560,7 +453,12 @@ impl<T> Pattern<T> {
     /// Create a definition pattern
     pub fn definition(id: usize, name: impl Into<String>, rules: Vec<PatternRule>) -> Self {
         Pattern::Definition {
-            core: PatternCore::new(id, name),
+            id,
+            name: name.into(),
+            category: String::new(),
+            priority: 0,
+            min_tokens: 1,
+            description: String::new(),
             rules,
         }
     }
@@ -568,7 +466,12 @@ impl<T> Pattern<T> {
     /// Create a literal pattern
     pub fn literal(id: usize, name: impl Into<String>, elements: Vec<T>) -> Self {
         Pattern::Literal {
-            core: PatternCore::new(id, name),
+            id,
+            name: name.into(),
+            category: String::new(),
+            priority: 0,
+            min_tokens: 1,
+            description: String::new(),
             elements,
         }
     }
@@ -576,18 +479,78 @@ impl<T> Pattern<T> {
     /// Create a wildcard pattern
     pub fn wildcard(id: usize, name: impl Into<String>) -> Self {
         Pattern::Wildcard {
-            core: PatternCore::new(id, name),
+            id,
+            name: name.into(),
+            category: String::new(),
+            priority: 0,
+            min_tokens: 1,
+            description: String::new(),
         }
+    }
+
+    /// Builder: set category
+    pub fn with_category(mut self, cat: impl Into<String>) -> Self {
+        match &mut self {
+            Pattern::Definition { category, .. } | Pattern::Literal { category, .. } |
+            Pattern::Predicate { category, .. } | Pattern::Wildcard { category, .. } |
+            Pattern::Sequence { category, .. } | Pattern::Choice { category, .. } |
+            Pattern::Optional { category, .. } | Pattern::Repeat { category, .. } |
+            Pattern::Branch { category, .. } => {
+                *category = cat.into();
+            }
+        }
+        self
+    }
+
+    /// Builder: set priority
+    pub fn with_priority(mut self, pri: i32) -> Self {
+        match &mut self {
+            Pattern::Definition { priority, .. } | Pattern::Literal { priority, .. } |
+            Pattern::Predicate { priority, .. } | Pattern::Wildcard { priority, .. } |
+            Pattern::Sequence { priority, .. } | Pattern::Choice { priority, .. } |
+            Pattern::Optional { priority, .. } | Pattern::Repeat { priority, .. } |
+            Pattern::Branch { priority, .. } => {
+                *priority = pri;
+            }
+        }
+        self
+    }
+
+    /// Builder: set minimum tokens
+    pub fn with_min_tokens(mut self, min: usize) -> Self {
+        match &mut self {
+            Pattern::Definition { min_tokens, .. } | Pattern::Literal { min_tokens, .. } |
+            Pattern::Predicate { min_tokens, .. } | Pattern::Wildcard { min_tokens, .. } |
+            Pattern::Sequence { min_tokens, .. } | Pattern::Choice { min_tokens, .. } |
+            Pattern::Optional { min_tokens, .. } | Pattern::Repeat { min_tokens, .. } |
+            Pattern::Branch { min_tokens, .. } => {
+                *min_tokens = min;
+            }
+        }
+        self
+    }
+
+    /// Builder: set description
+    pub fn with_description(mut self, desc: impl Into<String>) -> Self {
+        match &mut self {
+            Pattern::Definition { description, .. } | Pattern::Literal { description, .. } |
+            Pattern::Predicate { description, .. } | Pattern::Wildcard { description, .. } |
+            Pattern::Sequence { description, .. } | Pattern::Choice { description, .. } |
+            Pattern::Optional { description, .. } | Pattern::Repeat { description, .. } |
+            Pattern::Branch { description, .. } => {
+                *description = desc.into();
+            }
+        }
+        self
     }
 
     /// Convert to Entry representation
     pub fn to_entry(&self) -> Entry {
-        let core = self.core();
-        let mut node = Entry::node("Pattern", &core.name);
-        node.set_attr("id", Entry::usize(core.id));
-        node.set_attr("category", Entry::string(&core.category));
-        node.set_attr("priority", Entry::i32(core.priority));
-        node.set_attr("min_tokens", Entry::usize(core.min_tokens));
+        let mut node = Entry::node("Pattern", self.name());
+        node.set_attr("id", Entry::usize(self.id()));
+        node.set_attr("category", Entry::string(self.category()));
+        node.set_attr("priority", Entry::i32(self.priority()));
+        node.set_attr("min_tokens", Entry::usize(self.min_tokens()));
         
         let variant_name = match self {
             Pattern::Definition { .. } => "definition",
@@ -598,21 +561,19 @@ impl<T> Pattern<T> {
             Pattern::Choice { .. } => "choice",
             Pattern::Optional { .. } => "optional",
             Pattern::Repeat { .. } => "repeat",
+            Pattern::Branch { .. } => "branch",
         };
         node.set_attr("type", Entry::string(variant_name));
 
-        if !core.description.is_empty() {
-            node.set_attr("description", Entry::string(&core.description));
-        }
-        if !core.examples.is_empty() {
-            let examples: Vec<Entry> = core.examples.iter().map(|e| Entry::string(e)).collect();
-            node.set_attr("examples", Entry::vec(examples));
+        let desc = self.description();
+        if !desc.is_empty() {
+            node.set_attr("description", Entry::string(desc));
         }
 
         node
     }
 
-    /// Reconstruct a Pattern from an Entry (partial reconstruction - core fields only)
+    /// Reconstruct a Pattern from an Entry
     pub fn from_entry(entry: &Entry) -> Option<Pattern<T>> 
     where T: Default 
     {
@@ -628,29 +589,123 @@ impl<T> Pattern<T> {
         let description = entry.get_string_attr("description").unwrap_or("").to_string();
         let pattern_type = entry.get_string_attr("type").unwrap_or("wildcard");
         
-        let core = PatternCore {
-            id,
-            name,
-            category,
-            priority,
-            min_tokens,
-            description,
-            examples: Vec::new(),
-            stats: None,
-            data: 0,
+        Some(match pattern_type {
+            "definition" => Pattern::Definition { id, name, category, priority, min_tokens, description, rules: Vec::new() },
+            "literal" => Pattern::Literal { id, name, category, priority, min_tokens, description, elements: Vec::new() },
+            "predicate" => Pattern::Predicate { id, name, category, priority, min_tokens, description, predicate_name: "unknown" },
+            "sequence" => Pattern::Sequence { id, name, category, priority, min_tokens, description, patterns: Vec::new() },
+            "choice" => Pattern::Choice { id, name, category, priority, min_tokens, description, alternatives: Vec::new() },
+            "optional" => Pattern::Optional { id, name: name.clone(), category: category.clone(), priority, min_tokens, description: description.clone(), 
+                inner: Box::new(Pattern::Wildcard { id: 0, name, category, priority: 0, min_tokens: 1, description }) },
+            "repeat" => Pattern::Repeat { id, name: name.clone(), category: category.clone(), priority, min_tokens, description: description.clone(), 
+                inner: Box::new(Pattern::Wildcard { id: 0, name, category, priority: 0, min_tokens: 1, description }), min_repeat: 0, max_repeat: None },
+            _ => Pattern::Wildcard { id, name, category, priority, min_tokens, description },
+        })
+    }
+}
+
+/// Pattern matching implementation for Definition patterns
+impl Pattern<String> {
+    /// Check if tokens match this pattern's rules (for Definition patterns)
+    /// Returns confidence score (0.0 - 1.0) or None if no match
+    pub fn matches_tokens(&self, tokens: &[String]) -> Option<f64> {
+        let rules = match self {
+            Pattern::Definition { rules, min_tokens, .. } => {
+                if tokens.len() < *min_tokens {
+                    return None;
+                }
+                rules
+            }
+            _ => return Some(0.5), // Non-definition patterns use simple matching
         };
         
-        // Reconstruct variant based on type
-        Some(match pattern_type {
-            "definition" => Pattern::Definition { core, rules: Vec::new() },
-            "literal" => Pattern::Literal { core, elements: Vec::new() },
-            "predicate" => Pattern::Predicate { core, predicate_name: "unknown" },
-            "sequence" => Pattern::Sequence { core, patterns: Vec::new() },
-            "choice" => Pattern::Choice { core, alternatives: Vec::new() },
-            "optional" => Pattern::Optional { core, inner: Box::new(Pattern::Wildcard { core: PatternCore::default() }) },
-            "repeat" => Pattern::Repeat { core, inner: Box::new(Pattern::Wildcard { core: PatternCore::default() }), min: 0, max: None },
-            _ => Pattern::Wildcard { core },
-        })
+        // If no rules defined, use simple first-token matching
+        if rules.is_empty() {
+            return Some(0.5);
+        }
+        
+        let mut token_idx = 0;
+        let mut rule_idx = 0;
+        let mut matched_rules = 0;
+        
+        while rule_idx < rules.len() && token_idx < tokens.len() {
+            let rule = &rules[rule_idx];
+            let token = &tokens[token_idx];
+            
+            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
+            
+            if matches {
+                matched_rules += 1;
+                token_idx += 1;
+                
+                // Handle repeating rules
+                if rule.can_repeat && token_idx < tokens.len() {
+                    while token_idx < tokens.len() {
+                        if Self::rule_matches_token(rule, &tokens[token_idx], tokens.get(token_idx + 1)) {
+                            token_idx += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                rule_idx += 1;
+            } else if rule.optional {
+                rule_idx += 1;
+            } else {
+                return None;
+            }
+        }
+        
+        // Check remaining rules are optional
+        while rule_idx < rules.len() {
+            if !rules[rule_idx].optional {
+                return None;
+            }
+            rule_idx += 1;
+        }
+        
+        // Calculate confidence based on how many rules matched
+        let total_rules = rules.iter().filter(|r| !r.optional).count();
+        if total_rules == 0 {
+            Some(0.7)
+        } else {
+            Some((matched_rules as f64 / total_rules as f64).min(1.0) * 0.9 + 0.1)
+        }
+    }
+    
+    /// Check if a single rule matches a token
+    fn rule_matches_token(rule: &PatternRule, token: &str, next_token: Option<&String>) -> bool {
+        if let Some(next) = next_token {
+            if rule.forbidden_next.contains(next) {
+                return false;
+            }
+        }
+        
+        match &rule.rule_type {
+            RuleType::Exact => token == rule.value,
+            RuleType::TypeKeyword => {
+                crate::db::keyword::is_type_keyword(token) ||
+                matches!(token, "bool" | "size_t" | 
+                        "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" |
+                        "int8_t" | "int16_t" | "int32_t" | "int64_t")
+            }
+            RuleType::Keyword => {
+                crate::db::keyword::is_control_flow(token) ||
+                crate::db::keyword::is_storage_class(token) ||
+                crate::db::keyword::is_type_qualifier(token) ||
+                matches!(token, "typedef" | "inline")
+            }
+            RuleType::Identifier => {
+                !token.is_empty() && 
+                (token.chars().next().unwrap().is_alphabetic() || token.starts_with('_')) &&
+                token.chars().all(|c| c.is_alphanumeric() || c == '_')
+            }
+            RuleType::OneOf => {
+                rule.value.split('|').any(|opt| opt == token)
+            }
+            RuleType::Any => true,
+            RuleType::Custom(_) => true,
+        }
     }
 }
 
@@ -678,7 +733,7 @@ impl<T: Clone + Debug> Build for Pattern<T> {
     }
 }
 
-// Note: The Patterns container has been removed. Use Web for unified storage:
+// Note: Use Web for unified pattern storage:
 //   let mut web = Web::new();
 //   web.add(&pattern);  // Add Pattern via Build trait
 //   web.by_kind("Pattern");  // Query all patterns
@@ -686,496 +741,33 @@ impl<T: Clone + Debug> Build for Pattern<T> {
 //   web.by_name("function_definition");  // Query by name
 
 // ============================================================================
-// Legacy Pattern Definition (kept for backward compatibility)
+// Pattern Matcher Helper
 // ============================================================================
 
-/// A pattern definition with all its rules and metadata
+use crate::db::token::Token;
+
+/// Result of pattern matching with extracted segments
 #[derive(Debug, Clone)]
-pub struct PatternDef {
+pub struct MatchResult {
+    /// Pattern that matched
+    pub pattern_name: String,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f64,
+    /// Token indices consumed by the match
+    pub token_range: std::ops::Range<usize>,
+    /// Extracted segments (e.g., condition, body, etc.)
+    pub segments: Vec<MatchSegment>,
+}
+
+/// A segment extracted from matched tokens
+#[derive(Debug, Clone)]
+pub struct MatchSegment {
+    /// Name of the segment (e.g., "condition", "body", "init")
     pub name: String,
-    pub category: String,
-    pub priority: usize,
-    pub min_tokens: usize,
-    pub rules: Vec<PatternRule>,
-    pub description: String,
-    pub examples: Vec<String>,
-    pub stats: Option<PatternStats>,
-}
-
-impl PatternDef {
-    /// Create a new pattern definition
-    pub fn new(name: impl Into<String>, category: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-            category: category.into(),
-            priority: 100,
-            min_tokens: 1,
-            rules: Vec::new(),
-            description: String::new(),
-            examples: Vec::new(),
-            stats: None,
-        }
-    }
-
-    /// Set priority
-    pub fn with_priority(mut self, priority: usize) -> Self {
-        self.priority = priority;
-        self
-    }
-
-    /// Set minimum tokens
-    pub fn with_min_tokens(mut self, min_tokens: usize) -> Self {
-        self.min_tokens = min_tokens;
-        self
-    }
-
-    /// Add rules
-    pub fn with_rules(mut self, rules: Vec<PatternRule>) -> Self {
-        self.rules = rules;
-        self
-    }
-
-    /// Set description
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = description.into();
-        self
-    }
-
-    /// Add examples
-    pub fn with_examples(mut self, examples: Vec<String>) -> Self {
-        self.examples = examples;
-        self
-    }
-
-    /// Convert to Entry representation
-    pub fn to_entry(&self) -> Entry {
-        let mut node = Entry::node("Pattern", &self.name);
-        node.set_attr("category", Entry::string(&self.category));
-        node.set_attr("priority", Entry::usize(self.priority));
-        node.set_attr("min_tokens", Entry::usize(self.min_tokens));
-        node.set_attr("description", Entry::string(&self.description));
-
-        if !self.examples.is_empty() {
-            let examples: Vec<Entry> = self.examples.iter().map(|e| Entry::string(e)).collect();
-            node.set_attr("examples", Entry::vec(examples));
-        }
-
-        node
-    }
-
-    /// Reconstruct a PatternDef from an Entry
-    pub fn from_entry(entry: &Entry) -> Option<PatternDef> {
-        if entry.kind() != Some("Pattern") {
-            return None;
-        }
-        
-        let name = entry.name()?.to_string();
-        let category = entry.get_string_attr("category").unwrap_or("").to_string();
-        let priority = entry.get_number_attr("priority").map(|n| n as usize).unwrap_or(100);
-        let min_tokens = entry.get_number_attr("min_tokens").map(|n| n as usize).unwrap_or(1);
-        let description = entry.get_string_attr("description").unwrap_or("").to_string();
-        
-        let mut pattern = PatternDef::new(name, category)
-            .with_priority(priority)
-            .with_min_tokens(min_tokens)
-            .with_description(description);
-        
-        // Reconstruct examples
-        if let Some(examples_vec) = entry.get_vec_attr("examples") {
-            pattern.examples = examples_vec.iter()
-                .filter_map(|e| if let Entry::String(s, _) = e { Some(s.clone()) } else { None })
-                .collect();
-        }
-        
-        Some(pattern)
-    }
-}
-
-/// Implement Build trait for PatternDef
-impl Build for PatternDef {
-    fn to_entry(&self) -> Entry {
-        PatternDef::to_entry(self)
-    }
-    
-    fn kind(&self) -> &str {
-        "Pattern"
-    }
-    
-    fn name(&self) -> Option<&str> {
-        Some(&self.name)
-    }
-    
-    fn category(&self) -> Option<&str> {
-        if self.category.is_empty() { None } else { Some(&self.category) }
-    }
-    
-    fn priority(&self) -> i16 {
-        self.priority as i16
-    }
-}
-
-// ============================================================================
-// Pattern Database
-// ============================================================================
-
-/// Pattern database - stores all pattern definitions using IndexedStore
-#[derive(Debug, Clone)]
-pub struct PatternDB {
-    /// Patterns stored using generic IndexedStore
-    store: IndexedStore<PatternDef>,
-}
-
-impl PatternDB {
-    /// Create a new empty pattern database
-    pub fn new() -> Self {
-        Self {
-            store: IndexedStore::new(),
-        }
-    }
-
-    /// Create a pattern database with C language patterns
-    pub fn new_c_patterns() -> Self {
-        let mut db = Self::new();
-        db.populate_c_patterns();
-        db.rebuild_priority_index();
-        db
-    }
-
-    /// Populate database with C language patterns
-    fn populate_c_patterns(&mut self) {
-        self.add_function_patterns();
-        self.add_struct_patterns();
-        self.add_enum_patterns();
-        self.add_typedef_patterns();
-        self.add_variable_patterns();
-        self.add_macro_patterns();
-        self.add_array_patterns();
-        self.add_control_flow_patterns();
-    }
-
-    fn add_function_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("function_definition", "function")
-                .with_priority(920)
-                .with_min_tokens(6)
-                .with_rules(vec![
-                    PatternRule::type_keyword(),
-                    PatternRule::identifier(),
-                    PatternRule::exact("("),
-                    PatternRule::any().optional().with_can_repeat(true),
-                    PatternRule::exact(")"),
-                    PatternRule::exact("{"),
-                ])
-                .with_description("Function definition with body")
-                .with_examples(vec![
-                    "int main() { }".to_string(),
-                    "void foo(int x) { return; }".to_string(),
-                ]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("function_declaration", "function")
-                .with_priority(910)
-                .with_min_tokens(5)
-                .with_rules(vec![
-                    PatternRule::type_keyword(),
-                    PatternRule::identifier(),
-                    PatternRule::exact("("),
-                    PatternRule::any().optional().with_can_repeat(true),
-                    PatternRule::exact(")"),
-                    PatternRule::exact(";"),
-                ])
-                .with_description("Function declaration without body")
-                .with_examples(vec!["int add(int a, int b);".to_string()]),
-        );
-    }
-
-    fn add_struct_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("struct_definition", "struct")
-                .with_priority(140)
-                .with_min_tokens(4)
-                .with_rules(vec![
-                    PatternRule::exact("struct"),
-                    PatternRule::identifier().optional(),
-                    PatternRule::exact("{"),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact("}"),
-                    PatternRule::exact(";").optional(),
-                ])
-                .with_description("Struct definition with fields")
-                .with_examples(vec!["struct Point { int x; int y; };".to_string()]),
-        );
-    }
-
-    fn add_enum_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("enum_definition", "enum")
-                .with_priority(140)
-                .with_min_tokens(4)
-                .with_rules(vec![
-                    PatternRule::exact("enum"),
-                    PatternRule::identifier().optional(),
-                    PatternRule::exact("{"),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact("}"),
-                    PatternRule::exact(";").optional(),
-                ])
-                .with_description("Enum definition with values")
-                .with_examples(vec!["enum Status { OK, ERROR };".to_string()]),
-        );
-    }
-
-    fn add_typedef_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("typedef_struct", "typedef")
-                .with_priority(130)
-                .with_min_tokens(6)
-                .with_rules(vec![
-                    PatternRule::exact("typedef"),
-                    PatternRule::exact("struct"),
-                    PatternRule::identifier().optional(),
-                    PatternRule::exact("{"),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact("}"),
-                    PatternRule::identifier(),
-                    PatternRule::exact(";"),
-                ])
-                .with_description("Typedef struct definition")
-                .with_examples(vec![
-                    "typedef struct Point { int x; int y; } Point;".to_string()
-                ]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("typedef_alias", "typedef")
-                .with_priority(125)
-                .with_min_tokens(4)
-                .with_rules(vec![
-                    PatternRule::exact("typedef"),
-                    PatternRule::type_keyword(),
-                    PatternRule::identifier(),
-                    PatternRule::exact(";"),
-                ])
-                .with_description("Simple typedef alias")
-                .with_examples(vec!["typedef int MyInt;".to_string()]),
-        );
-    }
-
-    fn add_variable_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("global_variable", "global")
-                .with_priority(800)
-                .with_min_tokens(3)
-                .with_rules(vec![
-                    PatternRule::type_keyword(),
-                    PatternRule::identifier(),
-                    PatternRule::one_of(vec![";".to_string(), "=".to_string()])
-                        .with_forbidden_next(vec!["(".to_string()]),
-                ])
-                .with_description("Global variable declaration")
-                .with_examples(vec![
-                    "int count;".to_string(),
-                    "float pi = 3.14;".to_string(),
-                ]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("local_variable", "variable")
-                .with_priority(110)
-                .with_min_tokens(3)
-                .with_rules(vec![
-                    PatternRule::type_keyword(),
-                    PatternRule::identifier(),
-                    PatternRule::one_of(vec![";".to_string(), "=".to_string()]),
-                ])
-                .with_description("Local variable declaration")
-                .with_examples(vec![
-                    "int x;".to_string(),
-                    "char buffer[256];".to_string(),
-                ]),
-        );
-    }
-
-    fn add_macro_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("define_macro", "macro")
-                .with_priority(920)
-                .with_min_tokens(3)
-                .with_rules(vec![
-                    PatternRule::exact("#define"),
-                    PatternRule::identifier(),
-                    PatternRule::any().optional().with_can_repeat(true),
-                ])
-                .with_description("Macro definition")
-                .with_examples(vec![
-                    "#define PI 3.14".to_string(),
-                    "#define MAX(a,b) ((a)>(b)?(a):(b))".to_string(),
-                ]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("include_directive", "macro")
-                .with_priority(950)
-                .with_min_tokens(2)
-                .with_rules(vec![PatternRule::exact("#include"), PatternRule::any()])
-                .with_description("Include directive")
-                .with_examples(vec![
-                    "#include <stdio.h>".to_string(),
-                    "#include \"myheader.h\"".to_string(),
-                ]),
-        );
-    }
-
-    fn add_array_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("array_declaration", "array")
-                .with_priority(150)
-                .with_min_tokens(5)
-                .with_rules(vec![
-                    PatternRule::type_keyword(),
-                    PatternRule::identifier(),
-                    PatternRule::exact("["),
-                    PatternRule::any().optional(),
-                    PatternRule::exact("]"),
-                    PatternRule::exact(";").optional(),
-                ])
-                .with_description("Array declaration")
-                .with_examples(vec![
-                    "int numbers[5];".to_string(),
-                    "char buffer[MAX_SIZE];".to_string(),
-                ]),
-        );
-    }
-
-    fn add_control_flow_patterns(&mut self) {
-        self.add_pattern(
-            PatternDef::new("for_loop", "loop")
-                .with_priority(120)
-                .with_min_tokens(8)
-                .with_rules(vec![
-                    PatternRule::exact("for"),
-                    PatternRule::exact("("),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact(")"),
-                    PatternRule::exact("{").optional(),
-                ])
-                .with_description("For loop structure")
-                .with_examples(vec!["for(int i=0; i<10; i++) sum += i;".to_string()]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("while_loop", "loop")
-                .with_priority(120)
-                .with_min_tokens(4)
-                .with_rules(vec![
-                    PatternRule::exact("while"),
-                    PatternRule::exact("("),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact(")"),
-                ])
-                .with_description("While loop structure")
-                .with_examples(vec!["while(x > 0) x--;".to_string()]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("if_statement", "conditional")
-                .with_priority(125)
-                .with_min_tokens(4)
-                .with_rules(vec![
-                    PatternRule::exact("if"),
-                    PatternRule::exact("("),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact(")"),
-                ])
-                .with_description("If statement")
-                .with_examples(vec!["if(x > 0) return x;".to_string()]),
-        );
-
-        self.add_pattern(
-            PatternDef::new("switch_statement", "conditional")
-                .with_priority(120)
-                .with_min_tokens(5)
-                .with_rules(vec![
-                    PatternRule::exact("switch"),
-                    PatternRule::exact("("),
-                    PatternRule::any().with_can_repeat(true),
-                    PatternRule::exact(")"),
-                    PatternRule::exact("{"),
-                ])
-                .with_description("Switch statement")
-                .with_examples(vec!["switch(value) { case 1: break; }".to_string()]),
-        );
-    }
-
-    /// Add a pattern to the database
-    pub fn add_pattern(&mut self, pattern: PatternDef) {
-        let name = pattern.name.clone();
-        let category = pattern.category.clone();
-        let priority = pattern.priority as i32;
-        self.store.add(name, category, priority, pattern);
-    }
-
-    /// Get a pattern by name
-    pub fn get_pattern(&self, name: &str) -> Option<&PatternDef> {
-        self.store.get(name)
-    }
-
-    /// Get mutable pattern
-    pub fn get_pattern_mut(&mut self, name: &str) -> Option<&mut PatternDef> {
-        self.store.get_mut(name)
-    }
-
-    /// Get all patterns in a category
-    pub fn get_category_patterns(&self, category: &str) -> Vec<&PatternDef> {
-        self.store.get_group(category)
-    }
-
-    /// Get patterns sorted by priority
-    pub fn get_by_priority(&mut self) -> Vec<&PatternDef> {
-        self.store.by_priority()
-    }
-
-    /// Rebuild the priority index
-    fn rebuild_priority_index(&mut self) {
-        self.store.rebuild_priority_index(|p| p.priority as i32);
-    }
-
-    /// Get all pattern names
-    pub fn pattern_names(&self) -> Vec<&str> {
-        self.store.ids().map(|s| s.as_str()).collect()
-    }
-
-    /// Get all categories
-    pub fn category_names(&self) -> Vec<&str> {
-        self.store.group_names().map(|s| s.as_str()).collect()
-    }
-
-    /// Number of patterns
-    pub fn len(&self) -> usize {
-        self.store.len()
-    }
-
-    /// Check if empty
-    pub fn is_empty(&self) -> bool {
-        self.store.is_empty()
-    }
-
-    /// Remove a pattern by name
-    pub fn remove_pattern(&mut self, name: &str) -> Option<PatternDef> {
-        self.store.remove(name)
-    }
-
-    /// Iterate over all patterns
-    pub fn iter(&self) -> impl Iterator<Item = (&String, &PatternDef)> {
-        self.store.iter()
-    }
-}
-
-impl Default for PatternDB {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Token indices for this segment
+    pub range: std::ops::Range<usize>,
+    /// The tokens in this segment
+    pub tokens: Vec<Token>,
 }
 
 // ============================================================================
@@ -2017,29 +1609,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_pattern_db_creation() {
-        let db = PatternDB::new_c_patterns();
-        assert!(db.get_pattern("function_definition").is_some());
-        assert!(db.get_pattern("struct_definition").is_some());
-    }
-
-    #[test]
-    fn test_category_patterns() {
-        let db = PatternDB::new_c_patterns();
-        let function_patterns = db.get_category_patterns("function");
-        assert!(!function_patterns.is_empty());
-    }
-
-    #[test]
-    fn test_priority_ordering() {
-        let mut db = PatternDB::new_c_patterns();
-        let by_priority = db.get_by_priority();
-        for window in by_priority.windows(2) {
-            assert!(window[0].priority >= window[1].priority);
-        }
-    }
-
-    #[test]
     fn test_pattern_rule_creation() {
         let rule = PatternRule::exact("int").optional();
         assert!(rule.optional);
@@ -2086,15 +1655,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pattern_def_to_entry() {
-        let pattern = PatternDef::new("test_pattern", "test")
-            .with_priority(100)
-            .with_description("A test pattern");
-        let entry = pattern.to_entry();
-        assert_eq!(entry.name(), Some("test_pattern"));
-    }
-
-    #[test]
     fn test_pattern_match_to_entry() {
         let m = PatternMatch {
             start: 0,
@@ -2109,22 +1669,18 @@ mod tests {
     // ========== Unified Pattern System Tests ==========
 
     #[test]
-    fn test_pattern_core_builder() {
-        let core = PatternCore::new(0, "test")
+    fn test_pattern_builder() {
+        let pattern: Pattern<String> = Pattern::definition(0, "test", vec![])
             .with_category("cat")
             .with_priority(100)
             .with_min_tokens(3)
-            .with_description("A test pattern")
-            .with_examples(vec!["ex1".to_string(), "ex2".to_string()])
-            .with_data(42);
+            .with_description("A test pattern");
 
-        assert_eq!(core.name, "test");
-        assert_eq!(core.category, "cat");
-        assert_eq!(core.priority, 100);
-        assert_eq!(core.min_tokens, 3);
-        assert_eq!(core.description, "A test pattern");
-        assert_eq!(core.examples.len(), 2);
-        assert_eq!(core.data, 42);
+        assert_eq!(pattern.name(), "test");
+        assert_eq!(pattern.category(), "cat");
+        assert_eq!(pattern.priority(), 100);
+        assert_eq!(pattern.min_tokens(), 3);
+        assert_eq!(pattern.description(), "A test pattern");
     }
 
     #[test]
@@ -2160,21 +1716,15 @@ mod tests {
 
     #[test]
     fn test_unified_pattern_common_accessors() {
-        let mut pattern: Pattern<String> = Pattern::Wildcard {
-            core: PatternCore::new(5, "wild")
-                .with_category("test")
-                .with_priority(50),
-        };
+        let pattern: Pattern<String> = Pattern::wildcard(5, "wild")
+            .with_category("test")
+            .with_priority(50);
 
         assert!(pattern.is_wildcard());
         assert_eq!(pattern.id(), 5);
         assert_eq!(pattern.name(), "wild");
         assert_eq!(pattern.category(), "test");
         assert_eq!(pattern.priority(), 50);
-
-        // Test mutable access
-        pattern.core_mut().priority = 100;
-        assert_eq!(pattern.priority(), 100);
     }
 
     // Note: Patterns container tests removed - use Web for unified storage
@@ -2182,13 +1732,10 @@ mod tests {
 
     #[test]
     fn test_pattern_to_entry() {
-        let pattern: Pattern<String> = Pattern::Definition {
-            core: PatternCore::new(1, "test_entry")
-                .with_category("testing")
-                .with_priority(75)
-                .with_description("Entry test"),
-            rules: vec![],
-        };
+        let pattern: Pattern<String> = Pattern::definition(1, "test_entry", vec![])
+            .with_category("testing")
+            .with_priority(75)
+            .with_description("Entry test");
 
         let entry = pattern.to_entry();
         assert_eq!(entry.name(), Some("test_entry"));

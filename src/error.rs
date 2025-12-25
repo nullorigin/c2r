@@ -1265,6 +1265,16 @@ pub fn err<T>(kind: Kind, reason: Reason, message: &str) -> Result<T> {
     Err(Error::new(kind, reason, Some(message.to_string())))
 }
 
+#[macro_export]
+macro_rules! err {
+    ($kind:tt, $reason:tt) => {
+        Err(Error::new($crate::error::Kind::$kind, crate::error::Reason::$reason, None))
+    };
+    ($kind:tt, $reason:tt, $message:expr) => {
+        Err(Error::new($crate::error::Kind::$kind, crate::error::Reason::$reason, Some($message.into())))
+    };
+}
+
 // ============================================================================
 // Database Integration
 // ============================================================================

@@ -422,7 +422,7 @@ impl Order {
         self.register(Keyword::new("typedef", KeywordCategory::TypeDeclaration).with_priority(110));
 
         // Storage classes
-        for &kw in &["static", "extern", "register", "auto"] {
+        for &kw in &["static", "extern", "register", "auto", "inline", "__inline", "__inline__"] {
             self.register(Keyword::new(kw, KeywordCategory::StorageClass).with_priority(90));
         }
 
@@ -635,7 +635,8 @@ pub fn is_type_keyword(keyword: &str) -> bool {
 
 /// Check if a keyword is a storage class
 pub fn is_storage_class(keyword: &str) -> bool {
-    matches!(keyword, "static" | "extern" | "register" | "auto")
+    matches!(keyword, "static" | "extern" | "register" | "auto" | 
+                      "inline" | "__inline" | "__inline__")
 }
 
 /// Check if a keyword is a type qualifier

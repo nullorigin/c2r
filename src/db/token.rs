@@ -1,16 +1,16 @@
 //! Token System for DB Framework
 //!
-//! Provides tokenization and token manipulation using Entry as the value type.
+//! Provides tokenization and token manipulation with type-safe Token struct.
 //! Integrates with the db framework for storage, queries, and transformations.
 //!
 //! Key components:
 //! - `TokenType`: Classification of token types (keyword, identifier, etc.)
-//! - `Token`: Entry-based token with metadata stored as attributes
+//! - `Token`: Type-safe token struct with metadata
 //! - `TokenSet`: A windowed collection of tokens for manipulation
 //! - `TokenRange`: Range/window for token processing
 //! - `Tokenizer`: The core tokenization engine for C code
 
-use crate::db::web::{Entry, Site, Build};
+use crate::db::web::{Entry, Build};
 use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -189,113 +189,254 @@ fn is_c_keyword(s: &str) -> bool {
 }
 
 // ============================================================================
-// Token (Entry-based)
+// Token Structure
 // ============================================================================
 
 /// Token node kind constant
 pub const TOKEN_KIND: &str = "Token";
 
-/// Create a token Entry from a string value
-pub fn token(value: impl Into<String>) -> Entry {
-    let s = value.into();
-    let token_type = if is_c_keyword(&s) {
-        TokenType::Keyword
-    } else {
-        TokenType::Identifier
-    };
+/// Token value - the actual content of the token
+#[derive(Debug, Clone, PartialEq)]
+pub enum TokenValue {
+    String(String),
+    Char(char),
+    Int(i128),
+    Float(f64),
+    None,
+}
+
+impl TokenValue {
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            TokenValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
     
-    let mut node = Entry::node(TOKEN_KIND, s);
-    node.set_attr("token_type", Entry::string(token_type.as_str()));
-    node
-}
-
-/// Create a token Entry with explicit type
-pub fn token_typed(value: impl Into<String>, token_type: TokenType) -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, value);
-    node.set_attr("token_type", Entry::string(token_type.as_str()));
-    node
-}
-
-/// Create a numeric token
-pub fn token_number(value: i128) -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, value.to_string());
-    node.set_attr("token_type", Entry::string(TokenType::Number.as_str()));
-    node.set_attr("value", Entry::i128(value));
-    node
-}
-
-/// Create a float token
-pub fn token_float(value: f64) -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, value.to_string());
-    node.set_attr("token_type", Entry::string(TokenType::Number.as_str()));
-    node.set_attr("value", Entry::f64(value));
-    node
-}
-
-/// Create a char token
-pub fn token_char(value: char) -> Entry {
-    let token_type = if value.is_ascii_punctuation() {
-        TokenType::Punctuation
-    } else {
-        TokenType::Literal
-    };
+    pub fn as_int(&self) -> Option<i128> {
+        match self {
+            TokenValue::Int(n) => Some(*n),
+            TokenValue::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
     
-    let mut node = Entry::node(TOKEN_KIND, value.to_string());
-    node.set_attr("token_type", Entry::string(token_type.as_str()));
-    node.set_attr("char_value", Entry::char(value));
-    node
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            TokenValue::Float(n) => Some(*n),
+            TokenValue::Int(n) => Some(*n as f64),
+            TokenValue::String(s) => s.parse().ok(),
+            _ => None,
+        }
+    }
+    
+    pub fn as_char(&self) -> Option<char> {
+        match self {
+            TokenValue::Char(c) => Some(*c),
+            TokenValue::String(s) => s.chars().next(),
+            _ => None,
+        }
+    }
+    
+    pub fn to_string_repr(&self) -> String {
+        match self {
+            TokenValue::String(s) => s.clone(),
+            TokenValue::Char(c) => c.to_string(),
+            TokenValue::Int(n) => n.to_string(),
+            TokenValue::Float(n) => n.to_string(),
+            TokenValue::None => String::new(),
+        }
+    }
 }
 
-/// Create a consumed/none token (placeholder)
-pub fn token_consumed() -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, "");
-    node.set_attr("token_type", Entry::string(TokenType::Consumed.as_str()));
-    node
+/// Type-safe Token struct
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    value: TokenValue,
+    token_type: TokenType,
+    is_literal: bool,
+    is_string: bool,
 }
 
-/// Create a whitespace token
-pub fn token_whitespace(value: impl Into<String>) -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, value);
-    node.set_attr("token_type", Entry::string(TokenType::Whitespace.as_str()));
-    node
-}
-
-/// Create a comment token
-pub fn token_comment(value: impl Into<String>) -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, value);
-    node.set_attr("token_type", Entry::string(TokenType::Comment.as_str()));
-    node
-}
-
-/// Create a literal/operator token
-pub fn token_literal(value: &'static str) -> Entry {
-    let mut node = Entry::node(TOKEN_KIND, value);
-    node.set_attr("token_type", Entry::string(TokenType::Operator.as_str()));
-    node.set_attr("is_literal", Entry::bool(true));
-    node
-}
-
-// ============================================================================
-// Token Extension Trait
-// ============================================================================
-
-/// Extension methods for Entry when used as a token
-pub trait TokenExt {
-    fn token_type(&self) -> Option<TokenType>;
-    fn token_value(&self) -> Option<String>;
-    fn is_keyword(&self) -> bool;
-    fn is_consumed(&self) -> bool;
-    fn is_number(&self) -> bool;
-    fn is_string_like(&self) -> bool;
-    fn as_int(&self) -> Option<i128>;
-    fn as_float(&self) -> Option<f64>;
-    fn as_token_char(&self) -> Option<char>;
-}
-
-impl TokenExt for Entry {
-    fn token_type(&self) -> Option<TokenType> {
-        let type_str = self.get_string_attr("token_type")?;
-        Some(match type_str {
+impl Token {
+    /// Create a new token with value and type
+    pub fn new(value: impl Into<String>, token_type: TokenType) -> Self {
+        Self {
+            value: TokenValue::String(value.into()),
+            token_type,
+            is_literal: false,
+            is_string: false,
+        }
+    }
+    
+    /// Create a token from a string, auto-detecting type
+    pub fn from_string(value: impl Into<String>) -> Self {
+        let s = value.into();
+        let token_type = if is_c_keyword(&s) {
+            TokenType::Keyword
+        } else {
+            TokenType::Identifier
+        };
+        Self::new(s, token_type)
+    }
+    
+    /// Create a numeric token
+    pub fn number(value: i128) -> Self {
+        Self {
+            value: TokenValue::Int(value),
+            token_type: TokenType::Number,
+            is_literal: false,
+            is_string: false,
+        }
+    }
+    
+    /// Create a float token
+    pub fn float(value: f64) -> Self {
+        Self {
+            value: TokenValue::Float(value),
+            token_type: TokenType::Number,
+            is_literal: false,
+            is_string: false,
+        }
+    }
+    
+    /// Create a char token
+    pub fn char(value: char) -> Self {
+        let token_type = if value.is_ascii_punctuation() {
+            TokenType::Punctuation
+        } else {
+            TokenType::Literal
+        };
+        Self {
+            value: TokenValue::Char(value),
+            token_type,
+            is_literal: false,
+            is_string: false,
+        }
+    }
+    
+    /// Create a consumed/placeholder token
+    pub fn consumed() -> Self {
+        Self {
+            value: TokenValue::None,
+            token_type: TokenType::Consumed,
+            is_literal: false,
+            is_string: false,
+        }
+    }
+    
+    /// Create a whitespace token
+    pub fn whitespace(value: impl Into<String>) -> Self {
+        Self::new(value, TokenType::Whitespace)
+    }
+    
+    /// Create a comment token
+    pub fn comment(value: impl Into<String>) -> Self {
+        Self::new(value, TokenType::Comment)
+    }
+    
+    /// Create a literal/operator token
+    pub fn literal(value: &'static str) -> Self {
+        let mut tok = Self::new(value, TokenType::Operator);
+        tok.is_literal = true;
+        tok
+    }
+    
+    /// Create a string literal token
+    pub fn string_literal(value: impl Into<String>) -> Self {
+        let mut tok = Self::new(value, TokenType::Literal);
+        tok.is_string = true;
+        tok
+    }
+    
+    // Getters
+    
+    pub fn value(&self) -> &TokenValue {
+        &self.value
+    }
+    
+    pub fn token_type(&self) -> &TokenType {
+        &self.token_type
+    }
+    
+    pub fn name(&self) -> Option<&str> {
+        self.value.as_string()
+    }
+    
+    pub fn is_keyword(&self) -> bool {
+        matches!(self.token_type, TokenType::Keyword)
+    }
+    
+    pub fn is_consumed(&self) -> bool {
+        matches!(self.token_type, TokenType::Consumed)
+    }
+    
+    pub fn is_number(&self) -> bool {
+        matches!(self.token_type, TokenType::Number)
+    }
+    
+    pub fn is_identifier(&self) -> bool {
+        matches!(self.token_type, TokenType::Identifier)
+    }
+    
+    pub fn is_operator(&self) -> bool {
+        matches!(self.token_type, TokenType::Operator)
+    }
+    
+    pub fn is_punctuation(&self) -> bool {
+        matches!(self.token_type, TokenType::Punctuation)
+    }
+    
+    pub fn is_string_like(&self) -> bool {
+        matches!(self.token_type, TokenType::Identifier | TokenType::Literal | TokenType::Keyword)
+    }
+    
+    pub fn as_int(&self) -> Option<i128> {
+        self.value.as_int()
+    }
+    
+    pub fn as_float(&self) -> Option<f64> {
+        self.value.as_float()
+    }
+    
+    pub fn as_char(&self) -> Option<char> {
+        self.value.as_char()
+    }
+    
+    /// Convert to Entry for storage
+    pub fn to_entry(&self) -> Entry {
+        let name = self.value.to_string_repr();
+        let mut node = Entry::node(TOKEN_KIND, name);
+        node.set_attr("token_type", Entry::string(self.token_type.as_str()));
+        
+        // Store numeric values
+        match &self.value {
+            TokenValue::Int(n) => { node.set_attr("value", Entry::i128(*n)); }
+            TokenValue::Float(n) => { node.set_attr("value", Entry::f64(*n)); }
+            TokenValue::Char(c) => { node.set_attr("char_value", Entry::char(*c)); }
+            _ => {}
+        }
+        
+        if self.is_literal {
+            node.set_attr("is_literal", Entry::bool(true));
+        }
+        if self.is_string {
+            node.set_attr("is_string", Entry::bool(true));
+        }
+        
+        node
+    }
+    
+    /// Create from Entry
+    pub fn from_entry(entry: &Entry) -> Option<Self> {
+        if entry.kind() != Some(TOKEN_KIND) {
+            return None;
+        }
+        
+        let name = entry.name().unwrap_or("").to_string();
+        let type_str = entry.get_string_attr("token_type").unwrap_or("unknown");
+        
+        let token_type = match type_str {
             "keyword" => TokenType::Keyword,
             "identifier" => TokenType::Identifier,
             "literal" => TokenType::Literal,
@@ -309,53 +450,106 @@ impl TokenExt for Entry {
             "consumed" => TokenType::Consumed,
             "unknown" => TokenType::Unknown,
             s => TokenType::Custom(s.to_string()),
+        };
+        
+        // Determine value type
+        let value = if let Some(Entry::I128(n, _)) = entry.attr("value") {
+            TokenValue::Int(*n)
+        } else if let Some(Entry::I64(n, _)) = entry.attr("value") {
+            TokenValue::Int(*n as i128)
+        } else if let Some(Entry::F64(n, _)) = entry.attr("value") {
+            TokenValue::Float(*n)
+        } else if let Some(Entry::Char(c, _)) = entry.attr("char_value") {
+            TokenValue::Char(*c)
+        } else if name.is_empty() {
+            TokenValue::None
+        } else {
+            TokenValue::String(name)
+        };
+        
+        let is_literal = entry.get_bool_attr("is_literal").unwrap_or(false);
+        let is_string = entry.get_bool_attr("is_string").unwrap_or(false);
+        
+        Some(Self {
+            value,
+            token_type,
+            is_literal,
+            is_string,
         })
     }
+}
 
-    fn token_value(&self) -> Option<String> {
-        self.name().map(|s| s.to_string())
+impl Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.value.to_string_repr())
     }
+}
 
-    fn is_keyword(&self) -> bool {
-        matches!(self.token_type(), Some(TokenType::Keyword))
+impl Build for Token {
+    fn to_entry(&self) -> Entry {
+        Token::to_entry(self)
     }
+    
+    fn kind(&self) -> &str {
+        TOKEN_KIND
+    }
+    
+    fn name(&self) -> Option<&str> {
+        self.value.as_string()
+    }
+    
+    fn category(&self) -> Option<&str> {
+        Some(self.token_type.as_str())
+    }
+}
 
-    fn is_consumed(&self) -> bool {
-        matches!(self.token_type(), Some(TokenType::Consumed))
-    }
+// ============================================================================
+// Factory Functions (convenience wrappers)
+// ============================================================================
 
-    fn is_number(&self) -> bool {
-        matches!(self.token_type(), Some(TokenType::Number))
-    }
+/// Create a token from a string value
+pub fn token(value: impl Into<String>) -> Token {
+    Token::from_string(value)
+}
 
-    fn is_string_like(&self) -> bool {
-        matches!(self.token_type(), Some(TokenType::Identifier | TokenType::Literal | TokenType::Keyword))
-    }
+/// Create a token with explicit type
+pub fn token_typed(value: impl Into<String>, token_type: TokenType) -> Token {
+    Token::new(value, token_type)
+}
 
-    fn as_int(&self) -> Option<i128> {
-        match self.attr("value")? {
-            Entry::I128(n, _) => Some(*n),
-            Entry::I64(n, _) => Some(*n as i128),
-            Entry::I32(n, _) => Some(*n as i128),
-            Entry::U64(n, _) => Some(*n as i128),
-            _ => self.name().and_then(|s| s.parse().ok()),
-        }
-    }
+/// Create a numeric token
+pub fn token_number(value: i128) -> Token {
+    Token::number(value)
+}
 
-    fn as_float(&self) -> Option<f64> {
-        match self.attr("value")? {
-            Entry::F64(n, _) => Some(*n),
-            Entry::F32(n, _) => Some(*n as f64),
-            _ => self.name().and_then(|s| s.parse().ok()),
-        }
-    }
+/// Create a float token
+pub fn token_float(value: f64) -> Token {
+    Token::float(value)
+}
 
-    fn as_token_char(&self) -> Option<char> {
-        if let Some(Entry::Char(c, _)) = self.attr("char_value") {
-            return Some(*c);
-        }
-        self.name().and_then(|s| s.chars().next())
-    }
+/// Create a char token
+pub fn token_char(value: char) -> Token {
+    Token::char(value)
+}
+
+/// Create a consumed/placeholder token
+pub fn token_consumed() -> Token {
+    Token::consumed()
+}
+
+/// Create a whitespace token
+pub fn token_whitespace(value: impl Into<String>) -> Token {
+    Token::whitespace(value)
+}
+
+/// Create a comment token
+pub fn token_comment(value: impl Into<String>) -> Token {
+    Token::comment(value)
+}
+
+/// Create a literal/operator token
+pub fn token_literal(value: &'static str) -> Token {
+    Token::literal(value)
 }
 
 // ============================================================================
@@ -369,12 +563,12 @@ pub struct TokenSet {
     window: Range<usize>,
     position: usize,
     consumed: usize,
-    tokens: Vec<Entry>,
+    tokens: Vec<Token>,
     checksum: u64,
 }
 
 impl TokenSet {
-    pub fn new(range: Range<usize>, window: Range<usize>, tokens: Vec<Entry>) -> Self {
+    pub fn new(range: Range<usize>, window: Range<usize>, tokens: Vec<Token>) -> Self {
         let mut hasher = DefaultHasher::new();
         range.start.hash(&mut hasher);
         range.end.hash(&mut hasher);
@@ -421,11 +615,11 @@ impl TokenSet {
         self.window.end - self.window.start
     }
 
-    pub fn tokens(&self) -> &[Entry] {
+    pub fn tokens(&self) -> &[Token] {
         &self.tokens
     }
 
-    pub fn tokens_mut(&mut self) -> &mut [Entry] {
+    pub fn tokens_mut(&mut self) -> &mut [Token] {
         &mut self.tokens
     }
 
@@ -527,19 +721,72 @@ impl TokenSet {
         }
         false
     }
+    /// Create from Entry
+    pub fn from_entry(entry: &Entry) -> Option<Self> {
+        let (metadata, tokens_entry) = entry.as_pair()?;
+        
+        // Extract metadata
+        let metadata_map = match metadata {
+            Entry::HashMap(m, _) => m,
+            _ => return None,
+        };
+        
+        let range_start = metadata_map.get("range_start").and_then(|e| e.as_usize()).unwrap_or(0);
+        let range_end = metadata_map.get("range_end").and_then(|e| e.as_usize()).unwrap_or(0);
+        let window_start = metadata_map.get("window_start").and_then(|e| e.as_usize()).unwrap_or(0);
+        let window_end = metadata_map.get("window_end").and_then(|e| e.as_usize()).unwrap_or(0);
+        let position = metadata_map.get("position").and_then(|e| e.as_usize()).unwrap_or(range_start);
+        let consumed = metadata_map.get("consumed").and_then(|e| e.as_usize()).unwrap_or(0);
+        let checksum = metadata_map.get("checksum").and_then(|e| e.as_u64()).unwrap_or(0);
+        
+        // Extract tokens
+        let tokens_vec = match tokens_entry {
+            Entry::Vec(v, _) => v,
+            _ => return None,
+        };
+        
+        let tokens: Vec<Token> = tokens_vec.iter().filter_map(Token::from_entry).collect();
+        
+        Some(Self {
+            range: range_start..range_end,
+            window: window_start..window_end,
+            position,
+            consumed,
+            tokens,
+            checksum,
+        })
+    }
+}
 
-    /// Convert to a Site for storage
-    pub fn to_site(&self) -> Site {
-        let mut site = Site::new();
-        for token in &self.tokens {
-            site.add_root(token.clone());
-        }
-        site.set_metadata("range_start", Entry::usize(self.range.start));
-        site.set_metadata("range_end", Entry::usize(self.range.end));
-        site.set_metadata("window_start", Entry::usize(self.window.start));
-        site.set_metadata("window_end", Entry::usize(self.window.end));
-        site.set_metadata("checksum", Entry::u64(self.checksum));
-        site
+impl Build for TokenSet {
+    fn to_entry(&self) -> Entry {
+        // Metadata HashMap
+        let mut metadata = HashMap::new();
+        metadata.insert("range_start".to_string(), Entry::usize(self.range.start));
+        metadata.insert("range_end".to_string(), Entry::usize(self.range.end));
+        metadata.insert("window_start".to_string(), Entry::usize(self.window.start));
+        metadata.insert("window_end".to_string(), Entry::usize(self.window.end));
+        metadata.insert("position".to_string(), Entry::usize(self.position));
+        metadata.insert("consumed".to_string(), Entry::usize(self.consumed));
+        metadata.insert("checksum".to_string(), Entry::u64(self.checksum));
+        
+        // Tokens Vec
+        let tokens_vec: Vec<Entry> = self.tokens.iter().map(|t| t.to_entry()).collect();
+        
+        // Pair: (metadata, tokens)
+        Entry::pair(Entry::hashmap(metadata), Entry::vec(tokens_vec))
+    }
+    
+    fn kind(&self) -> &str {
+        "TokenSet"
+    }
+    
+    fn name(&self) -> Option<&str> {
+        None
+    }
+    
+    fn category(&self) -> Option<&str> {
+        Some("token")
     }
 }
 
@@ -557,7 +804,7 @@ impl Default for TokenSet {
 }
 
 impl Index<usize> for TokenSet {
-    type Output = Entry;
+    type Output = Token;
 
     fn index(&self, index: usize) -> &Self::Output {
         &self.tokens[index]
@@ -580,8 +827,8 @@ impl RangeBounds<usize> for TokenSet {
     }
 }
 
-impl From<Vec<Entry>> for TokenSet {
-    fn from(tokens: Vec<Entry>) -> Self {
+impl From<Vec<Token>> for TokenSet {
+    fn from(tokens: Vec<Token>) -> Self {
         Self {
             range: 0..tokens.len(),
             window: 0..tokens.len(),
@@ -593,14 +840,14 @@ impl From<Vec<Entry>> for TokenSet {
     }
 }
 
-impl AsRef<[Entry]> for TokenSet {
-    fn as_ref(&self) -> &[Entry] {
+impl AsRef<[Token]> for TokenSet {
+    fn as_ref(&self) -> &[Token] {
         &self.tokens
     }
 }
 
-impl AsMut<[Entry]> for TokenSet {
-    fn as_mut(&mut self) -> &mut [Entry] {
+impl AsMut<[Token]> for TokenSet {
+    fn as_mut(&mut self) -> &mut [Token] {
         &mut self.tokens
     }
 }
@@ -609,11 +856,11 @@ impl AsMut<[Entry]> for TokenSet {
 // Tokenizer
 // ============================================================================
 
-/// C code tokenizer that produces Entry-based tokens
+/// C code tokenizer that produces Token objects
 #[derive(Debug, Clone)]
 pub struct Tokenizer {
     content: Vec<u8>,
-    slots: Vec<Vec<Entry>>,
+    slots: Vec<Vec<Token>>,
     position: usize,
     capacity: usize,
 }
@@ -645,17 +892,17 @@ impl Tokenizer {
         self.slots.len()
     }
 
-    pub fn get_slot(&self, slot_id: usize) -> Option<&Vec<Entry>> {
+    pub fn get_slot(&self, slot_id: usize) -> Option<&Vec<Token>> {
         self.slots.get(slot_id)
     }
 
-    pub fn add_slot(&mut self, tokens: Vec<Entry>) -> usize {
+    pub fn add_slot(&mut self, tokens: Vec<Token>) -> usize {
         let slot_id = self.slots.len();
         self.slots.push(tokens);
         slot_id
     }
 
-    pub fn slots(&self) -> &[Vec<Entry>] {
+    pub fn slots(&self) -> &[Vec<Token>] {
         &self.slots
     }
 
@@ -681,7 +928,7 @@ impl Tokenizer {
         TokenSet::new(0..len, 0..len, tokens)
     }
 
-    fn next_token(&mut self) -> Option<Entry> {
+    fn next_token(&mut self) -> Option<Token> {
         self.skip_whitespace();
 
         if self.position >= self.content.len() {
@@ -718,7 +965,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_plus(&mut self) -> Option<Entry> {
+    fn read_plus(&mut self) -> Option<Token> {
         if self.peek() == Some(b'+') {
             self.position += 2;
             Some(token_literal("++"))
@@ -731,7 +978,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_minus(&mut self) -> Option<Entry> {
+    fn read_minus(&mut self) -> Option<Token> {
         if let Some(next_byte) = self.peek() {
             if next_byte.is_ascii_digit() {
                 let prev_is_digit = if self.position > 0 {
@@ -761,7 +1008,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_star(&mut self) -> Option<Entry> {
+    fn read_star(&mut self) -> Option<Token> {
         if self.peek() == Some(b'=') {
             self.position += 2;
             Some(token_literal("*="))
@@ -771,7 +1018,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_slash(&mut self) -> Option<Entry> {
+    fn read_slash(&mut self) -> Option<Token> {
         if self.peek() == Some(b'/') {
             self.read_line_comment()
         } else if self.peek() == Some(b'*') {
@@ -785,7 +1032,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_equals(&mut self) -> Option<Entry> {
+    fn read_equals(&mut self) -> Option<Token> {
         if self.peek() == Some(b'=') {
             self.position += 2;
             Some(token_literal("=="))
@@ -795,7 +1042,7 @@ impl Tokenizer {
         }
     }
 
-    fn handle_special_char(&mut self, b: u8) -> Option<Entry> {
+    fn handle_special_char(&mut self, b: u8) -> Option<Token> {
         match b {
             b'<' => {
                 if self.peek() == Some(b'<') {
@@ -902,7 +1149,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_identifier(&mut self) -> Option<Entry> {
+    fn read_identifier(&mut self) -> Option<Token> {
         let start = self.position;
         while self.position < self.content.len() {
             let b = self.content[self.position];
@@ -916,7 +1163,7 @@ impl Tokenizer {
         Some(token(ident))
     }
 
-    fn read_number(&mut self) -> Option<Entry> {
+    fn read_number(&mut self) -> Option<Token> {
         let start = self.position;
         let mut is_float = false;
 
@@ -947,7 +1194,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_signed_number(&mut self) -> Option<Entry> {
+    fn read_signed_number(&mut self) -> Option<Token> {
         let start = self.position;
         self.position += 1; // Skip '-'
 
@@ -980,7 +1227,7 @@ impl Tokenizer {
         }
     }
 
-    fn read_string_literal(&mut self) -> Option<Entry> {
+    fn read_string_literal(&mut self) -> Option<Token> {
         let mut literal = String::new();
         self.position += 1;
 
@@ -988,9 +1235,7 @@ impl Tokenizer {
             let b = self.content[self.position];
             if b == b'"' {
                 self.position += 1;
-                let mut tok = token_typed(literal, TokenType::Literal);
-                tok.set_attr("is_string", Entry::bool(true));
-                return Some(tok);
+                return Some(Token::string_literal(literal));
             } else if b == b'\\' && self.position + 1 < self.content.len() {
                 self.position += 1;
                 let escape_char = self.content[self.position];
@@ -1015,7 +1260,7 @@ impl Tokenizer {
         None
     }
 
-    fn read_char_literal(&mut self) -> Option<Entry> {
+    fn read_char_literal(&mut self) -> Option<Token> {
         self.position += 1;
 
         if self.position >= self.content.len() {
@@ -1033,15 +1278,13 @@ impl Tokenizer {
 
         if self.position < self.content.len() && self.content[self.position] == b'\'' {
             self.position += 1;
-            let mut tok = token_char(c);
-            tok.set_attr("is_char_literal", Entry::bool(true));
-            return Some(tok);
+            return Some(Token::char(c));
         }
 
         None
     }
 
-    fn read_line_comment(&mut self) -> Option<Entry> {
+    fn read_line_comment(&mut self) -> Option<Token> {
         let start = self.position;
 
         while self.position < self.content.len() && self.content[self.position] != b'\n' {
@@ -1052,7 +1295,7 @@ impl Tokenizer {
         Some(token_comment(comment))
     }
 
-    fn read_block_comment(&mut self) -> Option<Entry> {
+    fn read_block_comment(&mut self) -> Option<Token> {
         let start = self.position;
         self.position += 2;
 
@@ -1124,24 +1367,24 @@ mod tests {
     fn test_token_creation() {
         let t = token("main");
         assert_eq!(t.name(), Some("main"));
-        assert_eq!(t.token_type(), Some(TokenType::Identifier));
+        assert_eq!(*t.token_type(), TokenType::Identifier);
         
         let t = token("if");
-        assert_eq!(t.token_type(), Some(TokenType::Keyword));
+        assert_eq!(*t.token_type(), TokenType::Keyword);
     }
 
     #[test]
     fn test_token_number() {
         let t = token_number(42);
-        assert_eq!(t.name(), Some("42"));
-        assert_eq!(t.token_type(), Some(TokenType::Number));
+        assert!(t.is_number());
+        assert_eq!(*t.token_type(), TokenType::Number);
         assert_eq!(t.as_int(), Some(42));
     }
 
     #[test]
     fn test_token_float() {
         let t = token_float(3.14);
-        assert_eq!(t.token_type(), Some(TokenType::Number));
+        assert_eq!(*t.token_type(), TokenType::Number);
         assert!((t.as_float().unwrap() - 3.14).abs() < 0.001);
     }
 
@@ -1156,7 +1399,7 @@ mod tests {
         
         // Check first token is "int" keyword
         assert_eq!(tokens[0].name(), Some("int"));
-        assert_eq!(tokens[0].token_type(), Some(TokenType::Keyword));
+        assert_eq!(*tokens[0].token_type(), TokenType::Keyword);
     }
 
     #[test]

@@ -1,20 +1,114 @@
 //! Configuration Database
 //!
 //! Generic configuration storage with type-safe access and feature flags.
+//! Implements the Build trait for unified database storage.
 
-use crate::db::web::Entry;
+use crate::db::web::{Entry, Build};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ============================================================================
-// Configuration Database
+// Configuration Value Types
 // ============================================================================
 
-/// Configuration database for runtime options and settings
+/// Type-safe configuration value enum
+#[derive(Debug, Clone, PartialEq)]
+pub enum ConfigValue {
+    String(String),
+    Bool(bool),
+    I64(i64),
+    F64(f64),
+    Usize(usize),
+}
+
+impl ConfigValue {
+    /// Convert to Entry for serialization
+    pub fn to_entry(&self) -> Entry {
+        match self {
+            ConfigValue::String(s) => Entry::string(s),
+            ConfigValue::Bool(b) => Entry::bool(*b),
+            ConfigValue::I64(n) => Entry::i64(*n),
+            ConfigValue::F64(n) => Entry::f64(*n),
+            ConfigValue::Usize(n) => Entry::usize(*n),
+        }
+    }
+    
+    /// Create from Entry
+    pub fn from_entry(entry: &Entry) -> Option<Self> {
+        match entry {
+            Entry::String(s, _) => Some(ConfigValue::String(s.clone())),
+            Entry::Bool(b, _) => Some(ConfigValue::Bool(*b)),
+            Entry::I64(n, _) => Some(ConfigValue::I64(*n)),
+            Entry::I32(n, _) => Some(ConfigValue::I64(*n as i64)),
+            Entry::F64(n, _) => Some(ConfigValue::F64(*n)),
+            Entry::Usize(n, _) => Some(ConfigValue::Usize(*n)),
+            _ => None,
+        }
+    }
+    
+    /// Get as string
+    pub fn as_string(&self) -> Option<&str> {
+        match self {
+            ConfigValue::String(s) => Some(s),
+            _ => None,
+        }
+    }
+    
+    /// Get as bool
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            ConfigValue::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+    
+    /// Get as i64
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            ConfigValue::I64(n) => Some(*n),
+            ConfigValue::Usize(n) => Some(*n as i64),
+            ConfigValue::F64(n) => Some(*n as i64),
+            _ => None,
+        }
+    }
+    
+    /// Get as f64
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            ConfigValue::F64(n) => Some(*n),
+            ConfigValue::I64(n) => Some(*n as f64),
+            ConfigValue::Usize(n) => Some(*n as f64),
+            _ => None,
+        }
+    }
+    
+    /// Get as usize
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            ConfigValue::Usize(n) => Some(*n),
+            ConfigValue::I64(n) if *n >= 0 => Some(*n as usize),
+            ConfigValue::F64(n) if *n >= 0.0 => Some(*n as usize),
+            _ => None,
+        }
+    }
+}
+
+// ============================================================================
+// Configuration Structure
+// ============================================================================
+
+/// Configuration database for runtime options and settings.
+/// Implements Build trait for storage in Web database.
 #[derive(Debug, Clone, Default)]
 pub struct Config {
-    /// Configuration values
-    values: HashMap<String, Entry>,
+    /// Unique configuration name/identifier
+    name: String,
+    
+    /// Configuration category (e.g., "compiler", "runtime", "output")
+    category: String,
+    
+    /// Configuration values (type-safe)
+    values: HashMap<String, ConfigValue>,
     
     /// Feature flags
     features: HashMap<String, bool>,
@@ -27,29 +121,46 @@ pub struct Config {
 }
 
 impl Config {
-    /// Create a new configuration database
-    pub fn new() -> Self {
-        Self::default()
+    /// Create a new configuration with name and category
+    pub fn new(name: impl Into<String>, category: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            category: category.into(),
+            values: HashMap::new(),
+            features: HashMap::new(),
+            include_dirs: Vec::new(),
+            base_dir: None,
+        }
+    }
+    
+    /// Create a default configuration
+    pub fn default_config() -> Self {
+        Self::new("default", "general")
+    }
+    
+    /// Get the configuration name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+    
+    /// Get the configuration category
+    pub fn category(&self) -> &str {
+        &self.category
+    }
+    
+    /// Set the configuration name
+    pub fn set_name(&mut self, name: impl Into<String>) {
+        self.name = name.into();
+    }
+    
+    /// Set the configuration category
+    pub fn set_category(&mut self, category: impl Into<String>) {
+        self.category = category.into();
     }
     
     // ========================================================================
-    // Generic Value Storage
+    // Value Access
     // ========================================================================
-    
-    /// Set a configuration value
-    pub fn set(&mut self, key: impl Into<String>, value: Entry) {
-        self.values.insert(key.into(), value);
-    }
-    
-    /// Get a configuration value
-    pub fn get(&self, key: &str) -> Option<&Entry> {
-        self.values.get(key)
-    }
-    
-    /// Remove a configuration value
-    pub fn remove(&mut self, key: &str) -> Option<Entry> {
-        self.values.remove(key)
-    }
     
     /// Check if a key exists
     pub fn contains(&self, key: &str) -> bool {
@@ -61,50 +172,58 @@ impl Config {
         self.values.keys()
     }
     
+    /// Get number of configuration values
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+    
+    /// Check if configuration is empty
+    pub fn is_empty(&self) -> bool {
+        self.values.is_empty()
+    }
+    
     /// Clear all configuration values
     pub fn clear(&mut self) {
         self.values.clear();
+    }
+    
+    /// Remove a configuration value
+    pub fn remove(&mut self, key: &str) -> bool {
+        self.values.remove(key).is_some()
     }
     
     // ========================================================================
     // Type-Safe Getters
     // ========================================================================
     
+    /// Get a value by key
+    pub fn get(&self, key: &str) -> Option<&ConfigValue> {
+        self.values.get(key)
+    }
+    
     /// Get a string value
     pub fn get_string(&self, key: &str) -> Option<String> {
-        self.get(key).and_then(|v| match v {
-            Entry::String(s, _) => Some(s.clone()),
-            _ => None,
-        })
+        self.values.get(key).and_then(|v| v.as_string().map(|s| s.to_string()))
     }
     
     /// Get a boolean value
     pub fn get_bool(&self, key: &str) -> Option<bool> {
-        self.get(key).and_then(|v| match v {
-            Entry::Bool(b, _) => Some(*b),
-            _ => None,
-        })
+        self.values.get(key).and_then(|v| v.as_bool())
     }
     
     /// Get a number as f64
     pub fn get_f64(&self, key: &str) -> Option<f64> {
-        self.get(key).and_then(|v| match v {
-            Entry::F64(n, _) => Some(*n),
-            Entry::I32(n, _) => Some(*n as f64),
-            Entry::I64(n, _) => Some(*n as f64),
-            Entry::Usize(n, _) => Some(*n as f64),
-            _ => None,
-        })
+        self.values.get(key).and_then(|v| v.as_f64())
     }
     
     /// Get a number as i64
     pub fn get_i64(&self, key: &str) -> Option<i64> {
-        self.get_f64(key).map(|n| n as i64)
+        self.values.get(key).and_then(|v| v.as_i64())
     }
     
     /// Get a number as usize
     pub fn get_usize(&self, key: &str) -> Option<usize> {
-        self.get_f64(key).map(|n| n as usize)
+        self.values.get(key).and_then(|v| v.as_usize())
     }
     
     // ========================================================================
@@ -113,27 +232,27 @@ impl Config {
     
     /// Set a string value
     pub fn set_string(&mut self, key: impl Into<String>, value: impl Into<String>) {
-        self.set(key, Entry::string(value.into()));
+        self.values.insert(key.into(), ConfigValue::String(value.into()));
     }
     
     /// Set a boolean value
     pub fn set_bool(&mut self, key: impl Into<String>, value: bool) {
-        self.set(key, Entry::bool(value));
+        self.values.insert(key.into(), ConfigValue::Bool(value));
     }
     
     /// Set a number value
     pub fn set_f64(&mut self, key: impl Into<String>, value: f64) {
-        self.set(key, Entry::f64(value));
+        self.values.insert(key.into(), ConfigValue::F64(value));
     }
     
     /// Set an integer value
     pub fn set_i64(&mut self, key: impl Into<String>, value: i64) {
-        self.set(key, Entry::i64(value));
+        self.values.insert(key.into(), ConfigValue::I64(value));
     }
     
     /// Set a usize value
     pub fn set_usize(&mut self, key: impl Into<String>, value: usize) {
-        self.set(key, Entry::usize(value));
+        self.values.insert(key.into(), ConfigValue::Usize(value));
     }
     
     // ========================================================================
@@ -218,12 +337,6 @@ impl Config {
         self.verbosity() == 0
     }
 
-    /// Builder: set a value
-    pub fn with_value(mut self, key: impl Into<String>, value: Entry) -> Self {
-        self.set(key, value);
-        self
-    }
-    
     /// Builder: set a string
     pub fn with_string(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.set_string(key, value);
@@ -259,6 +372,106 @@ impl Config {
         self.add_include_dir(dir);
         self
     }
+    
+    /// Reconstruct a Config from an Entry
+    pub fn from_entry(entry: &Entry) -> Option<Config> {
+        if entry.kind() != Some("Config") {
+            return None;
+        }
+        
+        let name = entry.name()?.to_string();
+        let category = entry.get_string_attr("category").unwrap_or("general").to_string();
+        
+        let mut config = Config::new(name, category);
+        
+        // Reconstruct values (convert Entry to ConfigValue)
+        if let Some(Entry::HashMap(values_map, _)) = entry.attr("values") {
+            for (key, val) in values_map {
+                if let Some(config_val) = ConfigValue::from_entry(val) {
+                    config.values.insert(key.clone(), config_val);
+                }
+            }
+        }
+        
+        // Reconstruct features
+        if let Some(Entry::HashMap(features_map, _)) = entry.attr("features") {
+            for (key, val) in features_map {
+                if let Entry::Bool(b, _) = val {
+                    config.features.insert(key.clone(), *b);
+                }
+            }
+        }
+        
+        // Reconstruct include directories
+        if let Some(dirs_vec) = entry.get_vec_attr("include_dirs") {
+            for dir_entry in dirs_vec {
+                if let Entry::String(s, _) = dir_entry {
+                    config.include_dirs.push(PathBuf::from(s));
+                }
+            }
+        }
+        
+        // Reconstruct base directory
+        if let Some(base) = entry.get_string_attr("base_dir") {
+            config.base_dir = Some(PathBuf::from(base));
+        }
+        
+        Some(config)
+    }
+}
+
+// ============================================================================
+// Build Trait Implementation
+// ============================================================================
+
+impl Build for Config {
+    fn to_entry(&self) -> Entry {
+        let mut node = Entry::node("Config", &self.name);
+        node.set_attr("category", Entry::string(&self.category));
+        
+        // Store values as nested entries (convert ConfigValue to Entry)
+        if !self.values.is_empty() {
+            let values_map: HashMap<String, Entry> = self.values.iter()
+                .map(|(k, v)| (k.clone(), v.to_entry()))
+                .collect();
+            node.set_attr("values", Entry::hashmap(values_map));
+        }
+        
+        // Store features
+        if !self.features.is_empty() {
+            let features_map: HashMap<String, Entry> = self.features.iter()
+                .map(|(k, v)| (k.clone(), Entry::bool(*v)))
+                .collect();
+            node.set_attr("features", Entry::hashmap(features_map));
+        }
+        
+        // Store include directories
+        if !self.include_dirs.is_empty() {
+            let dirs: Vec<Entry> = self.include_dirs.iter()
+                .map(|p| Entry::string(p.to_string_lossy()))
+                .collect();
+            node.set_attr("include_dirs", Entry::vec(dirs));
+        }
+        
+        // Store base directory
+        if let Some(ref base) = self.base_dir {
+            node.set_attr("base_dir", Entry::string(base.to_string_lossy()));
+        }
+        
+        node
+    }
+    
+    fn kind(&self) -> &str {
+        "Config"
+    }
+    
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+    
+    fn category(&self) -> Option<&str> {
+        if self.category.is_empty() { None } else { Some(&self.category) }
+    }
 }
 
 // ============================================================================
@@ -271,7 +484,7 @@ mod tests {
 
     #[test]
     fn test_config_basic() {
-        let mut config = Config::new();
+        let mut config = Config::new("test", "general");
         
         config.set_string("name", "test");
         config.set_bool("enabled", true);
@@ -284,7 +497,7 @@ mod tests {
 
     #[test]
     fn test_config_features() {
-        let mut config = Config::new();
+        let mut config = Config::new("features_test", "general");
         
         config.enable_feature("async");
         config.disable_feature("legacy");
@@ -296,7 +509,7 @@ mod tests {
 
     #[test]
     fn test_config_builder() {
-        let config = Config::new()
+        let config = Config::new("builder_test", "compiler")
             .with_string("output", "file.rs")
             .with_bool("optimize", true)
             .with_feature("unsafe")
@@ -309,12 +522,49 @@ mod tests {
 
     #[test]
     fn test_config_directories() {
-        let config = Config::new()
+        let config = Config::new("dirs_test", "paths")
             .with_base_dir("/home/user/project")
             .with_include_dir("/usr/include")
             .with_include_dir("/usr/local/include");
         
         assert!(config.base_dir().is_some());
         assert_eq!(config.include_dirs().len(), 2);
+    }
+
+    #[test]
+    fn test_config_to_entry() {
+        let config = Config::new("my_config", "runtime")
+            .with_string("output", "out.rs")
+            .with_feature("debug")
+            .with_base_dir("/home/user");
+        
+        let entry = config.to_entry();
+        
+        assert_eq!(entry.kind(), Some("Config"));
+        assert_eq!(entry.name(), Some("my_config"));
+        assert_eq!(entry.get_string_attr("category"), Some("runtime"));
+    }
+
+    #[test]
+    fn test_config_from_entry() {
+        let config = Config::new("roundtrip", "test")
+            .with_string("key", "value")
+            .with_feature("enabled");
+        
+        let entry = config.to_entry();
+        let restored = Config::from_entry(&entry).unwrap();
+        
+        assert_eq!(restored.name(), "roundtrip");
+        assert_eq!(restored.category(), "test");
+    }
+
+    #[test]
+    fn test_config_build_trait() {
+        let config = Config::new("build_test", "compiler");
+        
+        // Test Build trait methods
+        assert_eq!(Build::kind(&config), "Config");
+        assert_eq!(Build::name(&config), Some("build_test"));
+        assert_eq!(Build::category(&config), Some("compiler"));
     }
 }

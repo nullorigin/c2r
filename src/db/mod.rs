@@ -64,6 +64,7 @@ pub mod validate;
 pub mod keyword;
 pub mod handler;
 pub mod filter;
+pub mod routing;
 
 // Re-export core types
 pub use node::*;
@@ -88,11 +89,11 @@ pub use report::{Report, format_report};
 pub use format::{OutputFormat, Formatter, FormatConfig, FormatExt, Formatted, TreeChars};
 pub use config::Config;
 pub use table::{TableStyle, TableConfig, TableGenerator, to_table, tree_to_table, site_to_table};
-pub use token::{TokenType, TokenSet, Tokenizer, TokenExt, TOKEN_KIND, token, token_typed, token_number, token_float, token_char, token_consumed, token_whitespace, token_comment, token_literal};
+pub use token::{TokenType, TokenValue, Token, TokenSet, Tokenizer, TOKEN_KIND, token, token_typed, token_number, token_float, token_char, token_consumed, token_whitespace, token_comment, token_literal};
 pub use pattern::{
-    RuleType, LogicalOp, BranchPattern, BranchOperand, PatternRule, PatternStats,
-    PatternCore, Pattern, PatternDef,
-    PatternDB, Matcher, Edge, MachineNode, MachinePattern, PatternMatch, PatternMachine, PatternBuilder,
+    RuleType, LogicalOp, PatternRule, PatternStats,
+    Pattern, Matcher, Edge, MachineNode, MachinePattern, PatternMatch, PatternMachine, PatternBuilder,
+    MatchResult, MatchSegment,
 };
 pub use sample::{
     SampleKind, SampleEdgeKind, SampleEdge, SampleNode, SamplePattern, SamplePatternStats,
@@ -109,4 +110,10 @@ pub use filter::{
     Kind, Category, KindFilter, CategoryFilter,
     KIND_STRINGS, CATEGORY_STRINGS,
     is_builtin_kind, is_builtin_category, builtin_kinds, builtin_categories,
+};
+pub use routing::{
+    RoutingDecision, RoutingStatus, RoutingResult, RoutingStats,
+    create_routing, get_routing_entry, get_routing_result,
+    set_routing_result, set_routing_failed,
+    pending_routings_for, routing_stats,
 };
