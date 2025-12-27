@@ -7,10 +7,10 @@
 //! - Recovery mechanisms (culling invalid children)
 //! - Report generation for failures
 
-use crate::db::web::Entry;
-use crate::db::report::{Report, format_report};
 use crate::db::format::OutputFormat;
-use std::collections::{HashSet, HashMap};
+use crate::db::report::{format_report, Report};
+use crate::db::web::Entry;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Validation Configuration
@@ -34,10 +34,10 @@ pub mod limits {
     pub const BOX_MAX_DEPTH: usize = 32;
     /// Pair nesting limit
     pub const PAIR_MAX_DEPTH: usize = 32;
-    
+
     /// Default threshold ratio (fraction of max before warning)
     pub const DEFAULT_THRESHOLD_RATIO: f64 = 0.75;
-    
+
     /// Minimum successful validations before adjusting threshold
     pub const MIN_SAMPLES_FOR_ADJUSTMENT: usize = 10;
 }
@@ -101,9 +101,10 @@ impl ValidationConfig {
             return depth;
         }
         match type_name {
-            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" |
-            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" |
-            "f32" | "f64" | "char" | "bool" | "()" => limits::PRIMITIVE_MAX_DEPTH,
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" | "u8" | "u16" | "u32" | "u64"
+            | "u128" | "usize" | "f32" | "f64" | "char" | "bool" | "()" => {
+                limits::PRIMITIVE_MAX_DEPTH
+            }
             "String" | "PathBuf" | "Range" => limits::STRING_MAX_DEPTH,
             "Vec" => limits::VEC_MAX_DEPTH,
             "HashMap" => limits::HASHMAP_MAX_DEPTH,
@@ -163,17 +164,20 @@ impl ThresholdState {
 
     /// Get current threshold ratio for a type
     pub fn get_ratio(&self, type_name: &str) -> f64 {
-        *self.ratios.get(type_name).unwrap_or(&limits::DEFAULT_THRESHOLD_RATIO)
+        *self
+            .ratios
+            .get(type_name)
+            .unwrap_or(&limits::DEFAULT_THRESHOLD_RATIO)
     }
 
     /// Update threshold ratio based on collected data
     fn update_ratio(&mut self, type_name: &str) {
         let successes = self.success_depths.get(type_name);
         let failures = self.failure_depths.get(type_name);
-        
-        let total_samples = successes.map(|v| v.len()).unwrap_or(0)
-            + failures.map(|v| v.len()).unwrap_or(0);
-        
+
+        let total_samples =
+            successes.map(|v| v.len()).unwrap_or(0) + failures.map(|v| v.len()).unwrap_or(0);
+
         if total_samples < limits::MIN_SAMPLES_FOR_ADJUSTMENT {
             return;
         }
@@ -181,8 +185,11 @@ impl ThresholdState {
         // Calculate average successful depth
         let avg_success = successes
             .map(|v| {
-                if v.is_empty() { 0.0 } 
-                else { v.iter().sum::<usize>() as f64 / v.len() as f64 }
+                if v.is_empty() {
+                    0.0
+                } else {
+                    v.iter().sum::<usize>() as f64 / v.len() as f64
+                }
             })
             .unwrap_or(0.0);
 
@@ -246,9 +253,9 @@ impl ValidationError {
     pub fn new(kind: ValidationErrorKind, path: Vec<usize>, type_name: &str) -> Self {
         let recoverable = matches!(
             kind,
-            ValidationErrorKind::ThresholdExceeded { .. } |
-            ValidationErrorKind::InvalidData { .. } |
-            ValidationErrorKind::EmptyRequired { .. }
+            ValidationErrorKind::ThresholdExceeded { .. }
+                | ValidationErrorKind::InvalidData { .. }
+                | ValidationErrorKind::EmptyRequired { .. }
         );
         Self {
             kind,
@@ -284,7 +291,9 @@ impl ValidationError {
 
     pub fn invalid_data(reason: &str, path: Vec<usize>, type_name: &str) -> Self {
         Self::new(
-            ValidationErrorKind::InvalidData { reason: reason.to_string() },
+            ValidationErrorKind::InvalidData {
+                reason: reason.to_string(),
+            },
             path,
             type_name,
         )
@@ -294,10 +303,16 @@ impl ValidationError {
     pub fn to_report(&self) -> Report {
         let message = match &self.kind {
             ValidationErrorKind::MaxDepthExceeded { depth, max } => {
-                format!("Maximum depth exceeded: {} > {} for type {}", depth, max, self.type_name)
+                format!(
+                    "Maximum depth exceeded: {} > {} for type {}",
+                    depth, max, self.type_name
+                )
             }
             ValidationErrorKind::ThresholdExceeded { depth, threshold } => {
-                format!("Depth threshold exceeded: {} > {} for type {}", depth, threshold, self.type_name)
+                format!(
+                    "Depth threshold exceeded: {} > {} for type {}",
+                    depth, threshold, self.type_name
+                )
             }
             ValidationErrorKind::CycleDetected { path } => {
                 format!("Cycle detected in {} at path {:?}", self.type_name, path)
@@ -313,7 +328,14 @@ impl ValidationError {
             }
         };
 
-        let id = format!("validation_{}", self.path.iter().map(|i| i.to_string()).collect::<Vec<_>>().join("_"));
+        let id = format!(
+            "validation_{}",
+            self.path
+                .iter()
+                .map(|i| i.to_string())
+                .collect::<Vec<_>>()
+                .join("_")
+        );
         Report::new(id, "validation_error", &message)
             .with_tag(format!("path:{:?}", self.path))
             .with_tag(format!("type:{}", self.type_name))
@@ -401,9 +423,9 @@ impl Validator {
         self.visited.clear();
         self.current_path.clear();
         self.result = ValidationResult::new();
-        
+
         self.validate_entry(entry, 0, 0);
-        
+
         &self.result
     }
 
@@ -485,14 +507,18 @@ impl Validator {
             Entry::Node { kind, name, .. } => {
                 if kind.is_empty() {
                     return Some(ValidationError::new(
-                        ValidationErrorKind::EmptyRequired { field: "kind".to_string() },
+                        ValidationErrorKind::EmptyRequired {
+                            field: "kind".to_string(),
+                        },
                         self.current_path.clone(),
                         "Node",
                     ));
                 }
                 if name.is_empty() {
                     return Some(ValidationError::new(
-                        ValidationErrorKind::EmptyRequired { field: "name".to_string() },
+                        ValidationErrorKind::EmptyRequired {
+                            field: "name".to_string(),
+                        },
                         self.current_path.clone(),
                         "Node",
                     ));
@@ -501,7 +527,10 @@ impl Validator {
             Entry::Range(range, _) => {
                 if range.start > range.end {
                     return Some(ValidationError::invalid_data(
-                        &format!("Invalid range: start ({}) > end ({})", range.start, range.end),
+                        &format!(
+                            "Invalid range: start ({}) > end ({})",
+                            range.start, range.end
+                        ),
                         self.current_path.clone(),
                         "Range",
                     ));
@@ -545,7 +574,11 @@ impl Validator {
                     self.current_path.pop();
                 }
             }
-            Entry::Branch { true_path, false_path, .. } => {
+            Entry::Branch {
+                true_path,
+                false_path,
+                ..
+            } => {
                 for (i, item) in true_path.iter().enumerate() {
                     self.current_path.push(i);
                     self.validate_entry(item, depth + 1, i);
@@ -632,7 +665,7 @@ fn recover_entry_recursive(
             while i < items.len() {
                 let child_type = items[i].type_name();
                 let child_max = config.max_depth_for(child_type);
-                
+
                 if depth + 1 > child_max {
                     culled.push(i);
                     items.remove(i);
@@ -680,12 +713,16 @@ fn recover_entry_recursive(
                 recover_entry_recursive(item, depth + 1, config, culled, visited);
             }
         }
-        Entry::Branch { true_path, false_path, .. } => {
+        Entry::Branch {
+            true_path,
+            false_path,
+            ..
+        } => {
             let mut i = 0;
             while i < true_path.len() {
                 let child_type = true_path[i].type_name();
                 let child_max = config.max_depth_for(child_type);
-                
+
                 if depth + 1 > child_max {
                     culled.push(i);
                     true_path.remove(i);
@@ -699,7 +736,7 @@ fn recover_entry_recursive(
             while i < false_path.len() {
                 let child_type = false_path[i].type_name();
                 let child_max = config.max_depth_for(child_type);
-                
+
                 if depth + 1 > child_max {
                     culled.push(i);
                     false_path.remove(i);
@@ -744,12 +781,12 @@ pub fn validate_and_recover(entry: &mut Entry) -> ValidationResult {
     let config = ValidationConfig::default();
     let mut validator = Validator::new(config.clone());
     validator.validate(entry);
-    
+
     if validator.result.has_errors() && config.enable_recovery {
         let culled = recover_entry(entry, &config);
         validator.result.culled_indices = culled;
     }
-    
+
     validator.log_errors();
     validator.into_result()
 }
@@ -803,12 +840,12 @@ mod tests {
     #[test]
     fn test_threshold_state() {
         let mut state = ThresholdState::new();
-        
+
         // Record some successes
         for _ in 0..10 {
             state.record_success("Node", 5);
         }
-        
+
         // Should have adjusted the ratio
         let ratio = state.get_ratio("Node");
         assert!(ratio >= 0.5 && ratio <= 0.9);
@@ -819,7 +856,7 @@ mod tests {
         let config = ValidationConfig::new()
             .with_max_depth("Node", 50)
             .with_max_errors(10);
-        
+
         assert_eq!(config.max_depth_for("Node"), 50);
         assert_eq!(config.max_errors, 10);
     }
@@ -830,10 +867,10 @@ mod tests {
             Entry::node("Test", "item1"),
             Entry::node("Test", "item2"),
         ]);
-        
+
         let config = ValidationConfig::new().with_max_depth("Node", 0);
         let culled = recover_entry(&mut entry, &config);
-        
+
         // Should have culled the nodes since depth 1 > max 0
         assert_eq!(entry.as_vec().unwrap().len(), 0);
         assert!(!culled.is_empty());

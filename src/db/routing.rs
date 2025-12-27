@@ -7,7 +7,8 @@
 use std::ops::Range;
 
 use crate::db::token::Token;
-use crate::db::web::{Entry, Build};
+use crate::db::web::{Build, Entry};
+use crate::system::{self, system};
 
 // ============================================================================
 // Routing Decision Types
@@ -58,7 +59,6 @@ pub struct RoutingResult {
     pub handler: String,
 }
 
-
 /// Statistics about routing decisions
 #[derive(Debug, Clone)]
 pub struct RoutingStats {
@@ -80,9 +80,8 @@ pub fn create_routing(
     tokens: Vec<Token>,
     reason: &str,
 ) -> u64 {
-    let system = crate::system::system_mut();
-    let id = system.allocate_routing_id();
-    
+    let id = system().allocate_routing_id();
+
     let decision = RoutingDecision {
         id,
         source_handler: source_handler.to_string(),
@@ -93,18 +92,18 @@ pub fn create_routing(
         status: RoutingStatus::Pending,
         result: None,
     };
-    
-    system.add_routing_decision(&decision)
+
+    system().add_routing_decision(&decision)
 }
 
 /// Get a routing decision Entry by ID
 pub fn get_routing_entry(id: u64) -> Option<Entry> {
-    crate::system::system().get_routing_entry(id).cloned()
+    system().get_routing_entry(id).cloned()
 }
 
 /// Get the result of a routing decision
 pub fn get_routing_result(id: u64) -> Option<RoutingResult> {
-    let entry = crate::system::system().get_routing_entry(id)?;
+    let entry = system().get_routing_entry(id)?;
     let rust_code = entry.get_string_attr("result_code")?.to_string();
     // Get confidence from Entry - it's stored as f64
     let confidence = match entry.attr("result_confidence") {
@@ -112,7 +111,11 @@ pub fn get_routing_result(id: u64) -> Option<RoutingResult> {
         _ => return None,
     };
     let handler = entry.get_string_attr("result_handler")?.to_string();
-    Some(RoutingResult { rust_code, confidence, handler })
+    Some(RoutingResult {
+        rust_code,
+        confidence,
+        handler,
+    })
 }
 
 /// Set the result for a routing decision (adds new entry with result)
@@ -120,17 +123,17 @@ pub fn set_routing_result(id: u64, _rust_code: String, _confidence: f64, _handle
     // For now, we need to create a new entry with the result
     // since the db doesn't support in-place updates
     // TODO: Store result data when db supports updates
-    crate::system::system_mut().update_routing_status(id, "completed");
+    system().update_routing_status(id, "completed");
 }
 
 /// Mark a routing decision as failed
 pub fn set_routing_failed(id: u64) {
-    crate::system::system_mut().update_routing_status(id, "failed");
+    system().update_routing_status(id, "failed");
 }
 
 /// Get all pending routing entries for a target handler
 pub fn pending_routings_for(target_handler: &str) -> Vec<Entry> {
-    crate::system::system()
+    system()
         .routings_by_target(target_handler)
         .into_iter()
         .filter(|e| e.get_string_attr("status") == Some("pending"))
@@ -140,7 +143,7 @@ pub fn pending_routings_for(target_handler: &str) -> Vec<Entry> {
 
 /// Get routing statistics
 pub fn routing_stats() -> RoutingStats {
-    crate::system::system().routing_stats()
+    system().routing_stats()
 }
 
 // ============================================================================
@@ -156,12 +159,15 @@ impl Build for RoutingDecision {
         entry.set_attr("token_range_start", Entry::usize(self.token_range.start));
         entry.set_attr("token_range_end", Entry::usize(self.token_range.end));
         entry.set_attr("reason", Entry::string(&self.reason));
-        entry.set_attr("status", Entry::string(match self.status {
-            RoutingStatus::Pending => "pending",
-            RoutingStatus::InProgress => "in_progress",
-            RoutingStatus::Completed => "completed",
-            RoutingStatus::Failed => "failed",
-        }));
+        entry.set_attr(
+            "status",
+            Entry::string(match self.status {
+                RoutingStatus::Pending => "pending",
+                RoutingStatus::InProgress => "in_progress",
+                RoutingStatus::Completed => "completed",
+                RoutingStatus::Failed => "failed",
+            }),
+        );
         if let Some(ref result) = self.result {
             entry.set_attr("result_code", Entry::string(&result.rust_code));
             entry.set_attr("result_confidence", Entry::f64(result.confidence));
@@ -169,16 +175,22 @@ impl Build for RoutingDecision {
         }
         entry
     }
-    
-    fn kind(&self) -> &str { "RoutingDecision" }
-    fn name(&self) -> Option<&str> { None }
-    fn category(&self) -> Option<&str> { Some("routing") }
+
+    fn kind(&self) -> &str {
+        "RoutingDecision"
+    }
+    fn name(&self) -> Option<&str> {
+        None
+    }
+    fn category(&self) -> Option<&str> {
+        Some("routing")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_create_routing() {
         let id = create_routing(
@@ -188,13 +200,13 @@ mod tests {
             vec![],
             "detected for loop",
         );
-        
+
         assert!(id > 0);
-        
+
         // Verify we can get the entry back
         let entry = get_routing_entry(id);
         assert!(entry.is_some());
-        
+
         let e = entry.unwrap();
         assert_eq!(e.get_string_attr("source_handler"), Some("FunctionHandler"));
         assert_eq!(e.get_string_attr("target_handler"), Some("LoopHandler"));

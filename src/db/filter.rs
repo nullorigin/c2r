@@ -122,19 +122,20 @@ impl Kind {
     pub fn as_str(&self) -> &'static str {
         KIND_STRINGS[*self as usize]
     }
-    
+
     /// Get all available kinds
     pub fn all() -> &'static [&'static str] {
         KIND_STRINGS
     }
-    
+
     /// Try to parse a kind from a string
     pub fn from_str(s: &str) -> Option<Self> {
-        KIND_STRINGS.iter()
+        KIND_STRINGS
+            .iter()
             .position(|&k| k.eq_ignore_ascii_case(s))
             .and_then(Self::from_index)
     }
-    
+
     /// Create from index
     pub fn from_index(index: usize) -> Option<Self> {
         if index < KIND_STRINGS.len() {
@@ -144,7 +145,7 @@ impl Kind {
             None
         }
     }
-    
+
     /// Get the index of this kind
     pub fn index(&self) -> usize {
         *self as usize
@@ -304,19 +305,20 @@ impl Category {
     pub fn as_str(&self) -> &'static str {
         CATEGORY_STRINGS[*self as usize]
     }
-    
+
     /// Get all available categories
     pub fn all() -> &'static [&'static str] {
         CATEGORY_STRINGS
     }
-    
+
     /// Try to parse a category from a string
     pub fn from_str(s: &str) -> Option<Self> {
-        CATEGORY_STRINGS.iter()
+        CATEGORY_STRINGS
+            .iter()
             .position(|&c| c.eq_ignore_ascii_case(s))
             .and_then(Self::from_index)
     }
-    
+
     /// Create from index
     pub fn from_index(index: usize) -> Option<Self> {
         if index < CATEGORY_STRINGS.len() {
@@ -326,7 +328,7 @@ impl Category {
             None
         }
     }
-    
+
     /// Get the index of this category
     pub fn index(&self) -> usize {
         *self as usize
@@ -369,7 +371,7 @@ impl KindFilter {
     pub fn new(s: impl AsRef<str>) -> Self {
         KindFilter(s.as_ref().to_string())
     }
-    
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -417,7 +419,7 @@ impl CategoryFilter {
     pub fn new(s: impl AsRef<str>) -> Self {
         CategoryFilter(s.as_ref().to_string())
     }
-    
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -528,7 +530,7 @@ mod tests {
         let f1: KindFilter = Kind::Function.into();
         let f2: KindFilter = "Function".into();
         let f3: KindFilter = String::from("Function").into();
-        
+
         assert_eq!(f1.as_str(), "Function");
         assert_eq!(f2.as_str(), "Function");
         assert_eq!(f3.as_str(), "Function");
@@ -539,7 +541,7 @@ mod tests {
         let f1: CategoryFilter = Category::Code.into();
         let f2: CategoryFilter = "code".into();
         let f3: CategoryFilter = String::from("code").into();
-        
+
         assert_eq!(f1.as_str(), "code");
         assert_eq!(f2.as_str(), "code");
         assert_eq!(f3.as_str(), "code");
@@ -549,7 +551,7 @@ mod tests {
     fn test_kind_into_string() {
         let s: String = Kind::Function.into();
         assert_eq!(s, "Function");
-        
+
         let s: &str = Kind::Struct.into();
         assert_eq!(s, "Struct");
     }
@@ -558,7 +560,7 @@ mod tests {
     fn test_category_into_string() {
         let s: String = Category::Code.into();
         assert_eq!(s, "code");
-        
+
         let s: &str = Category::Function.into();
         assert_eq!(s, "function");
     }
@@ -568,7 +570,7 @@ mod tests {
         assert!(is_builtin_kind("Function"));
         assert!(is_builtin_kind("function"));
         assert!(!is_builtin_kind("NotAKind"));
-        
+
         assert!(is_builtin_category("code"));
         assert!(is_builtin_category("CODE"));
         assert!(!is_builtin_category("NotACategory"));

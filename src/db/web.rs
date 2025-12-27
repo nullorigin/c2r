@@ -107,7 +107,10 @@ pub enum LinkKind {
 
 impl LinkKind {
     pub fn is_forward(&self) -> bool {
-        matches!(self, Self::Forward | Self::Branch | Self::Skip | Self::Child)
+        matches!(
+            self,
+            Self::Forward | Self::Branch | Self::Skip | Self::Child
+        )
     }
 
     pub fn is_backward(&self) -> bool {
@@ -156,7 +159,12 @@ pub struct Link {
 impl Link {
     #[inline]
     pub fn new(target: usize, kind: LinkKind) -> Self {
-        Self { target, kind, weight: 1.0, label: 0 }
+        Self {
+            target,
+            kind,
+            weight: 1.0,
+            label: 0,
+        }
     }
 
     #[inline]
@@ -186,18 +194,33 @@ impl Link {
 
     #[inline]
     pub fn weighted(target: usize, kind: LinkKind, weight: f32) -> Self {
-        Self { target, kind, weight, label: 0 }
+        Self {
+            target,
+            kind,
+            weight,
+            label: 0,
+        }
     }
 
     #[inline]
     pub fn labeled(target: usize, kind: LinkKind, label: u32) -> Self {
-        Self { target, kind, weight: 1.0, label }
+        Self {
+            target,
+            kind,
+            weight: 1.0,
+            label,
+        }
     }
 }
 
 impl Default for Link {
     fn default() -> Self {
-        Self { target: 0, kind: LinkKind::Forward, weight: 1.0, label: 0 }
+        Self {
+            target: 0,
+            kind: LinkKind::Forward,
+            weight: 1.0,
+            label: 0,
+        }
     }
 }
 
@@ -262,7 +285,10 @@ impl Links {
     }
 
     pub fn targets_of_kind(&self, kind: LinkKind) -> impl Iterator<Item = usize> + '_ {
-        self.edges.iter().filter(move |l| l.kind == kind).map(|l| l.target)
+        self.edges
+            .iter()
+            .filter(move |l| l.kind == kind)
+            .map(|l| l.target)
     }
 
     pub fn children(&self) -> impl Iterator<Item = usize> + '_ {
@@ -270,7 +296,10 @@ impl Links {
     }
 
     pub fn parent(&self) -> Option<usize> {
-        self.edges.iter().find(|l| l.kind == LinkKind::Parent).map(|l| l.target)
+        self.edges
+            .iter()
+            .find(|l| l.kind == LinkKind::Parent)
+            .map(|l| l.target)
     }
 
     pub fn has_link_to(&self, target: usize) -> bool {
@@ -383,13 +412,31 @@ impl Entry {
     /// Get the links for this site.
     pub fn links(&self) -> &Links {
         match self {
-            Self::I8(_, l) | Self::I16(_, l) | Self::I32(_, l) | Self::I64(_, l) |
-            Self::I128(_, l) | Self::Isize(_, l) | Self::U8(_, l) | Self::U16(_, l) |
-            Self::U32(_, l) | Self::U64(_, l) | Self::U128(_, l) | Self::Usize(_, l) |
-            Self::F32(_, l) | Self::F64(_, l) | Self::Char(_, l) | Self::Bool(_, l) |
-            Self::Unit(l) | Self::String(_, l) | Self::Fn(_, l) | Self::PathBuf(_, l) |
-            Self::Range(_, l) | Self::Pair(_, l) | Self::Vec(_, l) | Self::Box(_, l) |
-            Self::HashMap(_, l) => l,
+            Self::I8(_, l)
+            | Self::I16(_, l)
+            | Self::I32(_, l)
+            | Self::I64(_, l)
+            | Self::I128(_, l)
+            | Self::Isize(_, l)
+            | Self::U8(_, l)
+            | Self::U16(_, l)
+            | Self::U32(_, l)
+            | Self::U64(_, l)
+            | Self::U128(_, l)
+            | Self::Usize(_, l)
+            | Self::F32(_, l)
+            | Self::F64(_, l)
+            | Self::Char(_, l)
+            | Self::Bool(_, l)
+            | Self::Unit(l)
+            | Self::String(_, l)
+            | Self::Fn(_, l)
+            | Self::PathBuf(_, l)
+            | Self::Range(_, l)
+            | Self::Pair(_, l)
+            | Self::Vec(_, l)
+            | Self::Box(_, l)
+            | Self::HashMap(_, l) => l,
             Self::Node { links, .. } | Self::Branch { links, .. } => links,
         }
     }
@@ -397,13 +444,31 @@ impl Entry {
     /// Get mutable links for this site.
     pub fn links_mut(&mut self) -> &mut Links {
         match self {
-            Self::I8(_, l) | Self::I16(_, l) | Self::I32(_, l) | Self::I64(_, l) |
-            Self::I128(_, l) | Self::Isize(_, l) | Self::U8(_, l) | Self::U16(_, l) |
-            Self::U32(_, l) | Self::U64(_, l) | Self::U128(_, l) | Self::Usize(_, l) |
-            Self::F32(_, l) | Self::F64(_, l) | Self::Char(_, l) | Self::Bool(_, l) |
-            Self::Unit(l) | Self::String(_, l) | Self::Fn(_, l) | Self::PathBuf(_, l) |
-            Self::Range(_, l) | Self::Pair(_, l) | Self::Vec(_, l) | Self::Box(_, l) |
-            Self::HashMap(_, l) => l,
+            Self::I8(_, l)
+            | Self::I16(_, l)
+            | Self::I32(_, l)
+            | Self::I64(_, l)
+            | Self::I128(_, l)
+            | Self::Isize(_, l)
+            | Self::U8(_, l)
+            | Self::U16(_, l)
+            | Self::U32(_, l)
+            | Self::U64(_, l)
+            | Self::U128(_, l)
+            | Self::Usize(_, l)
+            | Self::F32(_, l)
+            | Self::F64(_, l)
+            | Self::Char(_, l)
+            | Self::Bool(_, l)
+            | Self::Unit(l)
+            | Self::String(_, l)
+            | Self::Fn(_, l)
+            | Self::PathBuf(_, l)
+            | Self::Range(_, l)
+            | Self::Pair(_, l)
+            | Self::Vec(_, l)
+            | Self::Box(_, l)
+            | Self::HashMap(_, l) => l,
             Self::Node { links, .. } | Self::Branch { links, .. } => links,
         }
     }
@@ -464,30 +529,78 @@ impl Entry {
     // Constructors (with empty links)
     // ========================================================================
 
-    pub fn i8(v: i8) -> Self { Self::I8(v, Links::new()) }
-    pub fn i16(v: i16) -> Self { Self::I16(v, Links::new()) }
-    pub fn i32(v: i32) -> Self { Self::I32(v, Links::new()) }
-    pub fn i64(v: i64) -> Self { Self::I64(v, Links::new()) }
-    pub fn i128(v: i128) -> Self { Self::I128(v, Links::new()) }
-    pub fn isize(v: isize) -> Self { Self::Isize(v, Links::new()) }
-    pub fn u8(v: u8) -> Self { Self::U8(v, Links::new()) }
-    pub fn u16(v: u16) -> Self { Self::U16(v, Links::new()) }
-    pub fn u32(v: u32) -> Self { Self::U32(v, Links::new()) }
-    pub fn u64(v: u64) -> Self { Self::U64(v, Links::new()) }
-    pub fn u128(v: u128) -> Self { Self::U128(v, Links::new()) }
-    pub fn usize(v: usize) -> Self { Self::Usize(v, Links::new()) }
-    pub fn f32(v: f32) -> Self { Self::F32(v, Links::new()) }
-    pub fn f64(v: f64) -> Self { Self::F64(v, Links::new()) }
-    pub fn char(v: char) -> Self { Self::Char(v, Links::new()) }
-    pub fn bool(v: bool) -> Self { Self::Bool(v, Links::new()) }
-    pub fn unit() -> Self { Self::Unit(Links::new()) }
-    pub fn string(s: impl Into<String>) -> Self { Self::String(s.into(), Links::new()) }
-    pub fn path(p: impl Into<PathBuf>) -> Self { Self::PathBuf(p.into(), Links::new()) }
-    pub fn range(r: Range<usize>) -> Self { Self::Range(r, Links::new()) }
-    pub fn pair(a: Entry, b: Entry) -> Self { Self::Pair(Box::new((a, b)), Links::new()) }
-    pub fn vec(v: Vec<Entry>) -> Self { Self::Vec(v, Links::new()) }
-    pub fn boxed(e: Entry) -> Self { Self::Box(Box::new(e), Links::new()) }
-    pub fn hashmap(m: HashMap<String, Entry>) -> Self { Self::HashMap(m, Links::new()) }
+    pub fn i8(v: i8) -> Self {
+        Self::I8(v, Links::new())
+    }
+    pub fn i16(v: i16) -> Self {
+        Self::I16(v, Links::new())
+    }
+    pub fn i32(v: i32) -> Self {
+        Self::I32(v, Links::new())
+    }
+    pub fn i64(v: i64) -> Self {
+        Self::I64(v, Links::new())
+    }
+    pub fn i128(v: i128) -> Self {
+        Self::I128(v, Links::new())
+    }
+    pub fn isize(v: isize) -> Self {
+        Self::Isize(v, Links::new())
+    }
+    pub fn u8(v: u8) -> Self {
+        Self::U8(v, Links::new())
+    }
+    pub fn u16(v: u16) -> Self {
+        Self::U16(v, Links::new())
+    }
+    pub fn u32(v: u32) -> Self {
+        Self::U32(v, Links::new())
+    }
+    pub fn u64(v: u64) -> Self {
+        Self::U64(v, Links::new())
+    }
+    pub fn u128(v: u128) -> Self {
+        Self::U128(v, Links::new())
+    }
+    pub fn usize(v: usize) -> Self {
+        Self::Usize(v, Links::new())
+    }
+    pub fn f32(v: f32) -> Self {
+        Self::F32(v, Links::new())
+    }
+    pub fn f64(v: f64) -> Self {
+        Self::F64(v, Links::new())
+    }
+    pub fn char(v: char) -> Self {
+        Self::Char(v, Links::new())
+    }
+    pub fn bool(v: bool) -> Self {
+        Self::Bool(v, Links::new())
+    }
+    pub fn unit() -> Self {
+        Self::Unit(Links::new())
+    }
+    pub fn string(s: impl Into<String>) -> Self {
+        Self::String(s.into(), Links::new())
+    }
+    pub fn path(p: impl Into<PathBuf>) -> Self {
+        Self::PathBuf(p.into(), Links::new())
+    }
+    pub fn range(r: Range<usize>) -> Self {
+        Self::Range(r, Links::new())
+    }
+    pub fn pair(a: Entry, b: Entry) -> Self {
+        Self::Pair(Box::new((a, b)), Links::new())
+    }
+    pub fn vec(v: Vec<Entry>) -> Self {
+        Self::Vec(v, Links::new())
+    }
+    pub fn boxed(e: Entry) -> Self {
+        Self::Box(Box::new(e), Links::new())
+    }
+    pub fn hashmap(m: HashMap<String, Entry>) -> Self {
+        Self::HashMap(m, Links::new())
+    }
 
     /// Create a Node site (for AST-like structures).
     pub fn node(kind: impl Into<String>, name: impl Into<String>) -> Self {
@@ -603,19 +716,40 @@ impl Entry {
     // ========================================================================
 
     pub fn is_numeric(&self) -> bool {
-        matches!(self,
-            Self::I8(..) | Self::I16(..) | Self::I32(..) | Self::I64(..) |
-            Self::I128(..) | Self::Isize(..) | Self::U8(..) | Self::U16(..) |
-            Self::U32(..) | Self::U64(..) | Self::U128(..) | Self::Usize(..) |
-            Self::F32(..) | Self::F64(..)
+        matches!(
+            self,
+            Self::I8(..)
+                | Self::I16(..)
+                | Self::I32(..)
+                | Self::I64(..)
+                | Self::I128(..)
+                | Self::Isize(..)
+                | Self::U8(..)
+                | Self::U16(..)
+                | Self::U32(..)
+                | Self::U64(..)
+                | Self::U128(..)
+                | Self::Usize(..)
+                | Self::F32(..)
+                | Self::F64(..)
         )
     }
 
     pub fn is_integer(&self) -> bool {
-        matches!(self,
-            Self::I8(..) | Self::I16(..) | Self::I32(..) | Self::I64(..) |
-            Self::I128(..) | Self::Isize(..) | Self::U8(..) | Self::U16(..) |
-            Self::U32(..) | Self::U64(..) | Self::U128(..) | Self::Usize(..)
+        matches!(
+            self,
+            Self::I8(..)
+                | Self::I16(..)
+                | Self::I32(..)
+                | Self::I64(..)
+                | Self::I128(..)
+                | Self::Isize(..)
+                | Self::U8(..)
+                | Self::U16(..)
+                | Self::U32(..)
+                | Self::U64(..)
+                | Self::U128(..)
+                | Self::Usize(..)
         )
     }
 
@@ -630,7 +764,14 @@ impl Entry {
     /// Evaluate branch condition and return the appropriate path.
     pub fn evaluate_branch(&self, context: &Entry) -> Option<&Vec<Entry>> {
         match self {
-            Self::Branch { operation, left_fn, right_fn, true_path, false_path, .. } => {
+            Self::Branch {
+                operation,
+                left_fn,
+                right_fn,
+                true_path,
+                false_path,
+                ..
+            } => {
                 let left_result = left_fn(context);
                 let right_result = right_fn(context);
                 if operation.evaluate(left_result, right_result) {
@@ -660,7 +801,14 @@ impl Entry {
     }
 
     pub fn is_container(&self) -> bool {
-        matches!(self, Self::Vec(..) | Self::HashMap(..) | Self::Pair(..) | Self::Node { .. } | Self::Branch { .. })
+        matches!(
+            self,
+            Self::Vec(..)
+                | Self::HashMap(..)
+                | Self::Pair(..)
+                | Self::Node { .. }
+                | Self::Branch { .. }
+        )
     }
 
     pub fn type_name(&self) -> &'static str {
@@ -721,20 +869,45 @@ impl Debug for Entry {
             Self::Bool(v, l) => f.debug_tuple("Bool").field(v).field(&l.len()).finish(),
             Self::Unit(l) => f.debug_tuple("Unit").field(&l.len()).finish(),
             Self::String(v, l) => f.debug_tuple("String").field(v).field(&l.len()).finish(),
-            Self::Fn(_, l) => f.debug_tuple("Fn").field(&"<function>").field(&l.len()).finish(),
+            Self::Fn(_, l) => f
+                .debug_tuple("Fn")
+                .field(&"<function>")
+                .field(&l.len())
+                .finish(),
             Self::PathBuf(v, l) => f.debug_tuple("PathBuf").field(v).field(&l.len()).finish(),
             Self::Range(v, l) => f.debug_tuple("Range").field(v).field(&l.len()).finish(),
             Self::Pair(v, l) => f.debug_tuple("Pair").field(v).field(&l.len()).finish(),
-            Self::Vec(v, l) => f.debug_tuple("Vec").field(&v.len()).field(&l.len()).finish(),
+            Self::Vec(v, l) => f
+                .debug_tuple("Vec")
+                .field(&v.len())
+                .field(&l.len())
+                .finish(),
             Self::Box(v, l) => f.debug_tuple("Box").field(v).field(&l.len()).finish(),
-            Self::HashMap(v, l) => f.debug_tuple("HashMap").field(&v.len()).field(&l.len()).finish(),
-            Self::Node { kind, name, attrs, links } => f.debug_struct("Node")
+            Self::HashMap(v, l) => f
+                .debug_tuple("HashMap")
+                .field(&v.len())
+                .field(&l.len())
+                .finish(),
+            Self::Node {
+                kind,
+                name,
+                attrs,
+                links,
+            } => f
+                .debug_struct("Node")
                 .field("kind", kind)
                 .field("name", name)
                 .field("attrs", &attrs.len())
                 .field("links", &links.len())
                 .finish(),
-            Self::Branch { operation, true_path, false_path, links, .. } => f.debug_struct("Branch")
+            Self::Branch {
+                operation,
+                true_path,
+                false_path,
+                links,
+                ..
+            } => f
+                .debug_struct("Branch")
                 .field("operation", &operation.name())
                 .field("true_path", &true_path.len())
                 .field("false_path", &false_path.len())
@@ -772,7 +945,9 @@ impl Display for Entry {
             Self::Vec(v, _) => {
                 write!(f, "[")?;
                 for (i, item) in v.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}", item)?;
                 }
                 write!(f, "]")
@@ -781,14 +956,26 @@ impl Display for Entry {
             Self::HashMap(v, _) => {
                 write!(f, "{{")?;
                 for (i, (k, val)) in v.iter().enumerate() {
-                    if i > 0 { write!(f, ", ")?; }
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
                     write!(f, "{}: {}", k, val)?;
                 }
                 write!(f, "}}")
             }
             Self::Node { kind, name, .. } => write!(f, "{}:{}", kind, name),
-            Self::Branch { operation, true_path, false_path, .. } => 
-                write!(f, "Branch({}, true:{}, false:{})", operation.name(), true_path.len(), false_path.len()),
+            Self::Branch {
+                operation,
+                true_path,
+                false_path,
+                ..
+            } => write!(
+                f,
+                "Branch({}, true:{}, false:{})",
+                operation.name(),
+                true_path.len(),
+                false_path.len()
+            ),
         }
     }
 }
@@ -821,13 +1008,25 @@ impl Clone for Entry {
             Self::Vec(v, l) => Self::Vec(v.clone(), l.clone()),
             Self::Box(v, l) => Self::Box(v.clone(), l.clone()),
             Self::HashMap(v, l) => Self::HashMap(v.clone(), l.clone()),
-            Self::Node { kind, name, attrs, links } => Self::Node {
+            Self::Node {
+                kind,
+                name,
+                attrs,
+                links,
+            } => Self::Node {
                 kind: kind.clone(),
                 name: name.clone(),
                 attrs: attrs.clone(),
                 links: links.clone(),
             },
-            Self::Branch { operation, left_fn, right_fn, true_path, false_path, links } => Self::Branch {
+            Self::Branch {
+                operation,
+                left_fn,
+                right_fn,
+                true_path,
+                false_path,
+                links,
+            } => Self::Branch {
                 operation: *operation,
                 left_fn: *left_fn,
                 right_fn: *right_fn,
@@ -867,7 +1066,14 @@ impl PartialEq for Entry {
             (Self::Vec(a, _), Self::Vec(b, _)) => a == b,
             (Self::Box(a, _), Self::Box(b, _)) => a == b,
             (Self::HashMap(a, _), Self::HashMap(b, _)) => a == b,
-            (Self::Node { kind: k1, name: n1, .. }, Self::Node { kind: k2, name: n2, .. }) => k1 == k2 && n1 == n2,
+            (
+                Self::Node {
+                    kind: k1, name: n1, ..
+                },
+                Self::Node {
+                    kind: k2, name: n2, ..
+                },
+            ) => k1 == k2 && n1 == n2,
             _ => false,
         }
     }
@@ -899,7 +1105,10 @@ impl Hash for Entry {
             Self::String(v, _) => v.hash(state),
             Self::Fn(v, _) => v.hash(state),
             Self::PathBuf(v, _) => v.hash(state),
-            Self::Range(v, _) => { v.start.hash(state); v.end.hash(state); }
+            Self::Range(v, _) => {
+                v.start.hash(state);
+                v.end.hash(state);
+            }
             Self::Pair(v, _) => v.hash(state),
             Self::Vec(v, _) => v.hash(state),
             Self::Box(v, _) => v.hash(state),
@@ -914,7 +1123,12 @@ impl Hash for Entry {
                 kind.hash(state);
                 name.hash(state);
             }
-            Self::Branch { operation, true_path, false_path, .. } => {
+            Self::Branch {
+                operation,
+                true_path,
+                false_path,
+                ..
+            } => {
                 operation.hash(state);
                 true_path.hash(state);
                 false_path.hash(state);
@@ -1049,7 +1263,8 @@ impl Site {
 
     /// Get all children of an site.
     pub fn children_of(&self, index: usize) -> Vec<usize> {
-        self.sites.get(index)
+        self.sites
+            .get(index)
             .map(|e| e.children().collect())
             .unwrap_or_default()
     }
@@ -1058,11 +1273,11 @@ impl Site {
     pub fn traverse_dfs(&self) -> Vec<usize> {
         let mut visited = vec![false; self.sites.len()];
         let mut result = Vec::new();
-        
+
         for &root in &self.roots {
             self.dfs_helper(root, &mut visited, &mut result);
         }
-        
+
         result
     }
 
@@ -1072,7 +1287,7 @@ impl Site {
         }
         visited[index] = true;
         result.push(index);
-        
+
         if let Some(site) = self.sites.get(index) {
             for child in site.children() {
                 self.dfs_helper(child, visited, result);
@@ -1083,7 +1298,7 @@ impl Site {
 
 impl std::ops::Index<usize> for Site {
     type Output = Entry;
-    
+
     fn index(&self, index: usize) -> &Self::Output {
         &self.sites[index]
     }
@@ -1193,7 +1408,10 @@ impl Entry {
         stats.total_links += self.links().len();
 
         // Count by type
-        *stats.type_counts.entry(self.type_name().to_string()).or_insert(0) += 1;
+        *stats
+            .type_counts
+            .entry(self.type_name().to_string())
+            .or_insert(0) += 1;
 
         // If it's a Node, count by kind
         if let Some(kind) = self.kind() {
@@ -1250,18 +1468,31 @@ impl Entry {
 
     fn calc_depth(&self, current: usize) -> usize {
         match self {
-            Self::Vec(v, _) => v.iter().map(|e| e.calc_depth(current + 1)).max().unwrap_or(current),
-            Self::HashMap(m, _) => m.values().map(|e| e.calc_depth(current + 1)).max().unwrap_or(current),
+            Self::Vec(v, _) => v
+                .iter()
+                .map(|e| e.calc_depth(current + 1))
+                .max()
+                .unwrap_or(current),
+            Self::HashMap(m, _) => m
+                .values()
+                .map(|e| e.calc_depth(current + 1))
+                .max()
+                .unwrap_or(current),
             Self::Pair(p, _) => p.0.calc_depth(current + 1).max(p.1.calc_depth(current + 1)),
             Self::Box(inner, _) => inner.calc_depth(current + 1),
-            Self::Node { attrs, .. } => attrs.values().map(|e| e.calc_depth(current + 1)).max().unwrap_or(current),
+            Self::Node { attrs, .. } => attrs
+                .values()
+                .map(|e| e.calc_depth(current + 1))
+                .max()
+                .unwrap_or(current),
             _ => current,
         }
     }
 
     /// Find all sites matching a predicate.
     pub fn find_all<F>(&self, predicate: F) -> Vec<&Entry>
-    where F: Fn(&Entry) -> bool + Copy
+    where
+        F: Fn(&Entry) -> bool + Copy,
     {
         let mut results = Vec::new();
         self.find_recursive(&predicate, &mut results);
@@ -1269,20 +1500,25 @@ impl Entry {
     }
 
     fn find_recursive<'a, F>(&'a self, predicate: &F, results: &mut Vec<&'a Entry>)
-    where F: Fn(&Entry) -> bool
+    where
+        F: Fn(&Entry) -> bool,
     {
         if predicate(self) {
             results.push(self);
         }
         match self {
             Self::Vec(v, _) => v.iter().for_each(|e| e.find_recursive(predicate, results)),
-            Self::HashMap(m, _) => m.values().for_each(|e| e.find_recursive(predicate, results)),
+            Self::HashMap(m, _) => m
+                .values()
+                .for_each(|e| e.find_recursive(predicate, results)),
             Self::Pair(p, _) => {
                 p.0.find_recursive(predicate, results);
                 p.1.find_recursive(predicate, results);
             }
             Self::Box(inner, _) => inner.find_recursive(predicate, results),
-            Self::Node { attrs, .. } => attrs.values().for_each(|e| e.find_recursive(predicate, results)),
+            Self::Node { attrs, .. } => attrs
+                .values()
+                .for_each(|e| e.find_recursive(predicate, results)),
             _ => {}
         }
     }
@@ -1296,7 +1532,9 @@ impl Entry {
     pub fn find_by_name(&self, pattern: &str) -> Vec<&Entry> {
         let pattern_lower = pattern.to_lowercase();
         self.find_all(|e| {
-            e.name().map(|n| n.to_lowercase().contains(&pattern_lower)).unwrap_or(false)
+            e.name()
+                .map(|n| n.to_lowercase().contains(&pattern_lower))
+                .unwrap_or(false)
         })
     }
 
@@ -1383,37 +1621,153 @@ impl Entry {
     // as_*() - Borrow inner value (returns Option<&T>)
     // ========================================================================
 
-    pub fn as_i8(&self) -> Option<i8> { match self { Self::I8(v, _) => Some(*v), _ => None } }
-    pub fn as_i16(&self) -> Option<i16> { match self { Self::I16(v, _) => Some(*v), _ => None } }
-    pub fn as_i32(&self) -> Option<i32> { match self { Self::I32(v, _) => Some(*v), _ => None } }
-    pub fn as_i64(&self) -> Option<i64> { match self { Self::I64(v, _) => Some(*v), _ => None } }
-    pub fn as_i128(&self) -> Option<i128> { match self { Self::I128(v, _) => Some(*v), _ => None } }
-    pub fn as_isize(&self) -> Option<isize> { match self { Self::Isize(v, _) => Some(*v), _ => None } }
-    pub fn as_u8(&self) -> Option<u8> { match self { Self::U8(v, _) => Some(*v), _ => None } }
-    pub fn as_u16(&self) -> Option<u16> { match self { Self::U16(v, _) => Some(*v), _ => None } }
-    pub fn as_u32(&self) -> Option<u32> { match self { Self::U32(v, _) => Some(*v), _ => None } }
-    pub fn as_u64(&self) -> Option<u64> { match self { Self::U64(v, _) => Some(*v), _ => None } }
-    pub fn as_u128(&self) -> Option<u128> { match self { Self::U128(v, _) => Some(*v), _ => None } }
-    pub fn as_usize(&self) -> Option<usize> { match self { Self::Usize(v, _) => Some(*v), _ => None } }
-    pub fn as_f32(&self) -> Option<f32> { match self { Self::F32(v, _) => Some(*v), _ => None } }
-    pub fn as_f64(&self) -> Option<f64> { match self { Self::F64(v, _) => Some(*v), _ => None } }
-    pub fn as_char(&self) -> Option<char> { match self { Self::Char(v, _) => Some(*v), _ => None } }
-    pub fn as_bool(&self) -> Option<bool> { match self { Self::Bool(v, _) => Some(*v), _ => None } }
-    pub fn as_path(&self) -> Option<&PathBuf> { match self { Self::PathBuf(v, _) => Some(v), _ => None } }
-    pub fn as_range(&self) -> Option<&Range<usize>> { match self { Self::Range(v, _) => Some(v), _ => None } }
-    pub fn as_pair(&self) -> Option<&(Entry, Entry)> { match self { Self::Pair(v, _) => Some(v.as_ref()), _ => None } }
-    pub fn as_vec(&self) -> Option<&Vec<Entry>> { match self { Self::Vec(v, _) => Some(v), _ => None } }
-    pub fn as_boxed(&self) -> Option<&Entry> { match self { Self::Box(v, _) => Some(v.as_ref()), _ => None } }
-    pub fn as_hashmap(&self) -> Option<&HashMap<String, Entry>> { match self { Self::HashMap(v, _) => Some(v), _ => None } }
+    pub fn as_i8(&self) -> Option<i8> {
+        match self {
+            Self::I8(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_i16(&self) -> Option<i16> {
+        match self {
+            Self::I16(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_i32(&self) -> Option<i32> {
+        match self {
+            Self::I32(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_i64(&self) -> Option<i64> {
+        match self {
+            Self::I64(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_i128(&self) -> Option<i128> {
+        match self {
+            Self::I128(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_isize(&self) -> Option<isize> {
+        match self {
+            Self::Isize(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_u8(&self) -> Option<u8> {
+        match self {
+            Self::U8(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_u16(&self) -> Option<u16> {
+        match self {
+            Self::U16(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Self::U32(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Self::U64(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_u128(&self) -> Option<u128> {
+        match self {
+            Self::U128(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            Self::Usize(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            Self::F32(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Self::F64(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_char(&self) -> Option<char> {
+        match self {
+            Self::Char(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v, _) => Some(*v),
+            _ => None,
+        }
+    }
+    pub fn as_path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::PathBuf(v, _) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn as_range(&self) -> Option<&Range<usize>> {
+        match self {
+            Self::Range(v, _) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn as_pair(&self) -> Option<&(Entry, Entry)> {
+        match self {
+            Self::Pair(v, _) => Some(v.as_ref()),
+            _ => None,
+        }
+    }
+    pub fn as_vec(&self) -> Option<&Vec<Entry>> {
+        match self {
+            Self::Vec(v, _) => Some(v),
+            _ => None,
+        }
+    }
+    pub fn as_boxed(&self) -> Option<&Entry> {
+        match self {
+            Self::Box(v, _) => Some(v.as_ref()),
+            _ => None,
+        }
+    }
+    pub fn as_hashmap(&self) -> Option<&HashMap<String, Entry>> {
+        match self {
+            Self::HashMap(v, _) => Some(v),
+            _ => None,
+        }
+    }
 
     /// Get mutable reference to vec contents
-    pub fn as_vec_mut(&mut self) -> Option<&mut Vec<Entry>> { 
-        match self { Self::Vec(v, _) => Some(v), _ => None } 
+    pub fn as_vec_mut(&mut self) -> Option<&mut Vec<Entry>> {
+        match self {
+            Self::Vec(v, _) => Some(v),
+            _ => None,
+        }
     }
 
     /// Get mutable reference to hashmap contents
-    pub fn as_hashmap_mut(&mut self) -> Option<&mut HashMap<String, Entry>> { 
-        match self { Self::HashMap(v, _) => Some(v), _ => None } 
+    pub fn as_hashmap_mut(&mut self) -> Option<&mut HashMap<String, Entry>> {
+        match self {
+            Self::HashMap(v, _) => Some(v),
+            _ => None,
+        }
     }
 
     // ========================================================================
@@ -1500,13 +1854,27 @@ impl Entry {
     // ========================================================================
 
     pub fn is_signed(&self) -> bool {
-        matches!(self, Self::I8(..) | Self::I16(..) | Self::I32(..) | Self::I64(..) | 
-                       Self::I128(..) | Self::Isize(..))
+        matches!(
+            self,
+            Self::I8(..)
+                | Self::I16(..)
+                | Self::I32(..)
+                | Self::I64(..)
+                | Self::I128(..)
+                | Self::Isize(..)
+        )
     }
 
     pub fn is_unsigned(&self) -> bool {
-        matches!(self, Self::U8(..) | Self::U16(..) | Self::U32(..) | Self::U64(..) | 
-                       Self::U128(..) | Self::Usize(..))
+        matches!(
+            self,
+            Self::U8(..)
+                | Self::U16(..)
+                | Self::U32(..)
+                | Self::U64(..)
+                | Self::U128(..)
+                | Self::Usize(..)
+        )
     }
 
     pub fn is_float(&self) -> bool {
@@ -1615,7 +1983,8 @@ impl Site {
 
     /// Find all nodes by kind.
     pub fn find_by_kind(&self, kind: &str) -> Vec<usize> {
-        self.sites.iter()
+        self.sites
+            .iter()
             .enumerate()
             .filter(|(_, e)| e.kind() == Some(kind))
             .map(|(i, _)| i)
@@ -1625,10 +1994,13 @@ impl Site {
     /// Find all nodes by name pattern (case-insensitive contains).
     pub fn find_by_name(&self, pattern: &str) -> Vec<usize> {
         let pattern_lower = pattern.to_lowercase();
-        self.sites.iter()
+        self.sites
+            .iter()
             .enumerate()
             .filter(|(_, e)| {
-                e.name().map(|n| n.to_lowercase().contains(&pattern_lower)).unwrap_or(false)
+                e.name()
+                    .map(|n| n.to_lowercase().contains(&pattern_lower))
+                    .unwrap_or(false)
             })
             .map(|(i, _)| i)
             .collect()
@@ -1636,7 +2008,8 @@ impl Site {
 
     /// Find all nodes with a specific attribute.
     pub fn find_with_attr(&self, attr_key: &str) -> Vec<usize> {
-        self.sites.iter()
+        self.sites
+            .iter()
             .enumerate()
             .filter(|(_, e)| e.has_attr(attr_key))
             .map(|(i, _)| i)
@@ -1691,7 +2064,10 @@ impl Site {
 
         for site in &self.sites {
             stats.total_links += site.links().len();
-            *stats.type_counts.entry(site.type_name().to_string()).or_insert(0) += 1;
+            *stats
+                .type_counts
+                .entry(site.type_name().to_string())
+                .or_insert(0) += 1;
             if let Some(kind) = site.kind() {
                 stats.node_count += 1;
                 *stats.kind_counts.entry(kind.to_string()).or_insert(0) += 1;
@@ -1723,18 +2099,18 @@ impl Site {
     /// Traverse breadth-first from roots.
     pub fn traverse_bfs(&self) -> Vec<usize> {
         use std::collections::VecDeque;
-        
+
         let mut visited = vec![false; self.sites.len()];
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
-        
+
         for &root in &self.roots {
             if root < visited.len() && !visited[root] {
                 visited[root] = true;
                 queue.push_back(root);
             }
         }
-        
+
         while let Some(index) = queue.pop_front() {
             result.push(index);
             if let Some(site) = self.sites.get(index) {
@@ -1746,7 +2122,7 @@ impl Site {
                 }
             }
         }
-        
+
         result
     }
 
@@ -1755,15 +2131,15 @@ impl Site {
         if index >= self.sites.len() {
             return None;
         }
-        
+
         let mut path = vec![index];
         let mut current = index;
-        
+
         while let Some(parent) = self.sites.get(current).and_then(|e| e.parent()) {
             path.push(parent);
             current = parent;
         }
-        
+
         path.reverse();
         Some(path)
     }
@@ -1778,7 +2154,7 @@ impl Site {
         let Some(parent) = self.parent_of(index) else {
             return Vec::new();
         };
-        
+
         self.children_of(parent)
             .into_iter()
             .filter(|&i| i != index)
@@ -1787,7 +2163,8 @@ impl Site {
 
     /// Get all leaf nodes (nodes with no children).
     pub fn leaves(&self) -> Vec<usize> {
-        self.sites.iter()
+        self.sites
+            .iter()
             .enumerate()
             .filter(|(_, e)| e.links().is_leaf())
             .map(|(i, _)| i)
@@ -1796,7 +2173,8 @@ impl Site {
 
     /// Get nodes at a specific depth level.
     pub fn nodes_at_depth(&self, depth: usize) -> Vec<usize> {
-        self.sites.iter()
+        self.sites
+            .iter()
             .enumerate()
             .filter(|(_, e)| e.depth() == depth)
             .map(|(i, _)| i)
@@ -1809,7 +2187,12 @@ impl Site {
     }
 
     /// Create a node and add it as child to parent.
-    pub fn add_child_node(&mut self, parent: usize, kind: &str, name: impl Into<String>) -> Option<usize> {
+    pub fn add_child_node(
+        &mut self,
+        parent: usize,
+        kind: &str,
+        name: impl Into<String>,
+    ) -> Option<usize> {
         self.add_child_to(parent, Entry::node(kind, name))
     }
 
@@ -1828,28 +2211,116 @@ impl Site {
 // From implementations
 // ============================================================================
 
-impl From<i8> for Entry { fn from(v: i8) -> Self { Self::i8(v) } }
-impl From<i16> for Entry { fn from(v: i16) -> Self { Self::i16(v) } }
-impl From<i32> for Entry { fn from(v: i32) -> Self { Self::i32(v) } }
-impl From<i64> for Entry { fn from(v: i64) -> Self { Self::i64(v) } }
-impl From<i128> for Entry { fn from(v: i128) -> Self { Self::i128(v) } }
-impl From<isize> for Entry { fn from(v: isize) -> Self { Self::isize(v) } }
-impl From<u8> for Entry { fn from(v: u8) -> Self { Self::u8(v) } }
-impl From<u16> for Entry { fn from(v: u16) -> Self { Self::u16(v) } }
-impl From<u32> for Entry { fn from(v: u32) -> Self { Self::u32(v) } }
-impl From<u64> for Entry { fn from(v: u64) -> Self { Self::u64(v) } }
-impl From<u128> for Entry { fn from(v: u128) -> Self { Self::u128(v) } }
-impl From<usize> for Entry { fn from(v: usize) -> Self { Self::usize(v) } }
-impl From<f32> for Entry { fn from(v: f32) -> Self { Self::f32(v) } }
-impl From<f64> for Entry { fn from(v: f64) -> Self { Self::f64(v) } }
-impl From<char> for Entry { fn from(v: char) -> Self { Self::char(v) } }
-impl From<bool> for Entry { fn from(v: bool) -> Self { Self::bool(v) } }
-impl From<()> for Entry { fn from(_: ()) -> Self { Self::unit() } }
-impl From<String> for Entry { fn from(v: String) -> Self { Self::string(v) } }
-impl From<&str> for Entry { fn from(v: &str) -> Self { Self::string(v) } }
-impl From<PathBuf> for Entry { fn from(v: PathBuf) -> Self { Self::PathBuf(v, Links::new()) } }
-impl From<Range<usize>> for Entry { fn from(v: Range<usize>) -> Self { Self::range(v) } }
-impl From<Vec<Entry>> for Entry { fn from(v: Vec<Entry>) -> Self { Self::vec(v) } }
+impl From<i8> for Entry {
+    fn from(v: i8) -> Self {
+        Self::i8(v)
+    }
+}
+impl From<i16> for Entry {
+    fn from(v: i16) -> Self {
+        Self::i16(v)
+    }
+}
+impl From<i32> for Entry {
+    fn from(v: i32) -> Self {
+        Self::i32(v)
+    }
+}
+impl From<i64> for Entry {
+    fn from(v: i64) -> Self {
+        Self::i64(v)
+    }
+}
+impl From<i128> for Entry {
+    fn from(v: i128) -> Self {
+        Self::i128(v)
+    }
+}
+impl From<isize> for Entry {
+    fn from(v: isize) -> Self {
+        Self::isize(v)
+    }
+}
+impl From<u8> for Entry {
+    fn from(v: u8) -> Self {
+        Self::u8(v)
+    }
+}
+impl From<u16> for Entry {
+    fn from(v: u16) -> Self {
+        Self::u16(v)
+    }
+}
+impl From<u32> for Entry {
+    fn from(v: u32) -> Self {
+        Self::u32(v)
+    }
+}
+impl From<u64> for Entry {
+    fn from(v: u64) -> Self {
+        Self::u64(v)
+    }
+}
+impl From<u128> for Entry {
+    fn from(v: u128) -> Self {
+        Self::u128(v)
+    }
+}
+impl From<usize> for Entry {
+    fn from(v: usize) -> Self {
+        Self::usize(v)
+    }
+}
+impl From<f32> for Entry {
+    fn from(v: f32) -> Self {
+        Self::f32(v)
+    }
+}
+impl From<f64> for Entry {
+    fn from(v: f64) -> Self {
+        Self::f64(v)
+    }
+}
+impl From<char> for Entry {
+    fn from(v: char) -> Self {
+        Self::char(v)
+    }
+}
+impl From<bool> for Entry {
+    fn from(v: bool) -> Self {
+        Self::bool(v)
+    }
+}
+impl From<()> for Entry {
+    fn from(_: ()) -> Self {
+        Self::unit()
+    }
+}
+impl From<String> for Entry {
+    fn from(v: String) -> Self {
+        Self::string(v)
+    }
+}
+impl From<&str> for Entry {
+    fn from(v: &str) -> Self {
+        Self::string(v)
+    }
+}
+impl From<PathBuf> for Entry {
+    fn from(v: PathBuf) -> Self {
+        Self::PathBuf(v, Links::new())
+    }
+}
+impl From<Range<usize>> for Entry {
+    fn from(v: Range<usize>) -> Self {
+        Self::range(v)
+    }
+}
+impl From<Vec<Entry>> for Entry {
+    fn from(v: Vec<Entry>) -> Self {
+        Self::vec(v)
+    }
+}
 
 // ============================================================================
 // Build Trait - Unified building interface for all data types
@@ -1860,19 +2331,25 @@ impl From<Vec<Entry>> for Entry { fn from(v: Vec<Entry>) -> Self { Self::vec(v) 
 pub trait Build {
     /// Convert this object to an Entry representation.
     fn to_entry(&self) -> Entry;
-    
+
     /// Get the kind/type identifier for this object.
     fn kind(&self) -> &str;
-    
+
     /// Get an optional name for this object.
-    fn name(&self) -> Option<&str> { None }
-    
+    fn name(&self) -> Option<&str> {
+        None
+    }
+
     /// Get optional category for grouping.
-    fn category(&self) -> Option<&str> { None }
-    
+    fn category(&self) -> Option<&str> {
+        None
+    }
+
     /// Get priority for ordering (higher = more important).
-    fn priority(&self) -> i16 { 0 }
-    
+    fn priority(&self) -> i16 {
+        0
+    }
+
     /// Check if this object matches the given query specification.
     /// The query is an Entry that specifies match criteria:
     /// - Node with kind: matches objects of that kind
@@ -1886,7 +2363,7 @@ pub trait Build {
                 return false;
             }
         }
-        
+
         // Match by name if query has a name
         if let Some(query_name) = query.name() {
             match self.name() {
@@ -1895,7 +2372,7 @@ pub trait Build {
                 None => return false,
             }
         }
-        
+
         // Match by category if query has category attr
         if let Some(query_cat) = query.get_string_attr("category") {
             match self.category() {
@@ -1904,7 +2381,7 @@ pub trait Build {
                 None => return false,
             }
         }
-        
+
         true
     }
 }
@@ -1963,22 +2440,22 @@ impl Web {
         let kind = item.kind().to_string();
         let name = item.name().map(|s| s.to_string());
         let category = item.category().map(|s| s.to_string());
-        
+
         let idx = self.site.add_root(entry);
-        
+
         // Index by kind
         self.by_kind.entry(kind).or_default().push(idx);
-        
+
         // Index by name if present
         if let Some(n) = name {
             self.by_name.entry(n).or_default().push(idx);
         }
-        
+
         // Index by category if present
         if let Some(c) = category {
             self.categories.entry(c).or_default().push(idx);
         }
-        
+
         self.stats.build_count += 1;
         self.update_stats();
         idx
@@ -1988,16 +2465,16 @@ impl Web {
     pub fn add_entry(&mut self, entry: Entry) -> usize {
         let kind = entry.kind().map(|s| s.to_string());
         let name = entry.name().map(|s| s.to_string());
-        
+
         let idx = self.site.add_root(entry);
-        
+
         if let Some(k) = kind {
             self.by_kind.entry(k).or_default().push(idx);
         }
         if let Some(n) = name {
             self.by_name.entry(n).or_default().push(idx);
         }
-        
+
         self.update_stats();
         idx
     }
@@ -2027,11 +2504,7 @@ impl Web {
     pub fn by_kind(&self, kind: &str) -> Vec<&Entry> {
         self.by_kind
             .get(kind)
-            .map(|indices| {
-                indices.iter()
-                    .filter_map(|&i| self.get(i))
-                    .collect()
-            })
+            .map(|indices| indices.iter().filter_map(|&i| self.get(i)).collect())
             .unwrap_or_default()
     }
 
@@ -2039,11 +2512,7 @@ impl Web {
     pub fn by_name(&self, name: &str) -> Vec<&Entry> {
         self.by_name
             .get(name)
-            .map(|indices| {
-                indices.iter()
-                    .filter_map(|&i| self.get(i))
-                    .collect()
-            })
+            .map(|indices| indices.iter().filter_map(|&i| self.get(i)).collect())
             .unwrap_or_default()
     }
 
@@ -2051,11 +2520,7 @@ impl Web {
     pub fn by_category(&self, category: &str) -> Vec<&Entry> {
         self.categories
             .get(category)
-            .map(|indices| {
-                indices.iter()
-                    .filter_map(|&i| self.get(i))
-                    .collect()
-            })
+            .map(|indices| indices.iter().filter_map(|&i| self.get(i)).collect())
             .unwrap_or_default()
     }
 
@@ -2150,17 +2615,17 @@ impl Web {
     /// Returns entries matching the stored QuerySpec.
     pub fn execute_query(&self, name: &str) -> Vec<&Entry> {
         use crate::db::query::QuerySpec;
-        
+
         let query_entry = match self.queries.get(name) {
             Some(e) => e,
             None => return Vec::new(),
         };
-        
+
         let spec = match QuerySpec::from_entry(query_entry) {
             Some(s) => s,
             None => return Vec::new(),
         };
-        
+
         self.iter().filter(|e| spec.matches(e)).collect()
     }
     /// Initialize the web database with default structure
@@ -2169,40 +2634,40 @@ impl Web {
         if !self.is_empty() {
             self.clear();
         }
-        
+
         // Set initialization metadata
         self.set_metadata("initialized", Entry::bool(true));
         self.set_metadata("version", Entry::string("1.0"));
-        
+
         // Update stats
         self.update_stats();
     }
-    
+
     /// Save the web database to file in specified format
     pub fn save(&self, file_path: PathBuf, format: &str) {
         use std::fs::File;
         use std::io::Write;
-        
+
         let content = match format.to_lowercase().as_str() {
             "json" => self.to_json_pretty(2),
             "json-compact" | "jsonc" => self.to_json(),
             _ => self.to_json_pretty(2), // Default to pretty JSON
         };
-        
+
         if let Ok(mut file) = File::create(&file_path) {
             let _ = file.write_all(content.as_bytes());
         }
     }
-    
+
     /// Load database from file in specified format
     pub fn load(&mut self, file_path: PathBuf, format: &str) {
         use std::fs;
-        
+
         let content = match fs::read_to_string(&file_path) {
             Ok(c) => c,
             Err(_) => return,
         };
-        
+
         match format.to_lowercase().as_str() {
             "json" | "json-compact" | "jsonc" => {
                 if let Ok(entry) = crate::db::json::parse(&content) {
@@ -2213,12 +2678,12 @@ impl Web {
             _ => {} // Unknown format, do nothing
         }
     }
-    
+
     /// Load database contents from an Entry (typically parsed from JSON)
     fn load_from_entry(&mut self, entry: &Entry) {
         // Clear existing data
         self.clear();
-        
+
         // If it's a HashMap, iterate and add entries
         if let Entry::HashMap(map, _) = entry {
             // Look for "entries" key which contains entries by kind
@@ -2232,28 +2697,28 @@ impl Web {
                 }
             }
         }
-        
+
         self.update_stats();
     }
-    
+
     /// Display the web database using default format
     pub fn display(&self) {
         use crate::db::format::{Formatter, OutputFormat};
         println!("{}", self.format(&OutputFormat::Table));
     }
-    
+
     /// Display the web database using specified format
     pub fn display_as(&self, format: &str) {
         use crate::db::format::{Formatter, OutputFormat};
         println!("{}", self.format(&OutputFormat::from_str(format)));
     }
-    
+
     /// Convert the entire Web to a JSON string
     pub fn to_json(&self) -> String {
         use crate::db::format::{Formatter, OutputFormat};
         self.format(&OutputFormat::JsonCompact)
     }
-    
+
     /// Convert the entire Web to a pretty-printed JSON string
     pub fn to_json_pretty(&self, _spaces: u16) -> String {
         use crate::db::format::{Formatter, OutputFormat};
@@ -2261,20 +2726,22 @@ impl Web {
     }
 }
 
-impl std::fmt::Debug for Web {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Web({} entries, {} kinds, {} categories)", 
-            self.stats.total_entries, 
-            self.stats.total_kinds,
-            self.stats.total_categories)
+impl Debug for Web {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Web({} entries, {} kinds, {} categories)",
+            self.stats.total_entries, self.stats.total_kinds, self.stats.total_categories
+        )
     }
 }
 impl Display for Web {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Web({} entries, {} kinds, {} categories)", 
-            self.stats.total_entries, 
-            self.stats.total_kinds,
-            self.stats.total_categories)
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "Web({} entries, {} kinds, {} categories)",
+            self.stats.total_entries, self.stats.total_kinds, self.stats.total_categories
+        )
     }
 }
 #[cfg(test)]
@@ -2302,7 +2769,7 @@ mod tests {
     fn test_entry_node() {
         let mut node = Entry::node("Function", "main");
         node.set_attr("return_type", Entry::string("int"));
-        
+
         assert_eq!(node.kind(), Some("Function"));
         assert_eq!(node.name(), Some("main"));
         assert!(node.attr("return_type").is_some());
@@ -2314,7 +2781,7 @@ mod tests {
         let root = site.add_root(Entry::node("Root", "root"));
         let child1 = site.add_child_to(root, Entry::string("child1")).unwrap();
         let child2 = site.add_child_to(root, Entry::string("child2")).unwrap();
-        
+
         assert_eq!(site.len(), 3);
         assert_eq!(site.children_of(root), vec![child1, child2]);
         assert_eq!(site[child1].parent(), Some(root));
@@ -2328,7 +2795,7 @@ mod tests {
         let c1 = site.add_child_to(root, Entry::i32(1)).unwrap();
         let _c2 = site.add_child_to(root, Entry::i32(2)).unwrap();
         let _c1_1 = site.add_child_to(c1, Entry::i32(3)).unwrap();
-        
+
         let order = site.traverse_dfs();
         assert_eq!(order.len(), 4);
         assert_eq!(order[0], root);
@@ -2401,8 +2868,12 @@ mod tests {
 
     #[test]
     fn test_branch_paths() {
-        fn always_true(_: &Entry) -> bool { true }
-        fn always_false(_: &Entry) -> bool { false }
+        fn always_true(_: &Entry) -> bool {
+            true
+        }
+        fn always_false(_: &Entry) -> bool {
+            false
+        }
 
         let branch = Entry::branch_and(
             always_true,

@@ -11,7 +11,7 @@
 //!
 //! Patterns are stored in Web database via the Build trait.
 
-use crate::db::web::{Entry, Build};
+use crate::db::web::{Build, Entry};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::{self, Debug};
 use std::hash::Hash;
@@ -36,6 +36,8 @@ pub enum RuleType {
     OneOf,
     /// Match any token
     Any,
+    /// Match any token except those in the exclusion list (stored in value as pipe-separated)
+    AnyExcept,
     /// Custom validator function (stored as name)
     Custom(String),
 }
@@ -115,18 +117,474 @@ impl LogicalOp {
 }
 
 // ============================================================================
+// Extract Context for Callbacks
+// ============================================================================
+
+/// Mutable context passed to extraction callbacks.
+/// Handlers can extend this with their own data via the `extra` field.
+#[derive(Debug, Clone, Default)]
+pub struct ExtractContext {
+    /// Current token being matched
+    pub current_token: String,
+    /// Current token index
+    pub token_idx: usize,
+    /// All tokens being matched
+    pub tokens: Vec<String>,
+    /// Matched token (if rule matched)
+    pub matched: Option<String>,
+    /// Whether the rule matched
+    pub did_match: bool,
+    /// Modifiers detected (const, static, extern, etc.)
+    pub modifiers: HashSet<String>,
+    /// Named values extracted (e.g., "type" -> "int", "name" -> "foo")
+    pub values: HashMap<String, String>,
+    /// List values (e.g., "params" -> ["int a", "int b"])
+    pub lists: HashMap<String, Vec<String>>,
+    /// Nested pattern results
+    pub nested: HashMap<String, Box<ExtractContext>>,
+    /// Generic flags for handler-specific use
+    pub flags: HashMap<String, bool>,
+    /// Generic counters for handler-specific use  
+    pub counters: HashMap<String, i32>,
+}
+
+impl ExtractContext {
+    pub fn new(tokens: &[String]) -> Self {
+        Self {
+            tokens: tokens.to_vec(),
+            ..Default::default()
+        }
+    }
+
+    /// Set a flag
+    pub fn set_flag(&mut self, name: &str, value: bool) {
+        self.flags.insert(name.to_string(), value);
+    }
+
+    /// Get a flag (defaults to false)
+    pub fn flag(&self, name: &str) -> bool {
+        self.flags.get(name).copied().unwrap_or(false)
+    }
+
+    /// Set a value
+    pub fn set_value(&mut self, name: &str, value: &str) {
+        self.values.insert(name.to_string(), value.to_string());
+    }
+
+    /// Get a value
+    pub fn value(&self, name: &str) -> Option<&str> {
+        self.values.get(name).map(|s| s.as_str())
+    }
+
+    /// Add to a list
+    pub fn push_list(&mut self, name: &str, value: &str) {
+        self.lists
+            .entry(name.to_string())
+            .or_default()
+            .push(value.to_string());
+    }
+
+    /// Get a list
+    pub fn list(&self, name: &str) -> Option<&Vec<String>> {
+        self.lists.get(name)
+    }
+
+    /// Add modifier
+    pub fn add_modifier(&mut self, modifier: &str) {
+        self.modifiers.insert(modifier.to_string());
+    }
+
+    /// Check modifier
+    pub fn has_modifier(&self, modifier: &str) -> bool {
+        self.modifiers.contains(modifier)
+    }
+
+    /// Increment counter
+    pub fn inc(&mut self, name: &str) {
+        *self.counters.entry(name.to_string()).or_insert(0) += 1;
+    }
+
+    /// Get counter
+    pub fn count(&self, name: &str) -> i32 {
+        self.counters.get(name).copied().unwrap_or(0)
+    }
+
+    /// Store nested context
+    pub fn set_nested(&mut self, name: &str, ctx: ExtractContext) {
+        self.nested.insert(name.to_string(), Box::new(ctx));
+    }
+
+    /// Get nested context
+    pub fn get_nested(&self, name: &str) -> Option<&ExtractContext> {
+        self.nested.get(name).map(|b| b.as_ref())
+    }
+}
+
+/// Callback operation type for pattern rule transformations
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallbackOp {
+    /// Apply the callback (with = true)
+    With,
+    /// Invert/negate the callback (without = false)
+    Without,
+    /// Check condition only, don't modify
+    Check,
+    /// Apply if condition matches
+    ApplyIf,
+    /// Apply unless condition matches
+    ApplyUnless,
+}
+
+impl CallbackOp {
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::With => "with",
+            Self::Without => "without",
+            Self::Check => "check",
+            Self::ApplyIf => "apply_if",
+            Self::ApplyUnless => "apply_unless",
+        }
+    }
+
+    pub fn is_positive(&self) -> bool {
+        matches!(self, Self::With | Self::ApplyIf)
+    }
+}
+
+/// Callback function type for pattern rules.
+///
+/// Enables functional transformations of PatternRule based on conditions.
+/// Can be used to replace if/else chains in handler extract functions.
+///
+/// # Example
+/// ```ignore
+/// let optional_cb = PatternRuleCallback::new("optional", |rule, flag| {
+///     rule.clone().with_optional(flag)
+/// });
+///
+/// // Apply the callback
+/// let optional_rule = optional_cb.with(&base_rule);
+/// // Invert the callback  
+/// let required_rule = optional_cb.without(&base_rule);
+/// ```
+pub struct PatternRuleCallback {
+    /// The callback function: takes a rule and bool flag, returns modified rule
+    inner: Box<dyn Fn(&PatternRule, bool) -> PatternRule + Send + Sync>,
+    /// Name identifier for this callback
+    name: String,
+    /// Description of what this callback does
+    description: String,
+    /// Default operation when called without explicit op
+    default_op: CallbackOp,
+}
+
+impl PatternRuleCallback {
+    /// Create a new callback with a function
+    pub fn new<F>(name: &str, callback: F) -> Self
+    where
+        F: Fn(&PatternRule, bool) -> PatternRule + Send + Sync + 'static,
+    {
+        Self {
+            inner: Box::new(callback),
+            name: name.to_string(),
+            description: String::new(),
+            default_op: CallbackOp::With,
+        }
+    }
+
+    /// Create from a function pointer (for const-like usage)
+    pub fn from_fn(name: &str, callback: fn(&PatternRule, bool) -> PatternRule) -> Self {
+        Self {
+            inner: Box::new(callback),
+            name: name.to_string(),
+            description: String::new(),
+            default_op: CallbackOp::With,
+        }
+    }
+
+    /// Add a description
+    pub fn with_description(mut self, desc: &str) -> Self {
+        self.description = desc.to_string();
+        self
+    }
+
+    /// Set the default operation
+    pub fn with_default_op(mut self, op: CallbackOp) -> Self {
+        self.default_op = op;
+        self
+    }
+
+    /// Apply the callback with flag = true (positive application)
+    pub fn with(&self, rule: &PatternRule) -> PatternRule {
+        (self.inner)(rule, true)
+    }
+
+    /// Apply the callback with flag = false (negative/inverted application)
+    pub fn without(&self, rule: &PatternRule) -> PatternRule {
+        (self.inner)(rule, false)
+    }
+
+    /// Apply with explicit operation
+    pub fn apply(&self, rule: &PatternRule, op: CallbackOp) -> PatternRule {
+        match op {
+            CallbackOp::With => self.with(rule),
+            CallbackOp::Without => self.without(rule),
+            CallbackOp::Check => rule.clone(), // No modification, just return
+            CallbackOp::ApplyIf => self.with(rule),
+            CallbackOp::ApplyUnless => self.without(rule),
+        }
+    }
+
+    /// Apply based on a condition
+    pub fn apply_if(&self, rule: &PatternRule, condition: bool) -> PatternRule {
+        if condition {
+            self.with(rule)
+        } else {
+            rule.clone()
+        }
+    }
+
+    /// Apply inverted based on a condition
+    pub fn apply_unless(&self, rule: &PatternRule, condition: bool) -> PatternRule {
+        if !condition {
+            self.with(rule)
+        } else {
+            rule.clone()
+        }
+    }
+
+    /// Chain multiple callbacks together
+    pub fn chain<'a>(&'a self, other: &'a PatternRuleCallback) -> PatternRuleCallbackChain<'a> {
+        PatternRuleCallbackChain {
+            callbacks: vec![self, other],
+        }
+    }
+
+    /// Get the callback name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// Get the description
+    pub fn description(&self) -> &str {
+        &self.description
+    }
+
+    /// Get the default operation
+    pub fn default_op(&self) -> CallbackOp {
+        self.default_op
+    }
+
+    /// Apply with default operation
+    pub fn apply_default(&self, rule: &PatternRule) -> PatternRule {
+        self.apply(rule, self.default_op)
+    }
+}
+
+/// Extraction callback that can modify context during pattern matching.
+///
+/// This is the key type for inline extraction logic. The callback receives:
+/// - `rule`: The current PatternRule being matched
+/// - `ctx`: Mutable context to store extracted data
+///
+/// Returns the (possibly modified) rule.
+///
+/// # Example
+/// ```ignore
+/// // In handler patterns() method:
+/// PatternRule::type_keyword()
+///     .with_extract(|rule, ctx| {
+///         if ctx.did_match {
+///             ctx.set_value("type", &ctx.matched.clone().unwrap_or_default());
+///         }
+///         rule.clone()
+///     })
+///
+/// // With modifiers:
+/// PatternRule::one_of("const|static|extern")
+///     .with_extract(|rule, ctx| {
+///         if let Some(m) = &ctx.matched {
+///             ctx.add_modifier(m);
+///             ctx.set_flag("is_const", m == "const");
+///         }
+///         rule.clone()
+///     })
+///
+/// // Nested pattern:
+/// PatternRule::exact("{")
+///     .with_extract(|rule, ctx| {
+///         // Parse body between braces as nested pattern
+///         let body_tokens = extract_between(&ctx.tokens, ctx.token_idx, "{", "}");
+///         let mut body_ctx = ExtractContext::new(&body_tokens);
+///         // ... match nested pattern against body_ctx ...
+///         ctx.set_nested("body", body_ctx);
+///         rule.clone()
+///     })
+/// ```
+pub struct ExtractCallback {
+    inner: Box<dyn Fn(&PatternRule, &mut ExtractContext) -> PatternRule + Send + Sync>,
+    name: String,
+}
+
+impl ExtractCallback {
+    /// Create a new extraction callback
+    pub fn new<F>(name: &str, callback: F) -> Self
+    where
+        F: Fn(&PatternRule, &mut ExtractContext) -> PatternRule + Send + Sync + 'static,
+    {
+        Self {
+            inner: Box::new(callback),
+            name: name.to_string(),
+        }
+    }
+
+    /// Apply the callback
+    pub fn apply(&self, rule: &PatternRule, ctx: &mut ExtractContext) -> PatternRule {
+        (self.inner)(rule, ctx)
+    }
+
+    /// Get callback name
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Debug for ExtractCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ExtractCallback")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
+impl Clone for ExtractCallback {
+    fn clone(&self) -> Self {
+        // Can't clone the boxed fn, create a no-op placeholder
+        Self {
+            inner: Box::new(|rule, _| rule.clone()),
+            name: self.name.clone(),
+        }
+    }
+}
+
+/// Chain of callbacks to apply in sequence
+pub struct PatternRuleCallbackChain<'a> {
+    callbacks: Vec<&'a PatternRuleCallback>,
+}
+
+impl<'a> PatternRuleCallbackChain<'a> {
+    /// Add another callback to the chain
+    pub fn then(mut self, callback: &'a PatternRuleCallback) -> Self {
+        self.callbacks.push(callback);
+        self
+    }
+
+    /// Apply all callbacks in sequence with flag = true
+    pub fn with(&self, rule: &PatternRule) -> PatternRule {
+        let mut result = rule.clone();
+        for cb in &self.callbacks {
+            result = cb.with(&result);
+        }
+        result
+    }
+
+    /// Apply all callbacks in sequence with flag = false
+    pub fn without(&self, rule: &PatternRule) -> PatternRule {
+        let mut result = rule.clone();
+        for cb in &self.callbacks {
+            result = cb.without(&result);
+        }
+        result
+    }
+}
+
+impl Debug for PatternRuleCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PatternRuleCallback")
+            .field("name", &self.name)
+            .field("description", &self.description)
+            .field("default_op", &self.default_op)
+            .finish()
+    }
+}
+
+impl Clone for PatternRuleCallback {
+    fn clone(&self) -> Self {
+        // We can't clone the boxed Fn directly, so we create a default wrapper
+        // For full functionality, callbacks should be created fresh or wrapped in Arc
+        Self {
+            inner: Box::new(|rule: &PatternRule, flag: bool| {
+                // Default behavior for cloned callbacks - modify optional flag
+                let mut new_rule = rule.clone();
+                if flag {
+                    new_rule.optional = true;
+                }
+                new_rule
+            }),
+            name: self.name.clone(),
+            description: self.description.clone(),
+            default_op: self.default_op,
+        }
+    }
+}
+
+impl PartialEq for PatternRuleCallback {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.default_op == other.default_op
+    }
+}
+
+impl Eq for PatternRuleCallback {}
+
+impl Build for PatternRuleCallback {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("PatternRuleCallback", &self.name);
+        entry.set_attr("description", Entry::string(&self.description));
+        entry.set_attr("default_op", Entry::string(self.default_op.name()));
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "PatternRuleCallback"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("callback")
+    }
+}
+
+// ============================================================================
 // Pattern Rule
 // ============================================================================
 
+/// Constant for infinite repeats
+pub const REPEAT_INFINITE: i32 = -1;
+/// Constant for no repeats (false)
+pub const REPEAT_NONE: i32 = 0;
+
 /// A single pattern matching rule
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct PatternRule {
     pub rule_type: RuleType,
     pub value: String,
     pub optional: bool,
-    pub can_repeat: bool,
+    /// Number of times this rule can repeat:
+    /// - 0 = no repeat (false)
+    /// - 1+ = specific number of repeats allowed
+    /// - -1 = infinite repeats allowed
+    pub can_repeat: i32,
     pub forbidden_next: Vec<String>,
     pub required_next: Vec<String>,
+    /// Named callbacks for rule transformations: Vec<(name, callback)>
+    pub callbacks: Vec<(String, PatternRuleCallback)>,
+    /// Extraction callback - called during matching to populate context
+    pub extract_cb: Option<ExtractCallback>,
+    /// Nested pattern to match (for recursive structures)
+    pub nested_pattern: Option<Box<Pattern<String>>>,
 }
 
 impl PatternRule {
@@ -136,9 +594,12 @@ impl PatternRule {
             rule_type: RuleType::Exact,
             value: value.to_string(),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -148,9 +609,12 @@ impl PatternRule {
             rule_type: RuleType::TypeKeyword,
             value: String::new(),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -160,9 +624,12 @@ impl PatternRule {
             rule_type: RuleType::Keyword,
             value: String::new(),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -172,9 +639,12 @@ impl PatternRule {
             rule_type: RuleType::Identifier,
             value: String::new(),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -184,9 +654,12 @@ impl PatternRule {
             rule_type: RuleType::OneOf,
             value: options.join("|"),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -196,9 +669,28 @@ impl PatternRule {
             rule_type: RuleType::Any,
             value: String::new(),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
+        }
+    }
+
+    /// Create any-except rule that matches any token except those specified
+    /// Pass exclusions as pipe-separated string, e.g., "}|;|{"
+    pub fn any_except(exclusions: impl Into<String>) -> Self {
+        Self {
+            rule_type: RuleType::AnyExcept,
+            value: exclusions.into(),
+            optional: false,
+            can_repeat: REPEAT_NONE,
+            forbidden_next: Vec::new(),
+            required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -208,9 +700,12 @@ impl PatternRule {
             rule_type: RuleType::Custom(name.into()),
             value: String::new(),
             optional: false,
-            can_repeat: false,
+            can_repeat: REPEAT_NONE,
             forbidden_next: Vec::new(),
             required_next: Vec::new(),
+            callbacks: Vec::new(),
+            extract_cb: None,
+            nested_pattern: None,
         }
     }
 
@@ -220,10 +715,45 @@ impl PatternRule {
         self
     }
 
-    /// Allow rule to repeat
-    pub fn with_can_repeat(mut self, can_repeat: bool) -> Self {
-        self.can_repeat = can_repeat;
+    /// Get/check repeat status:
+    /// - Returns `None` if rule cannot repeat (false)
+    /// - Returns `Some(count)` if rule can repeat (true), where count is:
+    ///   - `-1` for infinite repeats
+    ///   - `1+` for specific number of repeats
+    pub fn repeatable(&self) -> Option<i32> {
+        if self.can_repeat == REPEAT_NONE {
+            None
+        } else {
+            Some(self.can_repeat)
+        }
+    }
+
+    /// Set repeat count (builder pattern)
+    /// - `0` = no repeat
+    /// - `1+` = specific number of repeats
+    /// - `-1` = infinite repeats
+    pub fn repeat(mut self, count: i32) -> Self {
+        self.can_repeat = count;
         self
+    }
+
+    /// Convenience: check if rule can repeat (any non-zero value)
+    pub fn can_repeat(&self) -> bool {
+        self.repeatable().is_some()
+    }
+
+    /// Convenience: check if rule can repeat infinitely
+    pub fn is_infinite(&self) -> bool {
+        self.repeatable() == Some(REPEAT_INFINITE)
+    }
+
+    /// Convenience: get max repeats (None for infinite, Some(0) for no repeat)
+    pub fn max_repeats(&self) -> Option<i32> {
+        match self.repeatable() {
+            None => Some(0),
+            Some(REPEAT_INFINITE) => None,
+            Some(n) => Some(n),
+        }
     }
 
     /// Add forbidden next tokens
@@ -236,6 +766,496 @@ impl PatternRule {
     pub fn with_required_next(mut self, required: Vec<String>) -> Self {
         self.required_next = required;
         self
+    }
+
+    /// Add a named callback function
+    pub fn with_callback(mut self, name: &str, callback: PatternRuleCallback) -> Self {
+        // Remove existing callback with same name if present
+        self.callbacks.retain(|(n, _)| n != name);
+        self.callbacks.push((name.to_string(), callback));
+        self
+    }
+
+    /// Add a callback using its internal name
+    pub fn add_callback(mut self, callback: PatternRuleCallback) -> Self {
+        let name = callback.name().to_string();
+        self.callbacks.retain(|(n, _)| n != &name);
+        self.callbacks.push((name, callback));
+        self
+    }
+
+    /// Check if this rule has any callbacks
+    pub fn has_callbacks(&self) -> bool {
+        !self.callbacks.is_empty()
+    }
+
+    /// Check if this rule has a specific named callback
+    pub fn has_callback(&self, name: &str) -> bool {
+        self.callbacks.iter().any(|(n, _)| n == name)
+    }
+
+    /// Get a callback by name
+    pub fn get_callback(&self, name: &str) -> Option<&PatternRuleCallback> {
+        self.callbacks
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, cb)| cb)
+    }
+
+    /// Get all callback names
+    pub fn callback_names(&self) -> Vec<&str> {
+        self.callbacks.iter().map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Get all callbacks
+    pub fn get_callbacks(&self) -> &[(String, PatternRuleCallback)] {
+        &self.callbacks
+    }
+
+    /// Remove a callback by name
+    pub fn remove_callback(mut self, name: &str) -> Self {
+        self.callbacks.retain(|(n, _)| n != name);
+        self
+    }
+
+    /// Add an inline extraction callback
+    ///
+    /// The callback is called during pattern matching and can modify
+    /// the ExtractContext to store extracted data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// PatternRule::type_keyword()
+    ///     .with_extract(|rule, ctx| {
+    ///         if ctx.did_match {
+    ///             ctx.set_value("type", &ctx.matched.clone().unwrap_or_default());
+    ///         }
+    ///         rule.clone()
+    ///     })
+    /// ```
+    pub fn with_extract<F>(mut self, callback: F) -> Self
+    where
+        F: Fn(&PatternRule, &mut ExtractContext) -> PatternRule + Send + Sync + 'static,
+    {
+        self.extract_cb = Some(ExtractCallback::new("extract", callback));
+        self
+    }
+
+    /// Add a named extraction callback
+    pub fn with_named_extract<F>(mut self, name: &str, callback: F) -> Self
+    where
+        F: Fn(&PatternRule, &mut ExtractContext) -> PatternRule + Send + Sync + 'static,
+    {
+        self.extract_cb = Some(ExtractCallback::new(name, callback));
+        self
+    }
+
+    /// Add a nested pattern to match within this rule
+    ///
+    /// Useful for recursive structures like nested braces or parentheses.
+    pub fn with_nested(mut self, pattern: Pattern<String>) -> Self {
+        self.nested_pattern = Some(Box::new(pattern));
+        self
+    }
+
+    /// Check if this rule has an extraction callback
+    pub fn has_extract(&self) -> bool {
+        self.extract_cb.is_some()
+    }
+
+    /// Check if this rule has a nested pattern
+    pub fn has_nested(&self) -> bool {
+        self.nested_pattern.is_some()
+    }
+
+    /// Apply the extraction callback if present
+    pub fn apply_extract(&self, ctx: &mut ExtractContext) -> PatternRule {
+        if let Some(cb) = &self.extract_cb {
+            cb.apply(self, ctx)
+        } else {
+            self.clone()
+        }
+    }
+
+    /// Apply a specific named callback with flag = true
+    pub fn apply_callback(&self, name: &str) -> Self {
+        match self.get_callback(name) {
+            Some(cb) => cb.with(self),
+            None => self.clone(),
+        }
+    }
+
+    /// Apply a specific named callback with flag = false
+    pub fn apply_callback_inverted(&self, name: &str) -> Self {
+        match self.get_callback(name) {
+            Some(cb) => cb.without(self),
+            None => self.clone(),
+        }
+    }
+
+    /// Apply a named callback based on a condition
+    pub fn apply_callback_if(&self, name: &str, condition: bool) -> Self {
+        match self.get_callback(name) {
+            Some(cb) => cb.apply_if(self, condition),
+            None => self.clone(),
+        }
+    }
+
+    /// Apply a specific callback operation by name
+    pub fn apply_callback_op(&self, name: &str, op: CallbackOp) -> Self {
+        match self.get_callback(name) {
+            Some(cb) => cb.apply(self, op),
+            None => self.clone(),
+        }
+    }
+
+    /// Apply all callbacks in sequence with flag = true
+    pub fn apply_all_callbacks(&self) -> Self {
+        let mut result = self.clone();
+        for (_, cb) in &self.callbacks {
+            result = cb.with(&result);
+        }
+        result
+    }
+
+    /// Apply all callbacks in sequence with flag = false
+    pub fn apply_all_callbacks_inverted(&self) -> Self {
+        let mut result = self.clone();
+        for (_, cb) in &self.callbacks {
+            result = cb.without(&result);
+        }
+        result
+    }
+
+    /// Apply callbacks by name list with flag = true
+    pub fn apply_callbacks(&self, names: &[&str]) -> Self {
+        let mut result = self.clone();
+        for name in names {
+            if let Some(cb) = self.get_callback(name) {
+                result = cb.with(&result);
+            }
+        }
+        result
+    }
+
+    /// Set the optional flag directly (for callback use)
+    pub fn with_optional(mut self, optional: bool) -> Self {
+        self.optional = optional;
+        self
+    }
+
+    /// Alias for repeat() - set the can_repeat value directly
+    /// - 0 = no repeat, 1+ = specific count, -1 = infinite
+    pub fn with_repeat(mut self, count: i32) -> Self {
+        self.can_repeat = count;
+        self
+    }
+
+    /// Add a single forbidden next token
+    pub fn forbid_next(mut self, token: &str) -> Self {
+        if !self.forbidden_next.contains(&token.to_string()) {
+            self.forbidden_next.push(token.to_string());
+        }
+        self
+    }
+
+    /// Add a single required next token
+    pub fn require_next(mut self, token: &str) -> Self {
+        if !self.required_next.contains(&token.to_string()) {
+            self.required_next.push(token.to_string());
+        }
+        self
+    }
+
+    /// Create a modified copy using an external callback (not stored)
+    pub fn modified_by(self, callback: &PatternRuleCallback) -> Self {
+        callback.with(&self)
+    }
+
+    /// Create a modified copy using inverted external callback (not stored)
+    pub fn modified_without(self, callback: &PatternRuleCallback) -> Self {
+        callback.without(&self)
+    }
+
+    // ========================================================================
+    // Callback Factory Methods
+    // ========================================================================
+
+    /// Create a callback that makes rules optional
+    pub fn optional_callback() -> PatternRuleCallback {
+        PatternRuleCallback::new("optional", |rule, flag| {
+            let mut r = rule.clone();
+            r.optional = flag;
+            r
+        })
+        .with_description("Makes the rule optional (can match zero times)")
+    }
+
+    /// Create a callback that makes rules repeatable (infinite)
+    pub fn repeatable_callback() -> PatternRuleCallback {
+        PatternRuleCallback::new("repeatable", |rule, flag| {
+            let mut r = rule.clone();
+            r.can_repeat = if flag { REPEAT_INFINITE } else { REPEAT_NONE };
+            r
+        })
+        .with_description("Makes the rule repeatable (infinite repeats when true)")
+    }
+
+    /// Create a callback that sets a specific repeat count
+    pub fn repeat_count_callback(count: i32) -> PatternRuleCallback {
+        PatternRuleCallback::new("repeat_count", move |rule, flag| {
+            let mut r = rule.clone();
+            r.can_repeat = if flag { count } else { REPEAT_NONE };
+            r
+        })
+        .with_description("Sets specific repeat count when true, disables when false")
+    }
+
+    /// Create a callback that adds/removes a forbidden next token
+    pub fn forbid_next_callback(token: &str) -> PatternRuleCallback {
+        let token = token.to_string();
+        PatternRuleCallback::new("forbid_next", move |rule, flag| {
+            let mut r = rule.clone();
+            if flag {
+                if !r.forbidden_next.contains(&token) {
+                    r.forbidden_next.push(token.clone());
+                }
+            } else {
+                r.forbidden_next.retain(|t| t != &token);
+            }
+            r
+        })
+        .with_description("Adds/removes a forbidden next token")
+    }
+
+    /// Create a callback that adds/removes a required next token
+    pub fn require_next_callback(token: &str) -> PatternRuleCallback {
+        let token = token.to_string();
+        PatternRuleCallback::new("require_next", move |rule, flag| {
+            let mut r = rule.clone();
+            if flag {
+                if !r.required_next.contains(&token) {
+                    r.required_next.push(token.clone());
+                }
+            } else {
+                r.required_next.retain(|t| t != &token);
+            }
+            r
+        })
+        .with_description("Adds/removes a required next token")
+    }
+
+    /// Create a callback that sets the rule type
+    pub fn set_type_callback(rule_type: RuleType) -> PatternRuleCallback {
+        PatternRuleCallback::new("set_type", move |rule, flag| {
+            let mut r = rule.clone();
+            if flag {
+                r.rule_type = rule_type.clone();
+            }
+            r
+        })
+        .with_description("Sets the rule type")
+    }
+
+    /// Create a callback that sets the rule value
+    pub fn set_value_callback(value: &str) -> PatternRuleCallback {
+        let value = value.to_string();
+        PatternRuleCallback::new("set_value", move |rule, flag| {
+            let mut r = rule.clone();
+            if flag {
+                r.value = value.clone();
+            }
+            r
+        })
+        .with_description("Sets the rule value")
+    }
+}
+
+// ============================================================================
+// Pattern Capture (for extraction)
+// ============================================================================
+
+/// A captured segment from pattern matching
+#[derive(Debug, Clone, Default)]
+pub struct Capture {
+    /// The rule index that captured this
+    pub rule_idx: usize,
+    /// Start token index (inclusive)
+    pub start: usize,
+    /// End token index (exclusive)
+    pub end: usize,
+    /// The captured tokens
+    pub tokens: Vec<String>,
+    /// Rule type that matched
+    pub rule_type: Option<RuleType>,
+    /// Whether this was from a repeating rule
+    pub repeated: bool,
+}
+
+impl Capture {
+    /// Get single token (if exactly one captured)
+    pub fn single(&self) -> Option<&str> {
+        if self.tokens.len() == 1 {
+            Some(&self.tokens[0])
+        } else {
+            None
+        }
+    }
+
+    /// Get first token
+    pub fn first(&self) -> Option<&str> {
+        self.tokens.first().map(|s| s.as_str())
+    }
+
+    /// Get all tokens joined
+    pub fn joined(&self, sep: &str) -> String {
+        self.tokens.join(sep)
+    }
+
+    /// Check if empty
+    pub fn is_empty(&self) -> bool {
+        self.tokens.is_empty()
+    }
+
+    /// Get token count
+    pub fn len(&self) -> usize {
+        self.tokens.len()
+    }
+}
+
+/// Extracted data from a pattern match (for handler use)
+#[derive(Debug, Clone, Default)]
+pub struct ExtractedMatch {
+    /// Pattern name that matched
+    pub pattern_name: String,
+    /// Confidence score (0.0 - 1.0)
+    pub confidence: f64,
+    /// Total tokens consumed
+    pub tokens_consumed: usize,
+    /// Captures indexed by rule index
+    pub captures: Vec<Capture>,
+    /// Named captures (rule value -> capture)
+    pub named: HashMap<String, Capture>,
+    /// Tokens between delimiters (key = "open:close", e.g., "{:}")
+    pub delimited: HashMap<String, Vec<String>>,
+    /// Modifiers found (const, static, extern, etc.)
+    pub modifiers: HashSet<String>,
+    /// The full matched token sequence
+    pub matched_tokens: Vec<String>,
+}
+
+impl ExtractedMatch {
+    /// Create new empty match
+    pub fn new(pattern_name: &str) -> Self {
+        Self {
+            pattern_name: pattern_name.to_string(),
+            ..Default::default()
+        }
+    }
+
+    /// Get capture by rule index
+    pub fn get(&self, rule_idx: usize) -> Option<&Capture> {
+        self.captures.get(rule_idx)
+    }
+
+    /// Get capture by name (exact match on rule value)
+    pub fn get_named(&self, name: &str) -> Option<&Capture> {
+        self.named.get(name)
+    }
+
+    /// Get single token by rule index
+    pub fn token(&self, rule_idx: usize) -> Option<&str> {
+        self.captures.get(rule_idx).and_then(|c| c.single())
+    }
+
+    /// Get first identifier captured
+    pub fn identifier(&self) -> Option<&str> {
+        self.captures
+            .iter()
+            .find(|c| matches!(c.rule_type, Some(RuleType::Identifier)))
+            .and_then(|c| c.first())
+    }
+
+    /// Get first type keyword captured
+    pub fn type_keyword(&self) -> Option<&str> {
+        self.captures
+            .iter()
+            .find(|c| matches!(c.rule_type, Some(RuleType::TypeKeyword)))
+            .and_then(|c| c.first())
+    }
+
+    /// Get all type keywords captured (handles repeated type rules)
+    pub fn type_keywords(&self) -> Vec<&str> {
+        self.captures
+            .iter()
+            .filter(|c| matches!(c.rule_type, Some(RuleType::TypeKeyword)))
+            .flat_map(|c| c.tokens.iter().map(|s| s.as_str()))
+            .collect()
+    }
+
+    /// Get tokens between delimiters (e.g., between "{" and "}")
+    pub fn between(&self, open: &str, close: &str) -> Option<&Vec<String>> {
+        let key = format!("{}:{}", open, close);
+        self.delimited.get(&key)
+    }
+
+    /// Check if a modifier is present
+    pub fn has_modifier(&self, modifier: &str) -> bool {
+        self.modifiers.contains(modifier)
+    }
+
+    /// Get all captures of a specific rule type
+    pub fn by_type(&self, rule_type: &RuleType) -> Vec<&Capture> {
+        self.captures
+            .iter()
+            .filter(|c| c.rule_type.as_ref() == Some(rule_type))
+            .collect()
+    }
+
+    /// Get tokens after a specific exact match
+    pub fn after(&self, exact: &str) -> Option<Vec<&str>> {
+        let mut found = false;
+        let mut result = Vec::new();
+        for cap in &self.captures {
+            if found {
+                result.extend(cap.tokens.iter().map(|s| s.as_str()));
+            } else if cap.tokens.iter().any(|t| t == exact) {
+                found = true;
+            }
+        }
+        if found && !result.is_empty() {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// Get tokens before a specific exact match
+    pub fn before(&self, exact: &str) -> Option<Vec<&str>> {
+        let mut result = Vec::new();
+        for cap in &self.captures {
+            if cap.tokens.iter().any(|t| t == exact) {
+                break;
+            }
+            result.extend(cap.tokens.iter().map(|s| s.as_str()));
+        }
+        if !result.is_empty() {
+            Some(result)
+        } else {
+            None
+        }
+    }
+
+    /// Find position of an exact token match
+    pub fn position(&self, exact: &str) -> Option<usize> {
+        self.matched_tokens.iter().position(|t| t == exact)
+    }
+
+    /// Get slice of matched tokens
+    pub fn slice(&self, start: usize, end: usize) -> &[String] {
+        let end = end.min(self.matched_tokens.len());
+        let start = start.min(end);
+        &self.matched_tokens[start..end]
     }
 }
 
@@ -383,72 +1403,104 @@ impl<T> Pattern<T> {
     /// Convenience accessors for common fields
     pub fn id(&self) -> usize {
         match self {
-            Pattern::Definition { id, .. } | Pattern::Literal { id, .. } |
-            Pattern::Predicate { id, .. } | Pattern::Wildcard { id, .. } |
-            Pattern::Sequence { id, .. } | Pattern::Choice { id, .. } |
-            Pattern::Optional { id, .. } | Pattern::Repeat { id, .. } |
-            Pattern::Branch { id, .. } => *id,
+            Pattern::Definition { id, .. }
+            | Pattern::Literal { id, .. }
+            | Pattern::Predicate { id, .. }
+            | Pattern::Wildcard { id, .. }
+            | Pattern::Sequence { id, .. }
+            | Pattern::Choice { id, .. }
+            | Pattern::Optional { id, .. }
+            | Pattern::Repeat { id, .. }
+            | Pattern::Branch { id, .. } => *id,
         }
     }
-    
+
     pub fn name(&self) -> &str {
         match self {
-            Pattern::Definition { name, .. } | Pattern::Literal { name, .. } |
-            Pattern::Predicate { name, .. } | Pattern::Wildcard { name, .. } |
-            Pattern::Sequence { name, .. } | Pattern::Choice { name, .. } |
-            Pattern::Optional { name, .. } | Pattern::Repeat { name, .. } |
-            Pattern::Branch { name, .. } => name,
+            Pattern::Definition { name, .. }
+            | Pattern::Literal { name, .. }
+            | Pattern::Predicate { name, .. }
+            | Pattern::Wildcard { name, .. }
+            | Pattern::Sequence { name, .. }
+            | Pattern::Choice { name, .. }
+            | Pattern::Optional { name, .. }
+            | Pattern::Repeat { name, .. }
+            | Pattern::Branch { name, .. } => name,
         }
     }
-    
+
     pub fn category(&self) -> &str {
         match self {
-            Pattern::Definition { category, .. } | Pattern::Literal { category, .. } |
-            Pattern::Predicate { category, .. } | Pattern::Wildcard { category, .. } |
-            Pattern::Sequence { category, .. } | Pattern::Choice { category, .. } |
-            Pattern::Optional { category, .. } | Pattern::Repeat { category, .. } |
-            Pattern::Branch { category, .. } => category,
+            Pattern::Definition { category, .. }
+            | Pattern::Literal { category, .. }
+            | Pattern::Predicate { category, .. }
+            | Pattern::Wildcard { category, .. }
+            | Pattern::Sequence { category, .. }
+            | Pattern::Choice { category, .. }
+            | Pattern::Optional { category, .. }
+            | Pattern::Repeat { category, .. }
+            | Pattern::Branch { category, .. } => category,
         }
     }
-    
+
     pub fn priority(&self) -> i32 {
         match self {
-            Pattern::Definition { priority, .. } | Pattern::Literal { priority, .. } |
-            Pattern::Predicate { priority, .. } | Pattern::Wildcard { priority, .. } |
-            Pattern::Sequence { priority, .. } | Pattern::Choice { priority, .. } |
-            Pattern::Optional { priority, .. } | Pattern::Repeat { priority, .. } |
-            Pattern::Branch { priority, .. } => *priority,
+            Pattern::Definition { priority, .. }
+            | Pattern::Literal { priority, .. }
+            | Pattern::Predicate { priority, .. }
+            | Pattern::Wildcard { priority, .. }
+            | Pattern::Sequence { priority, .. }
+            | Pattern::Choice { priority, .. }
+            | Pattern::Optional { priority, .. }
+            | Pattern::Repeat { priority, .. }
+            | Pattern::Branch { priority, .. } => *priority,
         }
     }
-    
+
     pub fn min_tokens(&self) -> usize {
         match self {
-            Pattern::Definition { min_tokens, .. } | Pattern::Literal { min_tokens, .. } |
-            Pattern::Predicate { min_tokens, .. } | Pattern::Wildcard { min_tokens, .. } |
-            Pattern::Sequence { min_tokens, .. } | Pattern::Choice { min_tokens, .. } |
-            Pattern::Optional { min_tokens, .. } | Pattern::Repeat { min_tokens, .. } |
-            Pattern::Branch { min_tokens, .. } => *min_tokens,
+            Pattern::Definition { min_tokens, .. }
+            | Pattern::Literal { min_tokens, .. }
+            | Pattern::Predicate { min_tokens, .. }
+            | Pattern::Wildcard { min_tokens, .. }
+            | Pattern::Sequence { min_tokens, .. }
+            | Pattern::Choice { min_tokens, .. }
+            | Pattern::Optional { min_tokens, .. }
+            | Pattern::Repeat { min_tokens, .. }
+            | Pattern::Branch { min_tokens, .. } => *min_tokens,
         }
     }
-    
+
     pub fn description(&self) -> &str {
         match self {
-            Pattern::Definition { description, .. } | Pattern::Literal { description, .. } |
-            Pattern::Predicate { description, .. } | Pattern::Wildcard { description, .. } |
-            Pattern::Sequence { description, .. } | Pattern::Choice { description, .. } |
-            Pattern::Optional { description, .. } | Pattern::Repeat { description, .. } |
-            Pattern::Branch { description, .. } => description,
+            Pattern::Definition { description, .. }
+            | Pattern::Literal { description, .. }
+            | Pattern::Predicate { description, .. }
+            | Pattern::Wildcard { description, .. }
+            | Pattern::Sequence { description, .. }
+            | Pattern::Choice { description, .. }
+            | Pattern::Optional { description, .. }
+            | Pattern::Repeat { description, .. }
+            | Pattern::Branch { description, .. } => description,
         }
     }
 
     /// Check if this is a definition pattern
-    pub fn is_definition(&self) -> bool { matches!(self, Pattern::Definition { .. }) }
+    pub fn is_definition(&self) -> bool {
+        matches!(self, Pattern::Definition { .. })
+    }
     /// Check if this is a literal pattern
-    pub fn is_literal(&self) -> bool { matches!(self, Pattern::Literal { .. }) }
+    pub fn is_literal(&self) -> bool {
+        matches!(self, Pattern::Literal { .. })
+    }
     /// Check if this is a predicate pattern
-    pub fn is_predicate(&self) -> bool { matches!(self, Pattern::Predicate { .. }) }
+    pub fn is_predicate(&self) -> bool {
+        matches!(self, Pattern::Predicate { .. })
+    }
     /// Check if this is a wildcard pattern
-    pub fn is_wildcard(&self) -> bool { matches!(self, Pattern::Wildcard { .. }) }
+    pub fn is_wildcard(&self) -> bool {
+        matches!(self, Pattern::Wildcard { .. })
+    }
 
     /// Create a definition pattern
     pub fn definition(id: usize, name: impl Into<String>, rules: Vec<PatternRule>) -> Self {
@@ -491,11 +1543,15 @@ impl<T> Pattern<T> {
     /// Builder: set category
     pub fn with_category(mut self, cat: impl Into<String>) -> Self {
         match &mut self {
-            Pattern::Definition { category, .. } | Pattern::Literal { category, .. } |
-            Pattern::Predicate { category, .. } | Pattern::Wildcard { category, .. } |
-            Pattern::Sequence { category, .. } | Pattern::Choice { category, .. } |
-            Pattern::Optional { category, .. } | Pattern::Repeat { category, .. } |
-            Pattern::Branch { category, .. } => {
+            Pattern::Definition { category, .. }
+            | Pattern::Literal { category, .. }
+            | Pattern::Predicate { category, .. }
+            | Pattern::Wildcard { category, .. }
+            | Pattern::Sequence { category, .. }
+            | Pattern::Choice { category, .. }
+            | Pattern::Optional { category, .. }
+            | Pattern::Repeat { category, .. }
+            | Pattern::Branch { category, .. } => {
                 *category = cat.into();
             }
         }
@@ -505,11 +1561,15 @@ impl<T> Pattern<T> {
     /// Builder: set priority
     pub fn with_priority(mut self, pri: i32) -> Self {
         match &mut self {
-            Pattern::Definition { priority, .. } | Pattern::Literal { priority, .. } |
-            Pattern::Predicate { priority, .. } | Pattern::Wildcard { priority, .. } |
-            Pattern::Sequence { priority, .. } | Pattern::Choice { priority, .. } |
-            Pattern::Optional { priority, .. } | Pattern::Repeat { priority, .. } |
-            Pattern::Branch { priority, .. } => {
+            Pattern::Definition { priority, .. }
+            | Pattern::Literal { priority, .. }
+            | Pattern::Predicate { priority, .. }
+            | Pattern::Wildcard { priority, .. }
+            | Pattern::Sequence { priority, .. }
+            | Pattern::Choice { priority, .. }
+            | Pattern::Optional { priority, .. }
+            | Pattern::Repeat { priority, .. }
+            | Pattern::Branch { priority, .. } => {
                 *priority = pri;
             }
         }
@@ -519,11 +1579,15 @@ impl<T> Pattern<T> {
     /// Builder: set minimum tokens
     pub fn with_min_tokens(mut self, min: usize) -> Self {
         match &mut self {
-            Pattern::Definition { min_tokens, .. } | Pattern::Literal { min_tokens, .. } |
-            Pattern::Predicate { min_tokens, .. } | Pattern::Wildcard { min_tokens, .. } |
-            Pattern::Sequence { min_tokens, .. } | Pattern::Choice { min_tokens, .. } |
-            Pattern::Optional { min_tokens, .. } | Pattern::Repeat { min_tokens, .. } |
-            Pattern::Branch { min_tokens, .. } => {
+            Pattern::Definition { min_tokens, .. }
+            | Pattern::Literal { min_tokens, .. }
+            | Pattern::Predicate { min_tokens, .. }
+            | Pattern::Wildcard { min_tokens, .. }
+            | Pattern::Sequence { min_tokens, .. }
+            | Pattern::Choice { min_tokens, .. }
+            | Pattern::Optional { min_tokens, .. }
+            | Pattern::Repeat { min_tokens, .. }
+            | Pattern::Branch { min_tokens, .. } => {
                 *min_tokens = min;
             }
         }
@@ -533,11 +1597,15 @@ impl<T> Pattern<T> {
     /// Builder: set description
     pub fn with_description(mut self, desc: impl Into<String>) -> Self {
         match &mut self {
-            Pattern::Definition { description, .. } | Pattern::Literal { description, .. } |
-            Pattern::Predicate { description, .. } | Pattern::Wildcard { description, .. } |
-            Pattern::Sequence { description, .. } | Pattern::Choice { description, .. } |
-            Pattern::Optional { description, .. } | Pattern::Repeat { description, .. } |
-            Pattern::Branch { description, .. } => {
+            Pattern::Definition { description, .. }
+            | Pattern::Literal { description, .. }
+            | Pattern::Predicate { description, .. }
+            | Pattern::Wildcard { description, .. }
+            | Pattern::Sequence { description, .. }
+            | Pattern::Choice { description, .. }
+            | Pattern::Optional { description, .. }
+            | Pattern::Repeat { description, .. }
+            | Pattern::Branch { description, .. } => {
                 *description = desc.into();
             }
         }
@@ -551,7 +1619,7 @@ impl<T> Pattern<T> {
         node.set_attr("category", Entry::string(self.category()));
         node.set_attr("priority", Entry::i32(self.priority()));
         node.set_attr("min_tokens", Entry::usize(self.min_tokens()));
-        
+
         let variant_name = match self {
             Pattern::Definition { .. } => "definition",
             Pattern::Literal { .. } => "literal",
@@ -574,32 +1642,119 @@ impl<T> Pattern<T> {
     }
 
     /// Reconstruct a Pattern from an Entry
-    pub fn from_entry(entry: &Entry) -> Option<Pattern<T>> 
-    where T: Default 
+    pub fn from_entry(entry: &Entry) -> Option<Pattern<T>>
+    where
+        T: Default,
     {
         if entry.kind() != Some("Pattern") {
             return None;
         }
-        
+
         let name = entry.name()?.to_string();
         let id = entry.get_number_attr("id").map(|n| n as usize).unwrap_or(0);
         let category = entry.get_string_attr("category").unwrap_or("").to_string();
-        let priority = entry.get_number_attr("priority").map(|n| n as i32).unwrap_or(0);
-        let min_tokens = entry.get_number_attr("min_tokens").map(|n| n as usize).unwrap_or(1);
-        let description = entry.get_string_attr("description").unwrap_or("").to_string();
+        let priority = entry
+            .get_number_attr("priority")
+            .map(|n| n as i32)
+            .unwrap_or(0);
+        let min_tokens = entry
+            .get_number_attr("min_tokens")
+            .map(|n| n as usize)
+            .unwrap_or(1);
+        let description = entry
+            .get_string_attr("description")
+            .unwrap_or("")
+            .to_string();
         let pattern_type = entry.get_string_attr("type").unwrap_or("wildcard");
-        
+
         Some(match pattern_type {
-            "definition" => Pattern::Definition { id, name, category, priority, min_tokens, description, rules: Vec::new() },
-            "literal" => Pattern::Literal { id, name, category, priority, min_tokens, description, elements: Vec::new() },
-            "predicate" => Pattern::Predicate { id, name, category, priority, min_tokens, description, predicate_name: "unknown" },
-            "sequence" => Pattern::Sequence { id, name, category, priority, min_tokens, description, patterns: Vec::new() },
-            "choice" => Pattern::Choice { id, name, category, priority, min_tokens, description, alternatives: Vec::new() },
-            "optional" => Pattern::Optional { id, name: name.clone(), category: category.clone(), priority, min_tokens, description: description.clone(), 
-                inner: Box::new(Pattern::Wildcard { id: 0, name, category, priority: 0, min_tokens: 1, description }) },
-            "repeat" => Pattern::Repeat { id, name: name.clone(), category: category.clone(), priority, min_tokens, description: description.clone(), 
-                inner: Box::new(Pattern::Wildcard { id: 0, name, category, priority: 0, min_tokens: 1, description }), min_repeat: 0, max_repeat: None },
-            _ => Pattern::Wildcard { id, name, category, priority, min_tokens, description },
+            "definition" => Pattern::Definition {
+                id,
+                name,
+                category,
+                priority,
+                min_tokens,
+                description,
+                rules: Vec::new(),
+            },
+            "literal" => Pattern::Literal {
+                id,
+                name,
+                category,
+                priority,
+                min_tokens,
+                description,
+                elements: Vec::new(),
+            },
+            "predicate" => Pattern::Predicate {
+                id,
+                name,
+                category,
+                priority,
+                min_tokens,
+                description,
+                predicate_name: "unknown",
+            },
+            "sequence" => Pattern::Sequence {
+                id,
+                name,
+                category,
+                priority,
+                min_tokens,
+                description,
+                patterns: Vec::new(),
+            },
+            "choice" => Pattern::Choice {
+                id,
+                name,
+                category,
+                priority,
+                min_tokens,
+                description,
+                alternatives: Vec::new(),
+            },
+            "optional" => Pattern::Optional {
+                id,
+                name: name.clone(),
+                category: category.clone(),
+                priority,
+                min_tokens,
+                description: description.clone(),
+                inner: Box::new(Pattern::Wildcard {
+                    id: 0,
+                    name,
+                    category,
+                    priority: 0,
+                    min_tokens: 1,
+                    description,
+                }),
+            },
+            "repeat" => Pattern::Repeat {
+                id,
+                name: name.clone(),
+                category: category.clone(),
+                priority,
+                min_tokens,
+                description: description.clone(),
+                inner: Box::new(Pattern::Wildcard {
+                    id: 0,
+                    name,
+                    category,
+                    priority: 0,
+                    min_tokens: 1,
+                    description,
+                }),
+                min_repeat: 0,
+                max_repeat: None,
+            },
+            _ => Pattern::Wildcard {
+                id,
+                name,
+                category,
+                priority,
+                min_tokens,
+                description,
+            },
         })
     }
 }
@@ -610,7 +1765,9 @@ impl Pattern<String> {
     /// Returns confidence score (0.0 - 1.0) or None if no match
     pub fn matches_tokens(&self, tokens: &[String]) -> Option<f64> {
         let rules = match self {
-            Pattern::Definition { rules, min_tokens, .. } => {
+            Pattern::Definition {
+                rules, min_tokens, ..
+            } => {
                 if tokens.len() < *min_tokens {
                     return None;
                 }
@@ -618,30 +1775,34 @@ impl Pattern<String> {
             }
             _ => return Some(0.5), // Non-definition patterns use simple matching
         };
-        
+
         // If no rules defined, use simple first-token matching
         if rules.is_empty() {
             return Some(0.5);
         }
-        
+
         let mut token_idx = 0;
         let mut rule_idx = 0;
         let mut matched_rules = 0;
-        
+
         while rule_idx < rules.len() && token_idx < tokens.len() {
             let rule = &rules[rule_idx];
             let token = &tokens[token_idx];
-            
+
             let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
-            
+
             if matches {
                 matched_rules += 1;
                 token_idx += 1;
-                
+
                 // Handle repeating rules
-                if rule.can_repeat && token_idx < tokens.len() {
+                if rule.can_repeat != REPEAT_NONE && token_idx < tokens.len() {
                     while token_idx < tokens.len() {
-                        if Self::rule_matches_token(rule, &tokens[token_idx], tokens.get(token_idx + 1)) {
+                        if Self::rule_matches_token(
+                            rule,
+                            &tokens[token_idx],
+                            tokens.get(token_idx + 1),
+                        ) {
                             token_idx += 1;
                         } else {
                             break;
@@ -655,7 +1816,7 @@ impl Pattern<String> {
                 return None;
             }
         }
-        
+
         // Check remaining rules are optional
         while rule_idx < rules.len() {
             if !rules[rule_idx].optional {
@@ -663,7 +1824,7 @@ impl Pattern<String> {
             }
             rule_idx += 1;
         }
-        
+
         // Calculate confidence based on how many rules matched
         let total_rules = rules.iter().filter(|r| !r.optional).count();
         if total_rules == 0 {
@@ -672,7 +1833,7 @@ impl Pattern<String> {
             Some((matched_rules as f64 / total_rules as f64).min(1.0) * 0.9 + 0.1)
         }
     }
-    
+
     /// Check if a single rule matches a token
     fn rule_matches_token(rule: &PatternRule, token: &str, next_token: Option<&String>) -> bool {
         if let Some(next) = next_token {
@@ -680,31 +1841,304 @@ impl Pattern<String> {
                 return false;
             }
         }
-        
+
         match &rule.rule_type {
             RuleType::Exact => token == rule.value,
             RuleType::TypeKeyword => {
-                crate::db::keyword::is_type_keyword(token) ||
-                matches!(token, "bool" | "size_t" | 
-                        "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t" |
-                        "int8_t" | "int16_t" | "int32_t" | "int64_t")
+                crate::db::keyword::is_type_keyword(token)
+                    || matches!(
+                        token,
+                        "bool"
+                            | "size_t"
+                            | "uint8_t"
+                            | "uint16_t"
+                            | "uint32_t"
+                            | "uint64_t"
+                            | "int8_t"
+                            | "int16_t"
+                            | "int32_t"
+                            | "int64_t"
+                    )
             }
             RuleType::Keyword => {
-                crate::db::keyword::is_control_flow(token) ||
-                crate::db::keyword::is_storage_class(token) ||
-                crate::db::keyword::is_type_qualifier(token) ||
-                matches!(token, "typedef" | "inline")
+                crate::db::keyword::is_control_flow(token)
+                    || crate::db::keyword::is_storage_class(token)
+                    || crate::db::keyword::is_type_qualifier(token)
+                    || matches!(token, "typedef" | "inline")
             }
             RuleType::Identifier => {
-                !token.is_empty() && 
-                (token.chars().next().unwrap().is_alphabetic() || token.starts_with('_')) &&
-                token.chars().all(|c| c.is_alphanumeric() || c == '_')
+                !token.is_empty()
+                    && (token.chars().next().unwrap().is_alphabetic() || token.starts_with('_'))
+                    && token.chars().all(|c| c.is_alphanumeric() || c == '_')
             }
-            RuleType::OneOf => {
-                rule.value.split('|').any(|opt| opt == token)
-            }
+            RuleType::OneOf => rule.value.split('|').any(|opt| opt == token),
             RuleType::Any => true,
+            RuleType::AnyExcept => {
+                // Exclusions stored as pipe-separated in rule.value
+                !rule.value.split('|').any(|excl| excl == token)
+            }
             RuleType::Custom(_) => true,
+        }
+    }
+
+    /// Extract tokens with captures - returns ExtractedMatch with captured data per rule
+    /// This allows handlers to easily access matched tokens by rule index or type
+    pub fn extract_with_captures(&self, tokens: &[String]) -> Option<ExtractedMatch> {
+        let (rules, pattern_name) = match self {
+            Pattern::Definition {
+                rules,
+                min_tokens,
+                name,
+                ..
+            } => {
+                if tokens.len() < *min_tokens {
+                    return None;
+                }
+                (rules, name.as_str())
+            }
+            _ => return None,
+        };
+
+        if rules.is_empty() {
+            return None;
+        }
+
+        let mut result = ExtractedMatch::new(pattern_name);
+        result.matched_tokens = tokens.to_vec();
+
+        let mut token_idx = 0;
+        let mut rule_idx = 0;
+
+        // Common C modifiers to detect
+        let modifiers = [
+            "const", "static", "extern", "volatile", "inline", "register", "unsigned", "signed",
+        ];
+
+        while rule_idx < rules.len() && token_idx < tokens.len() {
+            let rule = &rules[rule_idx];
+            let token = &tokens[token_idx];
+
+            // Track modifiers
+            if modifiers.contains(&token.as_str()) {
+                result.modifiers.insert(token.clone());
+            }
+
+            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
+
+            if matches {
+                let start = token_idx;
+                token_idx += 1;
+
+                // Handle repeating rules - collect all matching tokens
+                let mut repeated = false;
+                if rule.can_repeat != REPEAT_NONE && token_idx < tokens.len() {
+                    while token_idx < tokens.len() {
+                        if Self::rule_matches_token(
+                            rule,
+                            &tokens[token_idx],
+                            tokens.get(token_idx + 1),
+                        ) {
+                            // Track modifiers in repeated tokens too
+                            if modifiers.contains(&tokens[token_idx].as_str()) {
+                                result.modifiers.insert(tokens[token_idx].clone());
+                            }
+                            token_idx += 1;
+                            repeated = true;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                // Create capture for this rule
+                let capture = Capture {
+                    rule_idx,
+                    start,
+                    end: token_idx,
+                    tokens: tokens[start..token_idx].to_vec(),
+                    rule_type: Some(rule.rule_type.clone()),
+                    repeated,
+                };
+
+                // Add to named captures if rule has a value (for Exact rules)
+                if !rule.value.is_empty() {
+                    result.named.insert(rule.value.clone(), capture.clone());
+                }
+
+                result.captures.push(capture);
+                rule_idx += 1;
+            } else if rule.optional {
+                // Add empty capture for optional rules that didn't match
+                result.captures.push(Capture {
+                    rule_idx,
+                    start: token_idx,
+                    end: token_idx,
+                    tokens: Vec::new(),
+                    rule_type: Some(rule.rule_type.clone()),
+                    repeated: false,
+                });
+                rule_idx += 1;
+            } else {
+                return None;
+            }
+        }
+
+        // Check remaining rules are optional
+        while rule_idx < rules.len() {
+            if !rules[rule_idx].optional {
+                return None;
+            }
+            result.captures.push(Capture {
+                rule_idx,
+                start: token_idx,
+                end: token_idx,
+                tokens: Vec::new(),
+                rule_type: Some(rules[rule_idx].rule_type.clone()),
+                repeated: false,
+            });
+            rule_idx += 1;
+        }
+
+        result.tokens_consumed = token_idx;
+
+        // Extract delimited sections (content between matching brackets)
+        Self::extract_delimited(&mut result, tokens);
+
+        // Calculate confidence
+        let total_rules = rules.iter().filter(|r| !r.optional).count();
+        result.confidence = if total_rules == 0 {
+            0.7
+        } else {
+            let matched = result
+                .captures
+                .iter()
+                .filter(|c| !c.tokens.is_empty())
+                .count();
+            (matched as f64 / total_rules as f64).min(1.0) * 0.9 + 0.1
+        };
+
+        Some(result)
+    }
+
+    /// Execute extraction pattern with callbacks, returning populated ExtractContext
+    /// This runs the ExtractCallback closures attached to each rule as tokens are matched
+    pub fn run_extraction(&self, tokens: &[String]) -> Option<ExtractContext> {
+        let rules = match self {
+            Pattern::Definition {
+                rules, min_tokens, ..
+            } => {
+                if tokens.len() < *min_tokens {
+                    return None;
+                }
+                rules
+            }
+            _ => return None,
+        };
+
+        if rules.is_empty() {
+            return None;
+        }
+
+        let mut ctx = ExtractContext::new(tokens);
+        let mut token_idx = 0;
+        let mut rule_idx = 0;
+
+        while rule_idx < rules.len() && token_idx < tokens.len() {
+            let rule = &rules[rule_idx];
+            let token = &tokens[token_idx];
+
+            // Set current token in context for callback access
+            ctx.current_token = token.clone();
+            ctx.token_idx = token_idx;
+
+            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
+            ctx.did_match = matches;
+
+            if matches {
+                ctx.matched = Some(token.clone());
+
+                // Execute extraction callback if present
+                if rule.has_extract() {
+                    rule.apply_extract(&mut ctx);
+                }
+
+                token_idx += 1;
+
+                // Handle repeating rules
+                if rule.can_repeat != REPEAT_NONE && token_idx < tokens.len() {
+                    while token_idx < tokens.len() {
+                        let next_token = &tokens[token_idx];
+                        if Self::rule_matches_token(rule, next_token, tokens.get(token_idx + 1)) {
+                            ctx.current_token = next_token.clone();
+                            ctx.token_idx = token_idx;
+                            ctx.did_match = true;
+                            ctx.matched = Some(next_token.clone());
+
+                            if rule.has_extract() {
+                                rule.apply_extract(&mut ctx);
+                            }
+
+                            token_idx += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+
+                rule_idx += 1;
+            } else if rule.optional {
+                ctx.matched = None;
+                ctx.did_match = false;
+
+                // Still call callback for optional rules that didn't match
+                if rule.has_extract() {
+                    rule.apply_extract(&mut ctx);
+                }
+
+                rule_idx += 1;
+            } else {
+                return None;
+            }
+        }
+
+        // Check remaining rules are optional
+        while rule_idx < rules.len() {
+            if !rules[rule_idx].optional {
+                return None;
+            }
+            rule_idx += 1;
+        }
+
+        Some(ctx)
+    }
+
+    /// Extract content between matching delimiters
+    fn extract_delimited(result: &mut ExtractedMatch, tokens: &[String]) {
+        let pairs = [("{", "}"), ("(", ")"), ("[", "]")];
+
+        for (open, close) in pairs {
+            let mut depth = 0;
+            let mut start_idx = None;
+            let mut content = Vec::new();
+
+            for (idx, token) in tokens.iter().enumerate() {
+                if token == open {
+                    if depth == 0 {
+                        start_idx = Some(idx);
+                    }
+                    depth += 1;
+                } else if token == close {
+                    depth -= 1;
+                    if depth == 0 && start_idx.is_some() {
+                        let key = format!("{}:{}", open, close);
+                        result.delimited.insert(key, content.clone());
+                        content.clear();
+                        start_idx = None;
+                    }
+                } else if depth > 0 {
+                    content.push(token.clone());
+                }
+            }
         }
     }
 }
@@ -714,20 +2148,20 @@ impl<T: Clone + Debug> Build for Pattern<T> {
     fn to_entry(&self) -> Entry {
         Pattern::to_entry(self)
     }
-    
+
     fn kind(&self) -> &str {
         "Pattern"
     }
-    
+
     fn name(&self) -> Option<&str> {
         Some(Pattern::name(self))
     }
-    
+
     fn category(&self) -> Option<&str> {
         let cat = Pattern::category(self);
         if cat.is_empty() { None } else { Some(cat) }
     }
-    
+
     fn priority(&self) -> i16 {
         Pattern::priority(self) as i16
     }
@@ -953,12 +2387,12 @@ impl PatternMatch {
         node.set_attr("start", Entry::usize(self.start));
         node.set_attr("end", Entry::usize(self.end));
         node.set_attr("pattern_id", Entry::usize(self.pattern_id));
-        
+
         if !self.actions.is_empty() {
             let actions: Vec<Entry> = self.actions.iter().map(|&a| Entry::u32(a)).collect();
             node.set_attr("actions", Entry::vec(actions));
         }
-        
+
         node
     }
 
@@ -967,11 +2401,20 @@ impl PatternMatch {
         if entry.kind() != Some("PatternMatch") {
             return None;
         }
-        
-        let start = entry.get_number_attr("start").map(|n| n as usize).unwrap_or(0);
-        let end = entry.get_number_attr("end").map(|n| n as usize).unwrap_or(0);
-        let pattern_id = entry.get_number_attr("pattern_id").map(|n| n as usize).unwrap_or(0);
-        
+
+        let start = entry
+            .get_number_attr("start")
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        let end = entry
+            .get_number_attr("end")
+            .map(|n| n as usize)
+            .unwrap_or(0);
+        let pattern_id = entry
+            .get_number_attr("pattern_id")
+            .map(|n| n as usize)
+            .unwrap_or(0);
+
         let mut actions = Vec::new();
         if let Some(actions_vec) = entry.get_vec_attr("actions") {
             for a in actions_vec {
@@ -980,7 +2423,7 @@ impl PatternMatch {
                 }
             }
         }
-        
+
         Some(PatternMatch {
             start,
             end,
@@ -995,11 +2438,11 @@ impl Build for PatternMatch {
     fn to_entry(&self) -> Entry {
         PatternMatch::to_entry(self)
     }
-    
+
     fn kind(&self) -> &str {
         "PatternMatch"
     }
-    
+
     fn name(&self) -> Option<&str> {
         None
     }
@@ -1403,19 +2846,22 @@ impl<T: Clone + Eq + Hash + Debug + PartialOrd> PatternMachine<T> {
         }
 
         all_matches.sort_by(|a, b| {
-            a.start.cmp(&b.start).then_with(|| a.end.cmp(&b.end)).then_with(|| {
-                let pa = self
-                    .patterns
-                    .get(a.pattern_id)
-                    .map(|p| p.priority)
-                    .unwrap_or(0);
-                let pb = self
-                    .patterns
-                    .get(b.pattern_id)
-                    .map(|p| p.priority)
-                    .unwrap_or(0);
-                pb.cmp(&pa)
-            })
+            a.start
+                .cmp(&b.start)
+                .then_with(|| a.end.cmp(&b.end))
+                .then_with(|| {
+                    let pa = self
+                        .patterns
+                        .get(a.pattern_id)
+                        .map(|p| p.priority)
+                        .unwrap_or(0);
+                    let pb = self
+                        .patterns
+                        .get(b.pattern_id)
+                        .map(|p| p.priority)
+                        .unwrap_or(0);
+                    pb.cmp(&pa)
+                })
         });
 
         all_matches
@@ -1437,8 +2883,16 @@ impl<T: Clone + Eq + Hash + Debug + PartialOrd> PatternMachine<T> {
                 .filter(|m| m.start == 0)
                 .max_by(|a, b| {
                     a.end.cmp(&b.end).then_with(|| {
-                        let pa = self.patterns.get(a.pattern_id).map(|p| p.priority).unwrap_or(0);
-                        let pb = self.patterns.get(b.pattern_id).map(|p| p.priority).unwrap_or(0);
+                        let pa = self
+                            .patterns
+                            .get(a.pattern_id)
+                            .map(|p| p.priority)
+                            .unwrap_or(0);
+                        let pb = self
+                            .patterns
+                            .get(b.pattern_id)
+                            .map(|p| p.priority)
+                            .unwrap_or(0);
                         pa.cmp(&pb)
                     })
                 })
@@ -1558,7 +3012,10 @@ impl<'a, T: Clone + Eq + Hash + Debug + PartialOrd> PatternBuilder<'a, T> {
         let next = self.machine.add_node();
         self.machine
             .add_predicate_edge(self.current, pred, name, next);
-        Self { current: next, ..self }
+        Self {
+            current: next,
+            ..self
+        }
     }
 
     /// Optional element
@@ -1574,7 +3031,8 @@ impl<'a, T: Clone + Eq + Hash + Debug + PartialOrd> PatternBuilder<'a, T> {
     pub fn zero_or_more(mut self, value: T) -> Self {
         let next = self.machine.add_node();
         self.machine.add_epsilon_edge(self.current, next);
-        self.machine.add_exact_edge(self.current, value, self.current);
+        self.machine
+            .add_exact_edge(self.current, value, self.current);
         self.current = next;
         self
     }

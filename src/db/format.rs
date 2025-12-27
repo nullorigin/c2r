@@ -3,8 +3,8 @@
 //! Provides a consistent formatting interface for all database types.
 //! Supports multiple output formats: Table, JSON, Text, Tree, Compact, and Custom.
 
-use crate::db::web::{Entry, Web, WebStats};
 use crate::db::json::{DumpGenerator, JsonGenerator};
+use crate::db::web::{Entry, Web, WebStats};
 use std::collections::HashMap;
 use std::fmt::{self, Write};
 
@@ -73,42 +73,42 @@ impl OutputFormat {
 pub trait Formatter {
     /// Format the value using the specified output format
     fn format(&self, fmt: &OutputFormat) -> String;
-    
+
     /// Format as plain text (default implementation)
     fn to_text(&self) -> String {
         self.format(&OutputFormat::Text)
     }
-    
+
     /// Format as table
     fn to_table(&self) -> String {
         self.format(&OutputFormat::Table)
     }
-    
+
     /// Format as pretty JSON
     fn to_json(&self) -> String {
         self.format(&OutputFormat::Json)
     }
-    
+
     /// Format as compact JSON
     fn to_json_compact(&self) -> String {
         self.format(&OutputFormat::JsonCompact)
     }
-    
+
     /// Format as tree view
     fn to_tree(&self) -> String {
         self.format(&OutputFormat::Tree)
     }
-    
+
     /// Format as compact single line
     fn to_compact(&self) -> String {
         self.format(&OutputFormat::Compact)
     }
-    
+
     /// Format as markdown
     fn to_markdown(&self) -> String {
         self.format(&OutputFormat::Markdown)
     }
-    
+
     /// Format as CSV
     fn to_csv(&self) -> String {
         self.format(&OutputFormat::Csv)
@@ -202,9 +202,11 @@ impl Formatter for Entry {
 fn format_entry_text(entry: &Entry, indent: usize) -> String {
     let prefix = "  ".repeat(indent);
     let mut out = String::new();
-    
+
     match entry {
-        Entry::Node { kind, name, attrs, .. } => {
+        Entry::Node {
+            kind, name, attrs, ..
+        } => {
             writeln!(out, "{}[{}] {}", prefix, kind, name).unwrap();
             for (key, value) in attrs {
                 writeln!(out, "{}  {}: {}", prefix, key, entry_value_string(value)).unwrap();
@@ -231,30 +233,64 @@ fn format_entry_text(entry: &Entry, indent: usize) -> String {
 fn format_entry_table(entry: &Entry) -> String {
     let mut out = String::new();
     let width = 78;
-    
+
     writeln!(out, "+{}+", "-".repeat(width)).unwrap();
-    
+
     match entry {
-        Entry::Node { kind, name, attrs, .. } => {
-            writeln!(out, "| {:^width$} |", format!("{}: {}", kind, name), width = width - 2).unwrap();
+        Entry::Node {
+            kind, name, attrs, ..
+        } => {
+            writeln!(
+                out,
+                "| {:^width$} |",
+                format!("{}: {}", kind, name),
+                width = width - 2
+            )
+            .unwrap();
             writeln!(out, "+{}+", "-".repeat(width)).unwrap();
-            
+
             if !attrs.is_empty() {
                 for (key, value) in attrs {
                     let val_str = entry_value_string(value);
-                    writeln!(out, "| {:20} | {:width$} |", key, val_str, width = width - 25).unwrap();
+                    writeln!(
+                        out,
+                        "| {:20} | {:width$} |",
+                        key,
+                        val_str,
+                        width = width - 25
+                    )
+                    .unwrap();
                 }
                 writeln!(out, "+{}+", "-".repeat(width)).unwrap();
             }
         }
         Entry::Vec(items, _) => {
-            writeln!(out, "| {:^width$} |", format!("Vec[{}]", items.len()), width = width - 2).unwrap();
+            writeln!(
+                out,
+                "| {:^width$} |",
+                format!("Vec[{}]", items.len()),
+                width = width - 2
+            )
+            .unwrap();
             writeln!(out, "+{}+", "-".repeat(width)).unwrap();
             for (i, item) in items.iter().enumerate().take(10) {
-                writeln!(out, "| {:4} | {:width$} |", i, entry_value_string(item), width = width - 9).unwrap();
+                writeln!(
+                    out,
+                    "| {:4} | {:width$} |",
+                    i,
+                    entry_value_string(item),
+                    width = width - 9
+                )
+                .unwrap();
             }
             if items.len() > 10 {
-                writeln!(out, "| {:^width$} |", format!("... and {} more", items.len() - 10), width = width - 2).unwrap();
+                writeln!(
+                    out,
+                    "| {:^width$} |",
+                    format!("... and {} more", items.len() - 10),
+                    width = width - 2
+                )
+                .unwrap();
             }
             writeln!(out, "+{}+", "-".repeat(width)).unwrap();
         }
@@ -271,25 +307,60 @@ fn format_entry_tree(entry: &Entry, depth: usize, config: &FormatConfig) -> Stri
     let prefix = if depth == 0 {
         String::new()
     } else {
-        format!("{}{}", config.tree_chars.vertical.repeat(depth - 1), config.tree_chars.branch)
+        format!(
+            "{}{}",
+            config.tree_chars.vertical.repeat(depth - 1),
+            config.tree_chars.branch
+        )
     };
-    
+
     match entry {
-        Entry::Node { kind, name, attrs, links, .. } => {
-            writeln!(out, "{}[{}] {} (links: {})", prefix, kind, name, links.len()).unwrap();
+        Entry::Node {
+            kind,
+            name,
+            attrs,
+            links,
+            ..
+        } => {
+            writeln!(
+                out,
+                "{}[{}] {} (links: {})",
+                prefix,
+                kind,
+                name,
+                links.len()
+            )
+            .unwrap();
             let attr_count = attrs.len();
             for (i, (key, value)) in attrs.iter().enumerate() {
-                let branch = if i == attr_count - 1 { config.tree_chars.last_branch } else { config.tree_chars.branch };
-                let child_prefix = format!("{}{}", config.tree_chars.vertical.repeat(depth), branch);
-                writeln!(out, "{}{}: {}", child_prefix, key, entry_value_string(value)).unwrap();
+                let branch = if i == attr_count - 1 {
+                    config.tree_chars.last_branch
+                } else {
+                    config.tree_chars.branch
+                };
+                let child_prefix =
+                    format!("{}{}", config.tree_chars.vertical.repeat(depth), branch);
+                writeln!(
+                    out,
+                    "{}{}: {}",
+                    child_prefix,
+                    key,
+                    entry_value_string(value)
+                )
+                .unwrap();
             }
         }
         Entry::Vec(items, _) => {
             writeln!(out, "{}Vec[{}]", prefix, items.len()).unwrap();
             for (i, item) in items.iter().enumerate() {
                 let is_last = i == items.len() - 1;
-                let branch = if is_last { config.tree_chars.last_branch } else { config.tree_chars.branch };
-                let child_prefix = format!("{}{}", config.tree_chars.vertical.repeat(depth), branch);
+                let branch = if is_last {
+                    config.tree_chars.last_branch
+                } else {
+                    config.tree_chars.branch
+                };
+                let child_prefix =
+                    format!("{}{}", config.tree_chars.vertical.repeat(depth), branch);
                 write!(out, "{}", child_prefix).unwrap();
                 out.push_str(&format_entry_tree(item, depth + 1, config));
             }
@@ -303,7 +374,9 @@ fn format_entry_tree(entry: &Entry, depth: usize, config: &FormatConfig) -> Stri
 
 fn format_entry_compact(entry: &Entry) -> String {
     match entry {
-        Entry::Node { kind, name, attrs, .. } => {
+        Entry::Node {
+            kind, name, attrs, ..
+        } => {
             if attrs.is_empty() {
                 format!("[{}]{}", kind, name)
             } else {
@@ -319,9 +392,11 @@ fn format_entry_compact(entry: &Entry) -> String {
 fn format_entry_markdown(entry: &Entry, level: usize) -> String {
     let mut out = String::new();
     let heading = "#".repeat(level.min(6).max(1));
-    
+
     match entry {
-        Entry::Node { kind, name, attrs, .. } => {
+        Entry::Node {
+            kind, name, attrs, ..
+        } => {
             writeln!(out, "{} {} `{}`\n", heading, kind, name).unwrap();
             if !attrs.is_empty() {
                 writeln!(out, "| Field | Value |").unwrap();
@@ -346,15 +421,17 @@ fn format_entry_markdown(entry: &Entry, level: usize) -> String {
 
 fn format_entry_csv(entry: &Entry) -> String {
     let mut out = String::new();
-    
+
     match entry {
-        Entry::Node { kind, name, attrs, .. } => {
+        Entry::Node {
+            kind, name, attrs, ..
+        } => {
             // Header row
             let mut headers: Vec<&str> = vec!["kind", "name"];
             let keys: Vec<&String> = attrs.keys().collect();
             headers.extend(keys.iter().map(|k| k.as_str()));
             writeln!(out, "{}", headers.join(",")).unwrap();
-            
+
             // Data row
             let mut values: Vec<String> = vec![kind.clone(), name.clone()];
             for key in &keys {
@@ -365,12 +442,25 @@ fn format_entry_csv(entry: &Entry) -> String {
         Entry::Vec(items, _) => {
             writeln!(out, "index,type,value").unwrap();
             for (i, item) in items.iter().enumerate() {
-                writeln!(out, "{},{},{}", i, item.type_name(), csv_escape(&entry_value_string(item))).unwrap();
+                writeln!(
+                    out,
+                    "{},{},{}",
+                    i,
+                    item.type_name(),
+                    csv_escape(&entry_value_string(item))
+                )
+                .unwrap();
             }
         }
         _ => {
             writeln!(out, "type,value").unwrap();
-            writeln!(out, "{},{}", entry.type_name(), csv_escape(&entry.to_string())).unwrap();
+            writeln!(
+                out,
+                "{},{}",
+                entry.type_name(),
+                csv_escape(&entry.to_string())
+            )
+            .unwrap();
         }
     }
     out
@@ -378,18 +468,21 @@ fn format_entry_csv(entry: &Entry) -> String {
 
 fn format_entry_custom(entry: &Entry, template: &str) -> String {
     let mut result = template.to_string();
-    
+
     result = result.replace("{type}", entry.type_name());
     result = result.replace("{value}", &entry.to_string());
-    
-    if let Entry::Node { kind, name, attrs, .. } = entry {
+
+    if let Entry::Node {
+        kind, name, attrs, ..
+    } = entry
+    {
         result = result.replace("{kind}", kind);
         result = result.replace("{name}", name);
         for (key, value) in attrs {
             result = result.replace(&format!("{{attr:{}}}", key), &entry_value_string(value));
         }
     }
-    
+
     result
 }
 
@@ -440,7 +533,7 @@ impl Formatter for Web {
 fn format_web_text(web: &Web) -> String {
     let mut out = String::new();
     let stats = web.stats();
-    
+
     writeln!(out, "Web Database").unwrap();
     writeln!(out, "============").unwrap();
     writeln!(out, "Total Entries: {}", stats.total_entries).unwrap();
@@ -448,7 +541,7 @@ fn format_web_text(web: &Web) -> String {
     writeln!(out, "Total Categories: {}", stats.total_categories).unwrap();
     writeln!(out, "Build Count: {}", stats.build_count).unwrap();
     writeln!(out).unwrap();
-    
+
     // Show entries by kind
     for kind in web.kinds() {
         let entries = web.by_kind(kind);
@@ -460,7 +553,7 @@ fn format_web_text(web: &Web) -> String {
             writeln!(out, "  ... and {} more", entries.len() - 5).unwrap();
         }
     }
-    
+
     out
 }
 
@@ -468,40 +561,81 @@ fn format_web_table(web: &Web) -> String {
     let mut out = String::new();
     let stats = web.stats();
     let width = 78;
-    
+
     writeln!(out, "+{}+", "=".repeat(width)).unwrap();
     writeln!(out, "| {:^width$} |", "WEB DATABASE", width = width - 2).unwrap();
     writeln!(out, "+{}+", "=".repeat(width)).unwrap();
-    
-    writeln!(out, "| {:30} | {:width$} |", "Total Entries", stats.total_entries, width = width - 35).unwrap();
-    writeln!(out, "| {:30} | {:width$} |", "Total Kinds", stats.total_kinds, width = width - 35).unwrap();
-    writeln!(out, "| {:30} | {:width$} |", "Total Categories", stats.total_categories, width = width - 35).unwrap();
-    writeln!(out, "| {:30} | {:width$} |", "Build Count", stats.build_count, width = width - 35).unwrap();
+
+    writeln!(
+        out,
+        "| {:30} | {:width$} |",
+        "Total Entries",
+        stats.total_entries,
+        width = width - 35
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| {:30} | {:width$} |",
+        "Total Kinds",
+        stats.total_kinds,
+        width = width - 35
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| {:30} | {:width$} |",
+        "Total Categories",
+        stats.total_categories,
+        width = width - 35
+    )
+    .unwrap();
+    writeln!(
+        out,
+        "| {:30} | {:width$} |",
+        "Build Count",
+        stats.build_count,
+        width = width - 35
+    )
+    .unwrap();
     writeln!(out, "+{}+", "-".repeat(width)).unwrap();
-    
+
     // Entries by kind
     writeln!(out, "| {:^width$} |", "ENTRIES BY KIND", width = width - 2).unwrap();
     writeln!(out, "+{}+", "-".repeat(width)).unwrap();
-    
+
     for kind in web.kinds() {
         let count = web.by_kind(kind).len();
-        writeln!(out, "| {:30} | {:width$} |", kind, count, width = width - 35).unwrap();
+        writeln!(
+            out,
+            "| {:30} | {:width$} |",
+            kind,
+            count,
+            width = width - 35
+        )
+        .unwrap();
     }
-    
+
     writeln!(out, "+{}+", "=".repeat(width)).unwrap();
     out
 }
 
 fn format_web_json(web: &Web, pretty: bool) -> String {
     let mut map = HashMap::new();
-    
+
     // Stats
     let stats = web.stats();
-    map.insert("total_entries".to_string(), Entry::usize(stats.total_entries));
+    map.insert(
+        "total_entries".to_string(),
+        Entry::usize(stats.total_entries),
+    );
     map.insert("total_kinds".to_string(), Entry::usize(stats.total_kinds));
-    map.insert("total_categories".to_string(), Entry::usize(stats.total_categories));
+    map.insert(
+        "total_categories".to_string(),
+        Entry::usize(stats.total_categories),
+    );
     map.insert("build_count".to_string(), Entry::usize(stats.build_count));
-    
+
     // Entries by kind
     let mut kinds_map = HashMap::new();
     for kind in web.kinds() {
@@ -509,7 +643,7 @@ fn format_web_json(web: &Web, pretty: bool) -> String {
         kinds_map.insert(kind.to_string(), Entry::vec(entries));
     }
     map.insert("entries".to_string(), Entry::hashmap(kinds_map));
-    
+
     let root = Entry::hashmap(map);
     if pretty {
         root.to_json_pretty(2)
@@ -521,47 +655,60 @@ fn format_web_json(web: &Web, pretty: bool) -> String {
 fn format_web_tree(web: &Web) -> String {
     let mut out = String::new();
     let stats = web.stats();
-    
+
     writeln!(out, "📦 Web Database").unwrap();
     writeln!(out, "├─ 📊 Stats").unwrap();
     writeln!(out, "│  ├─ Entries: {}", stats.total_entries).unwrap();
     writeln!(out, "│  ├─ Kinds: {}", stats.total_kinds).unwrap();
     writeln!(out, "│  ├─ Categories: {}", stats.total_categories).unwrap();
     writeln!(out, "│  └─ Builds: {}", stats.build_count).unwrap();
-    
+
     let kinds: Vec<&str> = web.kinds();
     let kinds_count = kinds.len();
-    
+
     for (i, kind) in kinds.iter().enumerate() {
         let is_last = i == kinds_count - 1;
         let branch = if is_last { "└─" } else { "├─" };
         let prefix = if is_last { "   " } else { "│  " };
-        
+
         let entries = web.by_kind(kind);
         writeln!(out, "{} 📁 {} ({})", branch, kind, entries.len()).unwrap();
-        
+
         for (j, entry) in entries.iter().enumerate().take(3) {
-            let entry_branch = if j == entries.len().min(3) - 1 { "└─" } else { "├─" };
-            writeln!(out, "{}  {} {}", prefix, entry_branch, entry_value_string(entry)).unwrap();
+            let entry_branch = if j == entries.len().min(3) - 1 {
+                "└─"
+            } else {
+                "├─"
+            };
+            writeln!(
+                out,
+                "{}  {} {}",
+                prefix,
+                entry_branch,
+                entry_value_string(entry)
+            )
+            .unwrap();
         }
         if entries.len() > 3 {
             writeln!(out, "{}  └─ ... {} more", prefix, entries.len() - 3).unwrap();
         }
     }
-    
+
     out
 }
 
 fn format_web_compact(web: &Web) -> String {
     let stats = web.stats();
-    format!("Web({} entries, {} kinds, {} categories)", 
-        stats.total_entries, stats.total_kinds, stats.total_categories)
+    format!(
+        "Web({} entries, {} kinds, {} categories)",
+        stats.total_entries, stats.total_kinds, stats.total_categories
+    )
 }
 
 fn format_web_markdown(web: &Web) -> String {
     let mut out = String::new();
     let stats = web.stats();
-    
+
     writeln!(out, "# Web Database\n").unwrap();
     writeln!(out, "## Statistics\n").unwrap();
     writeln!(out, "| Metric | Value |").unwrap();
@@ -571,7 +718,7 @@ fn format_web_markdown(web: &Web) -> String {
     writeln!(out, "| Total Categories | {} |", stats.total_categories).unwrap();
     writeln!(out, "| Build Count | {} |", stats.build_count).unwrap();
     writeln!(out).unwrap();
-    
+
     writeln!(out, "## Entries by Kind\n").unwrap();
     for kind in web.kinds() {
         let entries = web.by_kind(kind);
@@ -584,40 +731,57 @@ fn format_web_markdown(web: &Web) -> String {
         }
         writeln!(out).unwrap();
     }
-    
+
     out
 }
 
 fn format_web_csv(web: &Web) -> String {
     let mut out = String::new();
-    
+
     writeln!(out, "kind,name,attributes").unwrap();
     for entry in web.iter() {
-        if let Entry::Node { kind, name, attrs, .. } = entry {
+        if let Entry::Node {
+            kind, name, attrs, ..
+        } = entry
+        {
             let attr_count = attrs.len();
-            writeln!(out, "{},{},{}", csv_escape(kind), csv_escape(name), attr_count).unwrap();
+            writeln!(
+                out,
+                "{},{},{}",
+                csv_escape(kind),
+                csv_escape(name),
+                attr_count
+            )
+            .unwrap();
         } else {
-            writeln!(out, "{},{},{}", entry.type_name(), csv_escape(&entry.to_string()), 0).unwrap();
+            writeln!(
+                out,
+                "{},{},{}",
+                entry.type_name(),
+                csv_escape(&entry.to_string()),
+                0
+            )
+            .unwrap();
         }
     }
-    
+
     out
 }
 
 fn format_web_custom(web: &Web, template: &str) -> String {
     let stats = web.stats();
     let mut result = template.to_string();
-    
+
     result = result.replace("{entries}", &stats.total_entries.to_string());
     result = result.replace("{kinds}", &stats.total_kinds.to_string());
     result = result.replace("{categories}", &stats.total_categories.to_string());
     result = result.replace("{builds}", &stats.build_count.to_string());
-    
+
     result
 }
 
 // ============================================================================
-// WebStats Formatter Implementation  
+// WebStats Formatter Implementation
 // ============================================================================
 
 impl Formatter for WebStats {
@@ -646,7 +810,7 @@ impl Formatter for WebStats {
                 )
             }
             OutputFormat::Compact => format!(
-                "Stats({}/{}/{})", 
+                "Stats({}/{}/{})",
                 self.total_entries, self.total_kinds, self.total_categories
             ),
             _ => self.format(&OutputFormat::Text),
@@ -681,7 +845,7 @@ pub trait FormatExt: Formatter + Sized {
     fn formatted(&self, format: OutputFormat) -> Formatted<'_, Self> {
         Formatted::new(self, format)
     }
-    
+
     fn display_as(&self, format: &str) -> String {
         self.format(&OutputFormat::from_str(format))
     }
@@ -707,10 +871,10 @@ mod tests {
     #[test]
     fn test_entry_formatter() {
         let entry = Entry::node("Test", "example");
-        
+
         let text = entry.to_text();
         assert!(text.contains("[Test]"));
-        
+
         let compact = entry.to_compact();
         assert!(compact.contains("Test"));
     }
@@ -718,10 +882,10 @@ mod tests {
     #[test]
     fn test_web_formatter() {
         let web = Web::new();
-        
+
         let text = web.to_text();
         assert!(text.contains("Web Database"));
-        
+
         let compact = web.to_compact();
         assert!(compact.starts_with("Web("));
     }

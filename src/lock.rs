@@ -6,15 +6,14 @@ use core::marker::{Send, Sync};
 use core::ops::FnOnce;
 use core::option::Option::{self, None, Some};
 use core::{clone::Clone, default::Default};
-use std::borrow::ToOwned;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::hash::{Hash, Hasher};
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::time::SystemTime;
 
 static TIME_START: OnceLock<SystemTime> = OnceLock::new();
@@ -1080,7 +1079,7 @@ impl<T: Clone + Ord> Ord for Lock<T> {
 }
 
 impl<T: Hash + Clone> Hash for Lock<T> {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         let guard = self.lock();
         (*guard).hash(state);
     }
@@ -1465,7 +1464,7 @@ impl<T: PartialEq + Clone> PartialEq for ReentrantRwLock<T> {
 impl<T: Eq + Clone> Eq for ReentrantRwLock<T> {}
 
 impl<T: Hash + Clone> Hash for ReentrantRwLock<T> {
-    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+    fn hash<H: Hasher>(&self, state: &mut H) {
         self.get().hash(state);
     }
 }
@@ -1741,10 +1740,12 @@ impl<T> LazyRwLock<T> {
     #[inline]
     pub unsafe fn force_mut(&self) -> &mut T {
         // Force initialization state
-        self.init_state.store(LAZY_COMPLETE, Ordering::Release);
-        match &mut *self.data.get() {
-            Some(val) => val,
-            None => panic!("LazyRwLock data is None - must set value first"),
+        unsafe {
+            self.init_state.store(LAZY_COMPLETE, Ordering::Release);
+            match &mut *self.data.get() {
+                Some(val) => val,
+                None => panic!("LazyRwLock data is None - must set value first"),
+            }
         }
     }
 

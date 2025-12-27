@@ -1,15 +1,13 @@
 use crate::{
-    Result,
     error::{Error, Kind, Reason},
+    Result,
 };
 use std::{
-    collections::VecDeque,
     fmt::{Debug, Display, Formatter},
     fs::File,
     io::{Read, Write},
-    iter::FusedIterator,
     mem,
-    ops::{Bound, Deref, DerefMut, Index, IndexMut, Mul, RangeBounds, Sub},
+    ops::{Deref, DerefMut, Index, IndexMut, Mul, RangeBounds, Sub},
     path::PathBuf,
     ptr, slice,
     str::FromStr,

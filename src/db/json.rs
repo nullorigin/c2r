@@ -125,7 +125,10 @@ impl<'a> JsonParser<'a> {
         Err(Error::new(
             Kind::Json,
             Reason::Unexpected("character"),
-            Some(format!("Unexpected character: '{}' at position {}", ch, self.index)),
+            Some(format!(
+                "Unexpected character: '{}' at position {}",
+                ch, self.index
+            )),
         ))
     }
 
@@ -141,7 +144,7 @@ impl<'a> JsonParser<'a> {
         self.bump();
         Ok(b)
     }
-#[allow(unused)]
+    #[allow(unused)]
     fn expect_byte_skip_ws(&mut self) -> Result<u8> {
         self.skip_whitespace();
         self.expect_byte()
@@ -179,24 +182,31 @@ impl<'a> JsonParser<'a> {
                         Some("Invalid surrogate pair".to_string()),
                     ));
                 }
-                match std::char::decode_utf16([codepoint, self.read_hexdec_codepoint()?].iter().copied()).next() {
+                match std::char::decode_utf16(
+                    [codepoint, self.read_hexdec_codepoint()?].iter().copied(),
+                )
+                .next()
+                {
                     Some(Ok(code)) => code,
-                    _ => return Err(Error::new(
-                        Kind::Json,
-                        Reason::Failed("utf8 parsing"),
-                        Some("Failed to parse UTF-8 codepoint".to_string()),
-                    )),
+                    _ => {
+                        return Err(Error::new(
+                            Kind::Json,
+                            Reason::Failed("utf8 parsing"),
+                            Some("Failed to parse UTF-8 codepoint".to_string()),
+                        ));
+                    }
                 }
             }
         };
 
-        self.buffer.extend_from_slice(unicode.encode_utf8(&mut buf).as_bytes());
+        self.buffer
+            .extend_from_slice(unicode.encode_utf8(&mut buf).as_bytes());
         Ok(())
     }
 
     fn read_string(&mut self) -> Result<String> {
         let start = self.index;
-        
+
         loop {
             if self.is_eof() {
                 return Err(Error::new(
@@ -205,10 +215,10 @@ impl<'a> JsonParser<'a> {
                     Some("Unterminated string".to_string()),
                 ));
             }
-            
+
             let ch = self.read_byte();
             self.bump();
-            
+
             match ch {
                 b'"' => {
                     // Simple string without escapes
@@ -228,7 +238,8 @@ impl<'a> JsonParser<'a> {
 
     fn read_complex_string(&mut self, start: usize) -> Result<String> {
         self.buffer.clear();
-        self.buffer.extend_from_slice(&self.source.as_bytes()[start..self.index - 1]);
+        self.buffer
+            .extend_from_slice(&self.source.as_bytes()[start..self.index - 1]);
 
         loop {
             let escaped = self.expect_byte()?;
@@ -291,14 +302,16 @@ impl<'a> JsonParser<'a> {
         let mut is_float = false;
         let mut decimal_places = 0u32;
         let mut fraction: f64 = 0.0;
-        
+
         // Read integer part
         while !self.is_eof() {
             let ch = self.read_byte();
             match ch {
                 b'0'..=b'9' => {
                     self.bump();
-                    integer = integer.saturating_mul(10).saturating_add((ch - b'0') as i64);
+                    integer = integer
+                        .saturating_mul(10)
+                        .saturating_add((ch - b'0') as i64);
                 }
                 b'.' => {
                     self.bump();
@@ -331,7 +344,7 @@ impl<'a> JsonParser<'a> {
                     _ => break,
                 }
             }
-            
+
             let mut value = integer as f64 + fraction / 10f64.powi(decimal_places as i32);
             if negative {
                 value = -value;
@@ -343,7 +356,7 @@ impl<'a> JsonParser<'a> {
         if negative {
             integer = -integer;
         }
-        
+
         // Choose appropriate integer size
         if integer >= i32::MIN as i64 && integer <= i32::MAX as i64 {
             Ok(Entry::i32(integer as i32))
@@ -374,7 +387,9 @@ impl<'a> JsonParser<'a> {
             match ch {
                 b'0'..=b'9' => {
                     self.bump();
-                    exponent = exponent.saturating_mul(10).saturating_add((ch - b'0') as i32);
+                    exponent = exponent
+                        .saturating_mul(10)
+                        .saturating_add((ch - b'0') as i32);
                 }
                 _ => break,
             }
@@ -406,7 +421,7 @@ impl<'a> JsonParser<'a> {
 
     fn parse_value(&mut self) -> Result<Entry> {
         self.skip_whitespace();
-        
+
         if self.is_eof() {
             return Err(Error::new(
                 Kind::Json,
@@ -452,9 +467,9 @@ impl<'a> JsonParser<'a> {
 
     fn parse_object(&mut self) -> Result<Entry> {
         let mut map = HashMap::new();
-        
+
         self.skip_whitespace();
-        
+
         if !self.is_eof() && self.read_byte() == b'}' {
             self.bump();
             return Ok(Entry::hashmap(map));
@@ -462,26 +477,26 @@ impl<'a> JsonParser<'a> {
 
         loop {
             self.skip_whitespace();
-            
+
             // Expect key
             if self.expect_byte()? != b'"' {
                 return self.unexpected_character();
             }
             let key = self.read_string()?;
-            
+
             self.skip_whitespace();
-            
+
             // Expect colon
             if self.expect_byte()? != b':' {
                 return self.unexpected_character();
             }
-            
+
             // Parse value
             let value = self.parse_value()?;
             map.insert(key, value);
-            
+
             self.skip_whitespace();
-            
+
             if self.is_eof() {
                 return Err(Error::new(
                     Kind::Json,
@@ -506,9 +521,9 @@ impl<'a> JsonParser<'a> {
 
     fn parse_array(&mut self) -> Result<Entry> {
         let mut arr = Vec::new();
-        
+
         self.skip_whitespace();
-        
+
         if !self.is_eof() && self.read_byte() == b']' {
             self.bump();
             return Ok(Entry::vec(arr));
@@ -517,9 +532,9 @@ impl<'a> JsonParser<'a> {
         loop {
             let value = self.parse_value()?;
             arr.push(value);
-            
+
             self.skip_whitespace();
-            
+
             if self.is_eof() {
                 return Err(Error::new(
                     Kind::Json,
@@ -555,17 +570,19 @@ pub fn parse(source: &str) -> Result<Entry> {
 pub trait JsonGenerator {
     fn write(&mut self, slice: &[u8]) -> Result<()>;
     fn write_char(&mut self, ch: u8) -> Result<()>;
-    fn new_line(&mut self) -> Result<()> { Ok(()) }
+    fn new_line(&mut self) -> Result<()> {
+        Ok(())
+    }
     fn indent(&mut self) {}
     fn dedent(&mut self) {}
     fn write_min(&mut self, full: &[u8], min: u8) -> Result<()>;
 
     fn write_string(&mut self, s: &str) -> Result<()> {
         self.write_char(b'"')?;
-        
+
         let bytes = s.as_bytes();
         let mut start = 0;
-        
+
         for (i, &ch) in bytes.iter().enumerate() {
             let escape = ESCAPED[ch as usize];
             if escape > 0 {
@@ -573,13 +590,13 @@ pub trait JsonGenerator {
                 self.write_char(b'\\')?;
                 self.write_char(escape)?;
                 start = i + 1;
-                
+
                 if escape == b'u' {
                     self.write(format!("{:04x}", ch).as_bytes())?;
                 }
             }
         }
-        
+
         self.write(&bytes[start..])?;
         self.write_char(b'"')
     }
@@ -674,21 +691,23 @@ pub trait JsonGenerator {
                 self.new_line()?;
                 self.write_char(b'}')
             }
-            Entry::Node { kind, name, attrs, .. } => {
+            Entry::Node {
+                kind, name, attrs, ..
+            } => {
                 self.write_char(b'{')?;
                 self.indent();
-                
+
                 self.new_line()?;
                 self.write_string("kind")?;
                 self.write_min(b": ", b':')?;
                 self.write_string(kind)?;
-                
+
                 self.write_char(b',')?;
                 self.new_line()?;
                 self.write_string("name")?;
                 self.write_min(b": ", b':')?;
                 self.write_string(name)?;
-                
+
                 if !attrs.is_empty() {
                     self.write_char(b',')?;
                     self.new_line()?;
@@ -711,27 +730,32 @@ pub trait JsonGenerator {
                     self.new_line()?;
                     self.write_char(b'}')?;
                 }
-                
+
                 self.dedent();
                 self.new_line()?;
                 self.write_char(b'}')
             }
             Entry::Fn(_, _) => self.write_string("<function>"),
-            Entry::Branch { operation, true_path, false_path, .. } => {
+            Entry::Branch {
+                operation,
+                true_path,
+                false_path,
+                ..
+            } => {
                 self.write_char(b'{')?;
                 self.indent();
-                
+
                 self.new_line()?;
                 self.write_string("type")?;
                 self.write_min(b": ", b':')?;
                 self.write_string("branch")?;
-                
+
                 self.write_char(b',')?;
                 self.new_line()?;
                 self.write_string("operation")?;
                 self.write_min(b": ", b':')?;
                 self.write_string(operation.name())?;
-                
+
                 self.write_char(b',')?;
                 self.new_line()?;
                 self.write_string("true_path")?;
@@ -750,7 +774,7 @@ pub trait JsonGenerator {
                     self.new_line()?;
                 }
                 self.write_char(b']')?;
-                
+
                 self.write_char(b',')?;
                 self.new_line()?;
                 self.write_string("false_path")?;
@@ -769,7 +793,7 @@ pub trait JsonGenerator {
                     self.new_line()?;
                 }
                 self.write_char(b']')?;
-                
+
                 self.dedent();
                 self.new_line()?;
                 self.write_char(b'}')
@@ -785,7 +809,9 @@ pub struct DumpGenerator {
 
 impl DumpGenerator {
     pub fn new() -> Self {
-        Self { output: Vec::with_capacity(256) }
+        Self {
+            output: Vec::with_capacity(256),
+        }
     }
 
     pub fn consume(self) -> String {
@@ -848,11 +874,6 @@ impl JsonGenerator for PrettyGenerator {
         Ok(())
     }
 
-    fn write_min(&mut self, full: &[u8], _min: u8) -> Result<()> {
-        self.output.extend_from_slice(full);
-        Ok(())
-    }
-
     fn new_line(&mut self) -> Result<()> {
         self.output.push(b'\n');
         for _ in 0..(self.indent_level * self.spaces_per_indent) {
@@ -867,6 +888,11 @@ impl JsonGenerator for PrettyGenerator {
 
     fn dedent(&mut self) {
         self.indent_level = self.indent_level.saturating_sub(1);
+    }
+
+    fn write_min(&mut self, full: &[u8], _min: u8) -> Result<()> {
+        self.output.extend_from_slice(full);
+        Ok(())
     }
 }
 
@@ -887,15 +913,15 @@ impl<W: Write> WriterGenerator<W> {
 
 impl<W: Write> JsonGenerator for WriterGenerator<W> {
     fn write(&mut self, slice: &[u8]) -> Result<()> {
-        self.writer.write_all(slice).map_err(|e| {
-            Error::new(Kind::Io, Reason::Write("failed"), Some(e.to_string()))
-        })
+        self.writer
+            .write_all(slice)
+            .map_err(|e| Error::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
     }
 
     fn write_char(&mut self, ch: u8) -> Result<()> {
-        self.writer.write_all(&[ch]).map_err(|e| {
-            Error::new(Kind::Io, Reason::Write("failed"), Some(e.to_string()))
-        })
+        self.writer
+            .write_all(&[ch])
+            .map_err(|e| Error::new(Kind::Io, Reason::Write("failed"), Some(e.to_string())))
     }
 
     fn write_min(&mut self, _full: &[u8], min: u8) -> Result<()> {
@@ -962,7 +988,7 @@ mod tests {
         let n = parse("-123").unwrap();
         let f = parse("3.14").unwrap();
         let e = parse("1e10").unwrap();
-        
+
         assert!(matches!(i, Entry::I32(42, _)));
         assert!(matches!(n, Entry::I32(-123, _)));
         if let Entry::F64(v, _) = f {
@@ -981,7 +1007,7 @@ mod tests {
     fn test_parse_string() {
         let s = parse(r#""hello world""#).unwrap();
         assert!(matches!(s, Entry::String(ref v, _) if v == "hello world"));
-        
+
         let escaped = parse(r#""hello\nworld""#).unwrap();
         assert!(matches!(escaped, Entry::String(ref v, _) if v == "hello\nworld"));
     }
@@ -994,7 +1020,7 @@ mod tests {
         } else {
             panic!("Expected Vec");
         }
-        
+
         let empty = parse("[]").unwrap();
         if let Entry::Vec(v, _) = empty {
             assert!(v.is_empty());
@@ -1025,13 +1051,13 @@ mod tests {
     fn test_to_json() {
         let e = Entry::i32(42);
         assert_eq!(e.to_json(), "42");
-        
+
         let s = Entry::string("hello");
         assert_eq!(s.to_json(), "\"hello\"");
-        
+
         let b = Entry::bool(true);
         assert_eq!(b.to_json(), "true");
-        
+
         let n = Entry::unit();
         assert_eq!(n.to_json(), "null");
     }
@@ -1042,7 +1068,7 @@ mod tests {
         let parsed = parse(json).unwrap();
         let output = parsed.to_json();
         let reparsed = parse(&output).unwrap();
-        
+
         // Both should produce same JSON (order may differ for objects)
         assert!(matches!(reparsed, Entry::HashMap(_, _)));
     }
@@ -1063,7 +1089,7 @@ mod tests {
     fn test_node_to_json() {
         let mut node = Entry::node("Function", "main");
         node.set_attr("return_type", Entry::string("int"));
-        
+
         let json = node.to_json();
         assert!(json.contains("\"kind\""));
         assert!(json.contains("\"name\""));

@@ -9,7 +9,7 @@
 //! - `IdentifierCase`: Case conversion utilities for identifiers
 //! - Operator conversion utilities
 
-use crate::db::web::Entry;
+use crate::db::{Build, web::Entry};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -19,13 +19,11 @@ use std::collections::HashMap;
 /// Category classification for types
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TypeCategory {
+    Boolean,
     /// Basic integer types (int, char, short, long)
-    BasicInteger,
+    Integer,
     /// Floating point types (float, double)
-    BasicFloat,
-    /// Fixed-width integer types (int32_t, uint64_t, etc.)
-    FixedWidthInteger,
-    /// Size-related types (size_t, ssize_t, ptrdiff_t)
+    Float,
     SizeType,
     /// System-specific types
     SystemType,
@@ -38,7 +36,9 @@ pub enum TypeCategory {
     /// Function pointer types
     FunctionPointer,
     /// Struct or union types
-    StructUnion,
+    Struct,
+    Union,
+    Enum,
     /// Custom category
     Custom(String),
 }
@@ -46,21 +46,22 @@ pub enum TypeCategory {
 impl TypeCategory {
     pub fn as_str(&self) -> &str {
         match self {
-            TypeCategory::BasicInteger => "basic_integer",
-            TypeCategory::BasicFloat => "basic_float",
-            TypeCategory::FixedWidthInteger => "fixed_width_integer",
-            TypeCategory::SizeType => "size_type",
-            TypeCategory::SystemType => "system_type",
-            TypeCategory::PointerType => "pointer_type",
-            TypeCategory::StorageQualifier => "storage_qualifier",
-            TypeCategory::UserDefined => "user_defined",
-            TypeCategory::FunctionPointer => "function_pointer",
-            TypeCategory::StructUnion => "struct_union",
+            TypeCategory::Boolean => "Boolean",
+            TypeCategory::Integer => "Integer",
+            TypeCategory::Float => "Float",
+            TypeCategory::SizeType => "SizeType",
+            TypeCategory::SystemType => "SystemType",
+            TypeCategory::PointerType => "PointerType",
+            TypeCategory::StorageQualifier => "StorageQualifier",
+            TypeCategory::UserDefined => "UserDefined",
+            TypeCategory::FunctionPointer => "FunctionPointer",
+            TypeCategory::Struct => "Struct",
+            TypeCategory::Union => "Union",
+            TypeCategory::Enum => "Enum",
             TypeCategory::Custom(s) => s.as_str(),
         }
     }
 }
-
 /// Metadata for type conversions
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeMetadata {
@@ -72,43 +73,54 @@ pub struct TypeMetadata {
     pub category: TypeCategory,
     /// Whether the type is signed
     pub is_signed: bool,
-    /// Whether this is a pointer type
-    pub is_pointer: bool,
+    /// Whether this type is const qualified
+    pub is_const: bool,
     /// Pointer indirection level
     pub pointer_level: usize,
-    /// Whether const qualified
-    pub is_const: bool,
+    /// if this is an array specifies dimension count
+    pub dimensions: usize,
     /// Size in bytes (if known)
     pub size_bytes: Option<usize>,
 }
 
 impl TypeMetadata {
     /// Create new type metadata
-    pub fn new(source: &str, target: &str, category: TypeCategory, is_signed: bool) -> Self {
+    pub fn new(source: &str, target: &str, category: TypeCategory) -> Self {
         Self {
             source_type: source.to_string(),
             target_type: target.to_string(),
             category,
-            is_signed,
-            is_pointer: false,
-            pointer_level: 0,
+            is_signed: false,
             is_const: false,
+            pointer_level: 0,
+            dimensions: 0,
             size_bytes: None,
         }
     }
-
+    pub fn is_pointer(&self) -> bool {
+        self.pointer_level > 0
+    }
+    pub fn is_array(&self) -> bool {
+        self.dimensions > 0
+    }
     /// Create type metadata with size
-    pub fn with_size(source: &str, target: &str, category: TypeCategory, is_signed: bool, size: usize) -> Self {
-        let mut meta = Self::new(source, target, category, is_signed);
+    pub fn with_size(
+        source: &str,
+        target: &str,
+        category: TypeCategory,
+        size: usize,
+    ) -> Self {
+        let mut meta = Self::new(source, target, category);
         meta.size_bytes = Some(size);
         meta
     }
 
     /// Set pointer level and mark as pointer type
     pub fn as_pointer(mut self, level: usize) -> Self {
-        self.is_pointer = true;
-        self.pointer_level = level;
-        self.category = TypeCategory::PointerType;
+        if level > 0 {
+            self.pointer_level = level;
+            self.category = TypeCategory::PointerType;
+        }
         self
     }
 
@@ -122,7 +134,7 @@ impl TypeMetadata {
     pub fn to_target_type(&self) -> String {
         let mut result = self.target_type.clone();
 
-        if self.is_pointer {
+        if self.is_pointer() {
             for _ in 0..self.pointer_level {
                 result = if self.is_const {
                     format!("*const {}", result)
@@ -134,16 +146,23 @@ impl TypeMetadata {
 
         result
     }
-
+}
+impl Build for TypeMetadata {
+    fn kind(&self) -> &str {
+        "TypeMetadata"
+    }
+    
     /// Convert to an Entry representation
-    pub fn to_entry(&self) -> Entry {
+    fn to_entry(&self) -> Entry {
         let mut node = Entry::node("TypeMetadata", &self.source_type);
         node.set_attr("target_type", Entry::string(&self.target_type));
         node.set_attr("category", Entry::string(self.category.as_str()));
         node.set_attr("is_signed", Entry::bool(self.is_signed));
-        node.set_attr("is_pointer", Entry::bool(self.is_pointer));
-        node.set_attr("pointer_level", Entry::usize(self.pointer_level));
         node.set_attr("is_const", Entry::bool(self.is_const));
+        node.set_attr("is_ptr", Entry::bool(self.is_pointer()));
+        node.set_attr("is_array", Entry::bool(self.is_array()));
+        node.set_attr("pointer_level", Entry::usize(self.pointer_level));
+        node.set_attr("dimensions", Entry::usize(self.dimensions));
         if let Some(size) = self.size_bytes {
             node.set_attr("size_bytes", Entry::usize(size));
         }
@@ -184,54 +203,171 @@ impl TypeConverter {
     /// Initialize standard C to Rust type mappings
     fn initialize_c_types(&mut self) {
         // Basic integer types
-        self.add_type_sized("bool", "bool", TypeCategory::BasicInteger, false, 1);
-        self.add_type_sized("char", "i8", TypeCategory::BasicInteger, true, 1);
-        self.add_type_sized("short", "i16", TypeCategory::BasicInteger, true, 2);
-        self.add_type_sized("int", "i32", TypeCategory::BasicInteger, true, 4);
-        self.add_type_sized("long", "i64", TypeCategory::BasicInteger, true, 8);
-        self.add_type_sized("long long", "i64", TypeCategory::BasicInteger, true, 8);
+        let sized_types = vec![
+            // Boolean type
+            ("bool", "bool", TypeCategory::Boolean, 1),
+            // Basic integer types
+            ("char", "i8", TypeCategory::Integer, 1),
+            ("short", "i16", TypeCategory::Integer, 2),
+            ("int", "i32", TypeCategory::Integer, 4),
+            ("long", "i64", TypeCategory::Integer, 8),
+            ("long long", "i64", TypeCategory::Integer, 8),
+            // Unsigned integer types
+            ("unsigned char", "u8", TypeCategory::Integer, 1),
+            ("unsigned short", "u16", TypeCategory::Integer, 2),
+            ("unsigned int", "u32", TypeCategory::Integer, 4),
+            ("unsigned long", "u64", TypeCategory::Integer, 8),
+            ("unsigned long long", "u64", TypeCategory::Integer, 8),
+            // Floating point types
+            ("float", "f32", TypeCategory::Float, 4),
+            ("double", "f64", TypeCategory::Float, 8),
+            ("long double", "f64", TypeCategory::Float, 16),
+            // Special types
+            ("void", "()", TypeCategory::Integer, 0),
+            // Fixed-width integer types
+            ("int8_t", "i8", TypeCategory::Integer, 1),
+            ("int16_t", "i16", TypeCategory::Integer, 2),
+            ("int32_t", "i32", TypeCategory::Integer, 4),
+            ("int64_t", "i64", TypeCategory::Integer, 8),
+            ("uint8_t", "u8", TypeCategory::Integer, 1),
+            ("uint16_t", "u16", TypeCategory::Integer, 2),
+            ("uint32_t", "u32", TypeCategory::Integer, 4),
+            ("uint64_t", "u64", TypeCategory::Integer, 8),
+        ];
 
-        // Unsigned integer types
-        self.add_type_sized("unsigned char", "u8", TypeCategory::BasicInteger, false, 1);
-        self.add_type_sized("unsigned short", "u16", TypeCategory::BasicInteger, false, 2);
-        self.add_type_sized("unsigned int", "u32", TypeCategory::BasicInteger, false, 4);
-        self.add_type_sized("unsigned long", "u64", TypeCategory::BasicInteger, false, 8);
-        self.add_type_sized("unsigned long long", "u64", TypeCategory::BasicInteger, false, 8);
+        // Storage class specifiers and modifiers
+        let storage_modifiers = vec!["", "static ", "extern ", "register ", "auto "];
+        let cv_modifiers = vec!["", "const ", "volatile ", "const volatile "];
 
-        // Floating point types
-        self.add_type_sized("float", "f32", TypeCategory::BasicFloat, true, 4);
-        self.add_type_sized("double", "f64", TypeCategory::BasicFloat, true, 8);
-        self.add_type_sized("long double", "f64", TypeCategory::BasicFloat, true, 16);
-
-        // Special types
-        self.add_type_sized("void", "()", TypeCategory::BasicInteger, false, 0);
-
+        for (source, target, category, size) in sized_types {
+            // Base type with all storage and cv-qualifier combinations
+            for storage in &storage_modifiers {
+                for cv in &cv_modifiers {
+                    let src = format!("{}{}{}", storage, cv, source);
+                    let tgt = if cv.contains("const") {
+                        format!("const {}", target)
+                    } else {
+                        target.to_string()
+                    };
+                    self.add_type_sized(&src.trim().to_string(), &tgt, category.clone(), size);
+                }
+            }
+            
+            // Pointer variations with all modifier combinations
+            for storage in &storage_modifiers {
+                for cv in &cv_modifiers {
+                    // Single pointer
+                    self.add_type_sized(
+                        &format!("{}{}{}*", storage, cv, source).trim().to_string(),
+                        &format!("*{} {}", if cv.contains("const") { "const" } else { "mut" }, target),
+                        TypeCategory::PointerType, 8
+                    );
+                    self.add_type_sized(
+                        &format!("{}{}{} *", storage, cv, source).trim().to_string(),
+                        &format!("*{} {}", if cv.contains("const") { "const" } else { "mut" }, target),
+                        TypeCategory::PointerType, 8
+                    );
+                    
+                    // Double pointer
+                    self.add_type_sized(
+                        &format!("{}{}{}**", storage, cv, source).trim().to_string(),
+                        &format!("*mut *{} {}", if cv.contains("const") { "const" } else { "mut" }, target),
+                        TypeCategory::PointerType, 8
+                    );
+                    self.add_type_sized(
+                        &format!("{}{}{} **", storage, cv, source).trim().to_string(),
+                        &format!("*mut *{} {}", if cv.contains("const") { "const" } else { "mut" }, target),
+                        TypeCategory::PointerType, 8
+                    );
+                }
+            }
+            
+            // Pointer to const variations
+            self.add_type_sized(&format!("{}* const", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("{} * const", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("static {}* const", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("extern {}* const", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            
+            // Const pointer to const
+            self.add_type_sized(&format!("const {}* const", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("const {} * const", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("static const {}* const", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("extern const {}* const", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            
+            // Volatile pointer variations
+            self.add_type_sized(&format!("volatile {}* const", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("const volatile {}*", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("const volatile {} *", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            
+            // Reference variations (C++ style, but useful for compatibility)
+            for storage in &storage_modifiers {
+                self.add_type_sized(&format!("{}{}&", storage, source).trim().to_string(), &format!("&mut {}", target), category.clone(), size);
+                self.add_type_sized(&format!("{}{} &", storage, source).trim().to_string(), &format!("&mut {}", target), category.clone(), size);
+                self.add_type_sized(&format!("{}const {}&", storage, source).trim().to_string(), &format!("&{}", target), category.clone(), size);
+                self.add_type_sized(&format!("{}const {} &", storage, source).trim().to_string(), &format!("&{}", target), category.clone(), size);
+            }
+            
+            // Restrict qualifier (C99)
+            self.add_type_sized(&format!("{} * restrict", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("{}* restrict", source), &format!("*mut {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("const {} * restrict", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            self.add_type_sized(&format!("const {}* restrict", source), &format!("*const {}", target), TypeCategory::PointerType, 8);
+            
+            // _Atomic qualifier (C11)
+            self.add_type_sized(&format!("_Atomic {}", source), target, category.clone(), size);
+            self.add_type_sized(&format!("_Atomic({})", source), target, category.clone(), size);
+            
+            // Thread local storage
+            self.add_type_sized(&format!("_Thread_local {}", source), target, category.clone(), size);
+            self.add_type_sized(&format!("thread_local {}", source), target, category.clone(), size);
+            
+            // Inline with types (for inline variables in C++)
+            self.add_type_sized(&format!("inline {}", source), target, category.clone(), size);
+            self.add_type_sized(&format!("inline static {}", source), target, category.clone(), size);
+            self.add_type_sized(&format!("static inline {}", source), target, category.clone(), size);
+        }
+        
         // Size and system types
-        self.add_type("size_t", "usize", TypeCategory::SizeType, false);
-        self.add_type("ssize_t", "isize", TypeCategory::SizeType, true);
-        self.add_type("ptrdiff_t", "isize", TypeCategory::SizeType, true);
-        self.add_type("intptr_t", "isize", TypeCategory::SizeType, true);
-        self.add_type("uintptr_t", "usize", TypeCategory::SizeType, false);
-
-        // Fixed-width integer types
-        self.add_type_sized("int8_t", "i8", TypeCategory::FixedWidthInteger, true, 1);
-        self.add_type_sized("int16_t", "i16", TypeCategory::FixedWidthInteger, true, 2);
-        self.add_type_sized("int32_t", "i32", TypeCategory::FixedWidthInteger, true, 4);
-        self.add_type_sized("int64_t", "i64", TypeCategory::FixedWidthInteger, true, 8);
-        self.add_type_sized("uint8_t", "u8", TypeCategory::FixedWidthInteger, false, 1);
-        self.add_type_sized("uint16_t", "u16", TypeCategory::FixedWidthInteger, false, 2);
-        self.add_type_sized("uint32_t", "u32", TypeCategory::FixedWidthInteger, false, 4);
-        self.add_type_sized("uint64_t", "u64", TypeCategory::FixedWidthInteger, false, 8);
-
-        // Storage qualifiers
-        self.add_type("static", "static", TypeCategory::StorageQualifier, false);
-        self.add_type("const", "const", TypeCategory::StorageQualifier, false);
-        self.add_type("extern", "extern", TypeCategory::StorageQualifier, false);
-        self.add_type("volatile", "volatile", TypeCategory::StorageQualifier, false);
-        self.add_type("register", "", TypeCategory::StorageQualifier, false);
-        self.add_type("auto", "", TypeCategory::StorageQualifier, false);
-        self.add_type("inline", "inline", TypeCategory::StorageQualifier, false);
-        self.add_type("restrict", "", TypeCategory::StorageQualifier, false);
+        self.add_type("size_t", "usize", TypeCategory::SizeType);
+        self.add_type("ssize_t", "isize", TypeCategory::SizeType);
+        self.add_type("ptrdiff_t", "isize", TypeCategory::SizeType);
+        self.add_type("intptr_t", "isize", TypeCategory::SizeType);
+        self.add_type("uintptr_t", "usize", TypeCategory::SizeType);
+        
+        // Size type with all modifier combinations
+        for (source, target) in [("size_t", "usize"), ("ssize_t", "isize"), ("ptrdiff_t", "isize"), ("intptr_t", "isize"), ("uintptr_t", "usize")] {
+            for storage in &storage_modifiers {
+                for cv in &cv_modifiers {
+                    let src = format!("{}{}{}", storage, cv, source);
+                    self.add_type(&src.trim().to_string(), target, TypeCategory::SizeType);
+                }
+            }
+            
+            // Pointer variations for size types
+            for storage in &storage_modifiers {
+                self.add_type(&format!("{}{}*", storage, source).trim().to_string(), &format!("*mut {}", target), TypeCategory::PointerType);
+                self.add_type(&format!("{}{} *", storage, source).trim().to_string(), &format!("*mut {}", target), TypeCategory::PointerType);
+                self.add_type(&format!("{}const {}*", storage, source).trim().to_string(), &format!("*const {}", target), TypeCategory::PointerType);
+                self.add_type(&format!("{}const {} *", storage, source).trim().to_string(), &format!("*const {}", target), TypeCategory::PointerType);
+                self.add_type(&format!("{}volatile {}*", storage, source).trim().to_string(), &format!("*mut {}", target), TypeCategory::PointerType);
+                self.add_type(&format!("{}volatile {} *", storage, source).trim().to_string(), &format!("*mut {}", target), TypeCategory::PointerType);
+            }
+        }
+        
+        // Special string type mappings (idiomatic Rust conversions)
+        // const char * -> &str
+        self.add_type("const char *", "&str", TypeCategory::PointerType);
+        self.add_type("const char*", "&str", TypeCategory::PointerType);
+        self.add_type("char const *", "&str", TypeCategory::PointerType);
+        self.add_type("char const*", "&str", TypeCategory::PointerType);
+        // char * -> String
+        self.add_type("char *", "String", TypeCategory::PointerType);
+        self.add_type("char*", "String", TypeCategory::PointerType);
+        // const char ** -> Vec<&str> or &[&str]
+        self.add_type("const char **", "&[&str]", TypeCategory::PointerType);
+        self.add_type("const char**", "&[&str]", TypeCategory::PointerType);
+        self.add_type("char **", "Vec<String>", TypeCategory::PointerType);
+        self.add_type("char**", "Vec<String>", TypeCategory::PointerType);
     }
 
     /// Initialize function pointer patterns
@@ -243,14 +379,20 @@ impl TypeConverter {
     }
 
     /// Add a type mapping with size
-    fn add_type_sized(&mut self, source: &str, target: &str, category: TypeCategory, is_signed: bool, size: usize) {
-        let metadata = TypeMetadata::with_size(source, target, category, is_signed, size);
+    fn add_type_sized(
+        &mut self,
+        source: &str,
+        target: &str,
+        category: TypeCategory,
+        size: usize,
+    ) {
+        let metadata = TypeMetadata::with_size(source, target, category, size);
         self.add_type_metadata(source, metadata);
     }
 
     /// Add a basic type mapping
-    fn add_type(&mut self, source: &str, target: &str, category: TypeCategory, is_signed: bool) {
-        let metadata = TypeMetadata::new(source, target, category, is_signed);
+    fn add_type(&mut self, source: &str, target: &str, category: TypeCategory) {
+        let metadata = TypeMetadata::new(source, target, category);
         self.add_type_metadata(source, metadata);
     }
 
@@ -312,18 +454,18 @@ impl TypeConverter {
         if let Some(meta) = self.type_map.get(source) {
             return Some(meta.to_target_type());
         }
-        
+
         // Check for registered user-defined types in System database
         if let Some(rust_name) = self.lookup_registered_type(source) {
             return Some(rust_name);
         }
-        
+
         None
     }
-    
+
     /// Look up a type in the System's registered types database
     fn lookup_registered_type(&self, source: &str) -> Option<String> {
-        // Use system_mut() to look up registered types
+        // Use system() to look up registered types
         crate::system::system().lookup_type(source)
     }
 
@@ -336,7 +478,10 @@ impl TypeConverter {
             match ch {
                 ' ' | '\t' | '\n' | '\r' => {
                     if !result.is_empty() && !result.ends_with(' ') {
-                        if chars.peek().map_or(true, |&next| next != '*' && next != '&') {
+                        if chars
+                            .peek()
+                            .map_or(true, |&next| next != '*' && next != '&')
+                        {
                             result.push(' ');
                         }
                     }
@@ -394,11 +539,21 @@ impl TypeConverter {
         let star_count = source.matches('*').count();
         let base_part = source.trim_end_matches('*').trim();
 
-        let (is_const, base_type) = if base_part.starts_with("const ") {
+        let (is_const, base_type) = if base_part.starts_with("const ") && star_count > 0 {
             (true, base_part.strip_prefix("const ")?.trim())
         } else {
             (false, base_part)
         };
+
+        // Special case: const char * -> &str (idiomatic Rust string slice)
+        if is_const && (base_type == "char" || base_type == "signed char") && star_count == 1 {
+            return Some("&str".to_string());
+        }
+        
+        // Special case: char * -> String (owned string)
+        if !is_const && base_type == "char" && star_count == 1 {
+            return Some("String".to_string());
+        }
 
         let rust_base = self.convert_internal(base_type)?;
 
@@ -463,8 +618,27 @@ impl TypeConverter {
     }
 
     /// Add a custom type mapping
-    pub fn add_custom_type(&mut self, source: String, target: String, category: TypeCategory, is_signed: bool) {
-        self.add_type(&source, &target, category, is_signed);
+    pub fn add_custom_type(
+        &mut self,
+        source: &str,
+        target: &str,
+        category: TypeCategory,
+        is_signed: bool,
+        is_const: bool,
+        pointer_level: usize,
+        dimensions: usize,
+        size: usize,
+    ) {
+        self.add_type_metadata(&source,TypeMetadata {
+        source_type: source.to_string(),
+        target_type: target.to_string(),
+        category,
+        is_signed,
+        is_const,
+        pointer_level,
+        dimensions,
+        size_bytes: Some(size)
+        });
     }
 
     /// Add a type alias
@@ -481,6 +655,15 @@ impl TypeConverter {
     pub fn convert_entry(&mut self, entry: &Entry) -> Option<String> {
         let type_str = entry.name()?;
         self.convert(type_str)
+    }
+    
+    /// Get all type mappings as (c_name, rust_name) pairs
+    pub fn get_all_mappings(&self) -> Vec<(&str, &str,&str)> {
+        let type_map = self.type_map
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.target_type.as_str(),v.category.as_str()))
+            .collect();
+        type_map
     }
 }
 
@@ -533,7 +716,9 @@ pub fn to_snake_case(s: &str) -> String {
 
     while let Some(ch) = chars.next() {
         if ch.is_uppercase() {
-            if !result.is_empty() && (prev_was_lowercase || chars.peek().map_or(false, |c| c.is_lowercase())) {
+            if !result.is_empty()
+                && (prev_was_lowercase || chars.peek().map_or(false, |c| c.is_lowercase()))
+            {
                 result.push('_');
             }
             result.extend(ch.to_lowercase());
@@ -645,18 +830,55 @@ pub fn is_valid_c_identifier(s: &str) -> bool {
 pub fn is_c_keyword(s: &str) -> bool {
     matches!(
         s,
-        "if" | "else" | "while" | "for" | "do" | "switch" | "case" | "default"
-            | "break" | "continue" | "return" | "goto"
-            | "struct" | "union" | "enum" | "typedef"
-            | "auto" | "register" | "static" | "extern"
-            | "const" | "volatile" | "restrict"
-            | "void" | "char" | "short" | "int" | "long" | "float" | "double"
-            | "signed" | "unsigned"
-            | "inline" | "sizeof"
-            | "_Bool" | "_Complex" | "_Imaginary"
-            | "_Alignas" | "_Alignof" | "_Atomic" | "_Generic" | "_Noreturn"
-            | "_Static_assert" | "_Thread_local" | "typeof" | "typeof_unqual"
-            | "_BitInt" | "_Decimal128" | "_Decimal32" | "_Decimal64"
+        "if" | "else"
+            | "while"
+            | "for"
+            | "do"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "return"
+            | "goto"
+            | "struct"
+            | "union"
+            | "enum"
+            | "typedef"
+            | "auto"
+            | "register"
+            | "static"
+            | "extern"
+            | "const"
+            | "volatile"
+            | "restrict"
+            | "void"
+            | "char"
+            | "short"
+            | "int"
+            | "long"
+            | "float"
+            | "double"
+            | "signed"
+            | "unsigned"
+            | "inline"
+            | "sizeof"
+            | "_Bool"
+            | "_Complex"
+            | "_Imaginary"
+            | "_Alignas"
+            | "_Alignof"
+            | "_Atomic"
+            | "_Generic"
+            | "_Noreturn"
+            | "_Static_assert"
+            | "_Thread_local"
+            | "typeof"
+            | "typeof_unqual"
+            | "_BitInt"
+            | "_Decimal128"
+            | "_Decimal32"
+            | "_Decimal64"
     )
 }
 
@@ -674,7 +896,8 @@ const ASSIGNMENT_OPERATORS: &[&str] = &[
 ];
 
 const BINARY_OPERATORS: &[&str] = &[
-    "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "==", "!=", "<", ">", "<=", ">=", "&&", "||",
+    "+", "-", "*", "/", "%", "&", "|", "^", "<<", ">>", "==", "!=", "<", ">", "<=", ">=", "&&",
+    "||",
 ];
 
 /// Check if a token string is an operator
@@ -735,7 +958,7 @@ impl IdentifierCategory {
             IdentifierCategory::Custom(s) => s.as_str(),
         }
     }
-    
+
     /// Get the target case for this category
     pub fn target_case(&self) -> IdentifierCase {
         match self {
@@ -776,19 +999,19 @@ impl IdentifierMetadata {
             notes: None,
         }
     }
-    
+
     /// Mark as special (requires attention)
     pub fn as_special(mut self) -> Self {
         self.is_special = true;
         self
     }
-    
+
     /// Add notes
     pub fn with_notes(mut self, notes: &str) -> Self {
         self.notes = Some(notes.to_string());
         self
     }
-    
+
     /// Convert to an Entry representation
     pub fn to_entry(&self) -> Entry {
         let mut node = Entry::node("IdentifierMetadata", &self.source_name);
@@ -803,7 +1026,7 @@ impl IdentifierMetadata {
 }
 
 /// Identifier conversion engine
-/// 
+///
 /// Converts C identifiers to Rust equivalents, handling:
 /// - Standard library function name mappings (printf -> print!, etc.)
 /// - Case conversion based on category (snake_case, PascalCase, etc.)
@@ -819,6 +1042,8 @@ pub struct IdentifierConverter {
     conversion_cache: HashMap<String, String>,
     /// Identifier aliases
     aliases: HashMap<String, String>,
+    /// Struct field names: struct_name -> Vec<field_name>
+    struct_fields: HashMap<String, Vec<String>>,
 }
 
 impl IdentifierConverter {
@@ -829,12 +1054,13 @@ impl IdentifierConverter {
             category_index: HashMap::new(),
             conversion_cache: HashMap::new(),
             aliases: HashMap::new(),
+            struct_fields: HashMap::new(),
         };
         converter.initialize_stdlib_mappings();
         converter.initialize_common_mappings();
         converter
     }
-    
+
     /// Initialize standard library function mappings
     fn initialize_stdlib_mappings(&mut self) {
         // I/O functions
@@ -844,19 +1070,31 @@ impl IdentifierConverter {
         self.add_identifier("snprintf", "format!", IdentifierCategory::StdLibFunction);
         self.add_identifier("puts", "println!", IdentifierCategory::StdLibFunction);
         self.add_identifier("putchar", "print!", IdentifierCategory::StdLibFunction);
-        self.add_identifier("getchar", "std::io::stdin().bytes().next()", IdentifierCategory::StdLibFunction);
-        self.add_identifier("fgets", "std::io::stdin().read_line", IdentifierCategory::StdLibFunction);
-        
+        self.add_identifier(
+            "getchar",
+            "std::io::stdin().bytes().next()",
+            IdentifierCategory::StdLibFunction,
+        );
+        self.add_identifier(
+            "fgets",
+            "std::io::stdin().read_line",
+            IdentifierCategory::StdLibFunction,
+        );
+
         // Memory functions
         self.add_identifier("malloc", "Box::new", IdentifierCategory::StdLibFunction);
         self.add_identifier("calloc", "vec![0; n]", IdentifierCategory::StdLibFunction);
         self.add_identifier("realloc", "Vec::resize", IdentifierCategory::StdLibFunction);
         self.add_identifier("free", "drop", IdentifierCategory::StdLibFunction);
-        self.add_identifier("memcpy", "copy_from_slice", IdentifierCategory::StdLibFunction);
+        self.add_identifier(
+            "memcpy",
+            "copy_from_slice",
+            IdentifierCategory::StdLibFunction,
+        );
         self.add_identifier("memmove", "copy_within", IdentifierCategory::StdLibFunction);
         self.add_identifier("memset", "fill", IdentifierCategory::StdLibFunction);
         self.add_identifier("memcmp", "eq", IdentifierCategory::StdLibFunction);
-        
+
         // String functions
         self.add_identifier("strlen", "len", IdentifierCategory::StdLibFunction);
         self.add_identifier("strcpy", "clone", IdentifierCategory::StdLibFunction);
@@ -867,7 +1105,7 @@ impl IdentifierConverter {
         self.add_identifier("strchr", "find", IdentifierCategory::StdLibFunction);
         self.add_identifier("strstr", "contains", IdentifierCategory::StdLibFunction);
         self.add_identifier("strtok", "split", IdentifierCategory::StdLibFunction);
-        
+
         // Math functions
         self.add_identifier("abs", "abs", IdentifierCategory::StdLibFunction);
         self.add_identifier("fabs", "abs", IdentifierCategory::StdLibFunction);
@@ -882,18 +1120,34 @@ impl IdentifierConverter {
         self.add_identifier("log", "ln", IdentifierCategory::StdLibFunction);
         self.add_identifier("log10", "log10", IdentifierCategory::StdLibFunction);
         self.add_identifier("exp", "exp", IdentifierCategory::StdLibFunction);
-        
+
         // Utility functions
-        self.add_identifier("sizeof", "std::mem::size_of", IdentifierCategory::StdLibFunction);
-        self.add_identifier("offsetof", "std::mem::offset_of!", IdentifierCategory::StdLibFunction);
-        self.add_identifier("exit", "std::process::exit", IdentifierCategory::StdLibFunction);
-        self.add_identifier("abort", "std::process::abort", IdentifierCategory::StdLibFunction);
+        self.add_identifier(
+            "sizeof",
+            "std::mem::size_of",
+            IdentifierCategory::StdLibFunction,
+        );
+        self.add_identifier(
+            "offsetof",
+            "std::mem::offset_of!",
+            IdentifierCategory::StdLibFunction,
+        );
+        self.add_identifier(
+            "exit",
+            "std::process::exit",
+            IdentifierCategory::StdLibFunction,
+        );
+        self.add_identifier(
+            "abort",
+            "std::process::abort",
+            IdentifierCategory::StdLibFunction,
+        );
         self.add_identifier("assert", "assert!", IdentifierCategory::StdLibFunction);
         self.add_identifier("atoi", "parse::<i32>", IdentifierCategory::StdLibFunction);
         self.add_identifier("atof", "parse::<f64>", IdentifierCategory::StdLibFunction);
         self.add_identifier("atol", "parse::<i64>", IdentifierCategory::StdLibFunction);
     }
-    
+
     /// Initialize common identifier mappings
     fn initialize_common_mappings(&mut self) {
         // Common constants
@@ -901,121 +1155,146 @@ impl IdentifierConverter {
         self.add_identifier("TRUE", "true", IdentifierCategory::Constant);
         self.add_identifier("FALSE", "false", IdentifierCategory::Constant);
         self.add_identifier("EOF", "None", IdentifierCategory::Constant);
-        
+
         // Common macros
         self.add_identifier("MIN", "min", IdentifierCategory::Macro);
         self.add_identifier("MAX", "max", IdentifierCategory::Macro);
         self.add_identifier("ABS", "abs", IdentifierCategory::Macro);
-        
+
         // File handles
         self.add_identifier("stdin", "std::io::stdin()", IdentifierCategory::Variable);
         self.add_identifier("stdout", "std::io::stdout()", IdentifierCategory::Variable);
         self.add_identifier("stderr", "std::io::stderr()", IdentifierCategory::Variable);
     }
-    
+
     /// Add an identifier mapping
     fn add_identifier(&mut self, source: &str, target: &str, category: IdentifierCategory) {
         let metadata = IdentifierMetadata::new(source, target, category.clone());
-        
+
         self.category_index
             .entry(category)
             .or_default()
             .push(source.to_string());
-        
+
         self.id_map.insert(source.to_string(), metadata);
     }
-    
+
     /// Convert an identifier to its Rust equivalent
     pub fn convert(&mut self, source: &str) -> Option<String> {
         // Check cache first
         if let Some(cached) = self.conversion_cache.get(source) {
             return Some(cached.clone());
         }
-        
+
         let result = self.convert_internal(source)?;
-        
+
         // Cache the result
-        self.conversion_cache.insert(source.to_string(), result.clone());
-        
+        self.conversion_cache
+            .insert(source.to_string(), result.clone());
+
         Some(result)
     }
-    
+
     /// Internal conversion logic
     fn convert_internal(&self, source: &str) -> Option<String> {
         // Check for direct mapping
         if let Some(metadata) = self.id_map.get(source) {
             return Some(metadata.target_name.clone());
         }
-        
+
         // Check aliases
         if let Some(alias) = self.aliases.get(source) {
             return Some(alias.clone());
         }
-        
+
         // Check System database for registered functions
         if let Some(rust_name) = self.lookup_registered_function(source) {
             return Some(rust_name);
         }
-        
+
         // No direct mapping - just sanitize for Rust keywords
         Some(sanitize_rust_identifier(source))
     }
-    
+
     /// Look up a function in the System's registered functions database
     fn lookup_registered_function(&self, source: &str) -> Option<String> {
         crate::system::system().lookup_function(source)
     }
-    
+
     /// Convert with category-appropriate case conversion
     pub fn convert_with_case(&mut self, source: &str, category: IdentifierCategory) -> String {
         // Check for direct mapping first
         if let Some(metadata) = self.id_map.get(source) {
             return metadata.target_name.clone();
         }
-        
+
         // Apply case conversion based on category
         let case = category.target_case();
         let converted = convert_identifier(source, case);
-        
+
         // Sanitize for Rust keywords
         sanitize_rust_identifier(&converted)
     }
-    
+
     /// Get metadata for an identifier
     pub fn get_metadata(&self, source: &str) -> Option<&IdentifierMetadata> {
         self.id_map.get(source)
     }
-    
+
     /// Check if an identifier has a known mapping
     pub fn has_mapping(&self, source: &str) -> bool {
         self.id_map.contains_key(source)
     }
-    
+
     /// Get all identifiers in a category
     pub fn by_category(&self, category: &IdentifierCategory) -> Option<&Vec<String>> {
         self.category_index.get(category)
     }
-    
+
     /// Add a custom identifier mapping
     pub fn add_custom(&mut self, source: String, target: String, category: IdentifierCategory) {
         self.add_identifier(&source, &target, category);
     }
-    
+
     /// Add an alias
     pub fn add_alias(&mut self, alias: String, target: String) {
         self.aliases.insert(alias, target);
     }
-    
+
     /// Clear the conversion cache
     pub fn clear_cache(&mut self) {
         self.conversion_cache.clear();
     }
-    
+
     /// Check if source is a stdlib function
     pub fn is_stdlib_function(&self, source: &str) -> bool {
-        self.id_map.get(source)
+        self.id_map
+            .get(source)
             .map(|m| m.category == IdentifierCategory::StdLibFunction)
             .unwrap_or(false)
+    }
+
+    /// Register struct field names
+    pub fn register_struct_fields(&mut self, struct_name: &str, fields: Vec<String>) {
+        self.struct_fields.insert(struct_name.to_string(), fields);
+    }
+
+    /// Get struct field names
+    pub fn get_struct_fields(&self, struct_name: &str) -> Option<&Vec<String>> {
+        self.struct_fields.get(struct_name)
+    }
+
+    /// Check if a struct is registered
+    pub fn has_struct(&self, struct_name: &str) -> bool {
+        self.struct_fields.contains_key(struct_name)
+    }
+    
+    /// Get all identifier mappings as (c_name, rust_name, category) tuples
+    pub fn get_all_mappings(&self) -> Vec<(&str, &str, &IdentifierCategory)> {
+        self.id_map
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.target_name.as_str(), &v.category))
+            .collect()
     }
 }
 
@@ -1036,7 +1315,7 @@ mod tests {
     #[test]
     fn test_type_converter_basic() {
         let mut converter = TypeConverter::new();
-        
+
         assert_eq!(converter.convert("int"), Some("i32".to_string()));
         assert_eq!(converter.convert("unsigned int"), Some("u32".to_string()));
         assert_eq!(converter.convert("float"), Some("f32".to_string()));
@@ -1047,7 +1326,7 @@ mod tests {
     #[test]
     fn test_type_converter_fixed_width() {
         let mut converter = TypeConverter::new();
-        
+
         assert_eq!(converter.convert("int32_t"), Some("i32".to_string()));
         assert_eq!(converter.convert("uint64_t"), Some("u64".to_string()));
         assert_eq!(converter.convert("size_t"), Some("usize".to_string()));
@@ -1056,25 +1335,29 @@ mod tests {
     #[test]
     fn test_type_converter_pointers() {
         let mut converter = TypeConverter::new();
-        
+
         assert_eq!(converter.convert("int*"), Some("*mut i32".to_string()));
-        assert_eq!(converter.convert("const int*"), Some("*const i32".to_string()));
+        assert_eq!(
+            converter.convert("const int*"),
+            Some("*const i32".to_string())
+        );
     }
 
     #[test]
     fn test_type_converter_arrays() {
         let mut converter = TypeConverter::new();
-        
+
         assert_eq!(converter.convert("int[10]"), Some("[i32; 10]".to_string()));
         assert_eq!(converter.convert("int[]"), Some("&[i32]".to_string()));
     }
 
     #[test]
     fn test_type_metadata() {
-        let meta = TypeMetadata::with_size("int", "i32", TypeCategory::BasicInteger, true, 4);
+        let meta = TypeMetadata::with_size("int", "i32", TypeCategory::Integer, 4);
         assert_eq!(meta.source_type, "int");
         assert_eq!(meta.target_type, "i32");
-        assert!(meta.is_signed);
+        // Note: is_signed is not set by with_size(), defaults to false
+        assert!(!meta.is_signed);
         assert_eq!(meta.size_bytes, Some(4));
     }
 
@@ -1144,65 +1427,71 @@ mod tests {
         assert_eq!(convert_operator("~"), "!");
         assert_eq!(convert_operator("+"), "+");
     }
-    
+
     #[test]
     fn test_identifier_converter_stdlib() {
         let mut converter = IdentifierConverter::new();
-        
+
         assert_eq!(converter.convert("printf"), Some("print!".to_string()));
         assert_eq!(converter.convert("malloc"), Some("Box::new".to_string()));
         assert_eq!(converter.convert("strlen"), Some("len".to_string()));
-        assert_eq!(converter.convert("sizeof"), Some("std::mem::size_of".to_string()));
+        assert_eq!(
+            converter.convert("sizeof"),
+            Some("std::mem::size_of".to_string())
+        );
     }
-    
+
     #[test]
     fn test_identifier_converter_constants() {
         let mut converter = IdentifierConverter::new();
-        
-        assert_eq!(converter.convert("NULL"), Some("std::ptr::null()".to_string()));
+
+        assert_eq!(
+            converter.convert("NULL"),
+            Some("std::ptr::null()".to_string())
+        );
         assert_eq!(converter.convert("TRUE"), Some("true".to_string()));
         assert_eq!(converter.convert("FALSE"), Some("false".to_string()));
     }
-    
+
     #[test]
     fn test_identifier_converter_keywords() {
         let mut converter = IdentifierConverter::new();
-        
+
         // Rust keywords should be prefixed with r#
         assert_eq!(converter.convert("type"), Some("r#type".to_string()));
         assert_eq!(converter.convert("match"), Some("r#match".to_string()));
-        
+
         // Non-keywords pass through
         assert_eq!(converter.convert("my_var"), Some("my_var".to_string()));
     }
-    
+
     #[test]
     fn test_identifier_converter_with_case() {
         let mut converter = IdentifierConverter::new();
-        
+
         // Function names should be snake_case
         assert_eq!(
             converter.convert_with_case("MyFunction", IdentifierCategory::Function),
             "my_function"
         );
-        
+
         // Type names should be PascalCase
         assert_eq!(
             converter.convert_with_case("my_struct", IdentifierCategory::TypeName),
             "MyStruct"
         );
-        
+
         // Constants should be SCREAMING_SNAKE_CASE
         assert_eq!(
             converter.convert_with_case("maxValue", IdentifierCategory::Constant),
             "MAX_VALUE"
         );
     }
-    
+
     #[test]
     fn test_identifier_converter_is_stdlib() {
         let converter = IdentifierConverter::new();
-        
+
         assert!(converter.is_stdlib_function("printf"));
         assert!(converter.is_stdlib_function("malloc"));
         assert!(!converter.is_stdlib_function("my_function"));

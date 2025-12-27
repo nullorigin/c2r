@@ -12,8 +12,8 @@
 //! - `category` attr: Match entries in this category
 //! - Other attrs: Match entries with these attribute values
 
-use crate::db::web::Entry;
 use crate::db::tree::Tree;
+use crate::db::web::Entry;
 use std::collections::HashMap;
 
 // ============================================================================
@@ -104,13 +104,19 @@ impl QuerySpec {
 
     /// Add attribute equals filter
     pub fn with_attr(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.attrs.insert(key.into(), AttrMatch::Equals(value.into()));
+        self.attrs
+            .insert(key.into(), AttrMatch::Equals(value.into()));
         self
     }
 
     /// Add attribute contains filter
-    pub fn with_attr_contains(mut self, key: impl Into<String>, pattern: impl Into<String>) -> Self {
-        self.attrs.insert(key.into(), AttrMatch::Contains(pattern.into()));
+    pub fn with_attr_contains(
+        mut self,
+        key: impl Into<String>,
+        pattern: impl Into<String>,
+    ) -> Self {
+        self.attrs
+            .insert(key.into(), AttrMatch::Contains(pattern.into()));
         self
     }
 
@@ -172,12 +178,10 @@ impl QuerySpec {
                         return false;
                     }
                 }
-                AttrMatch::Contains(pattern) => {
-                    match entry.get_string_attr(key) {
-                        Some(v) if v.contains(pattern.as_str()) => {}
-                        _ => return false,
-                    }
-                }
+                AttrMatch::Contains(pattern) => match entry.get_string_attr(key) {
+                    Some(v) if v.contains(pattern.as_str()) => {}
+                    _ => return false,
+                },
                 AttrMatch::Bool(val) => {
                     if entry.get_bool_attr(key) != Some(*val) {
                         return false;
@@ -215,8 +219,11 @@ impl QuerySpec {
 
     /// Convert to an Entry for storage
     pub fn to_entry(&self) -> Entry {
-        let mut node = Entry::node("QuerySpec", self.predicate_name.as_deref().unwrap_or("unnamed"));
-        
+        let mut node = Entry::node(
+            "QuerySpec",
+            self.predicate_name.as_deref().unwrap_or("unnamed"),
+        );
+
         if let Some(ref k) = self.kind {
             node.set_attr("query_kind", Entry::string(k));
         }
@@ -230,7 +237,7 @@ impl QuerySpec {
             node.set_attr("range_start", Entry::usize(r.start));
             node.set_attr("range_end", Entry::usize(r.end));
         }
-        
+
         // Store attr matchers
         for (key, matcher) in &self.attrs {
             let matcher_entry = match matcher {
@@ -243,7 +250,7 @@ impl QuerySpec {
             };
             node.set_attr(&format!("attr_{}", key), matcher_entry);
         }
-        
+
         node
     }
 
@@ -257,7 +264,9 @@ impl QuerySpec {
         spec.predicate_name = entry.name().map(|s| s.to_string());
         spec.kind = entry.get_string_attr("query_kind").map(|s| s.to_string());
         spec.name = entry.get_string_attr("query_name").map(|s| s.to_string());
-        spec.category = entry.get_string_attr("query_category").map(|s| s.to_string());
+        spec.category = entry
+            .get_string_attr("query_category")
+            .map(|s| s.to_string());
 
         if let (Some(start), Some(end)) = (
             entry.get_usize_attr("range_start"),
@@ -448,16 +457,16 @@ impl<'a> Query<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tree::Tree;
     use crate::db::node::kind;
+    use crate::db::tree::Tree;
 
     #[test]
     fn test_query_spec_kind() {
         let spec = QuerySpec::kind("Function");
-        
+
         let func = Entry::node("Function", "test_func");
         let struc = Entry::node("Struct", "TestStruct");
-        
+
         assert!(spec.matches(&func));
         assert!(!spec.matches(&struc));
     }
@@ -465,10 +474,10 @@ mod tests {
     #[test]
     fn test_query_spec_name() {
         let spec = QuerySpec::kind("Function").with_name("calculate");
-        
+
         let func1 = Entry::node("Function", "calculate");
         let func2 = Entry::node("Function", "process");
-        
+
         assert!(spec.matches(&func1));
         assert!(!spec.matches(&func2));
     }
@@ -476,12 +485,12 @@ mod tests {
     #[test]
     fn test_query_spec_attr() {
         let spec = QuerySpec::new().with_bool_attr("is_static", true);
-        
+
         let mut static_fn = Entry::node("Function", "static_fn");
         static_fn.set_attr("is_static", Entry::bool(true));
-        
+
         let normal_fn = Entry::node("Function", "normal_fn");
-        
+
         assert!(spec.matches(&static_fn));
         assert!(!spec.matches(&normal_fn));
     }
@@ -492,13 +501,16 @@ mod tests {
             .with_name("test")
             .with_bool_attr("is_static", true)
             .named("static_functions");
-        
+
         let entry = spec.to_entry();
         let restored = QuerySpec::from_entry(&entry).unwrap();
-        
+
         assert_eq!(restored.kind, Some("Function".to_string()));
         assert_eq!(restored.name, Some("test".to_string()));
-        assert_eq!(restored.predicate_name, Some("static_functions".to_string()));
+        assert_eq!(
+            restored.predicate_name,
+            Some("static_functions".to_string())
+        );
     }
 
     #[test]
@@ -507,7 +519,7 @@ mod tests {
             .with_function("func1", 0..50, |f| f)
             .with_function("func2", 51..100, |f| f)
             .with_struct("MyStruct", 101..150, |s| s);
-        
+
         let query = Query::new(&tree);
         assert_eq!(query.by_kind(kind::FUNCTION).len(), 2);
         assert_eq!(query.by_kind(kind::STRUCT).len(), 1);
@@ -518,10 +530,18 @@ mod tests {
         let tree = Tree::new()
             .with_function("calculate", 0..50, |f| f)
             .with_function("process", 51..100, |f| f);
-        
+
         let query = Query::new(&tree);
-        assert!(query.by_kind_and_name(kind::FUNCTION, "calculate").is_some());
-        assert!(query.by_kind_and_name(kind::FUNCTION, "nonexistent").is_none());
+        assert!(
+            query
+                .by_kind_and_name(kind::FUNCTION, "calculate")
+                .is_some()
+        );
+        assert!(
+            query
+                .by_kind_and_name(kind::FUNCTION, "nonexistent")
+                .is_none()
+        );
     }
 
     #[test]
@@ -529,7 +549,7 @@ mod tests {
         let tree = Tree::new()
             .with_function("static_fn", 0..50, |f| f.is_static())
             .with_function("normal_fn", 51..100, |f| f);
-        
+
         let query = Query::new(&tree);
         let static_fns = query.by_bool_attr("is_static", true);
         assert_eq!(static_fns.len(), 1);
@@ -541,7 +561,7 @@ mod tests {
             .with_function("f1", 0..50, |f| f)
             .with_function("f2", 51..100, |f| f)
             .with_function("f3", 101..150, |f| f);
-        
+
         let query = Query::new(&tree);
         let in_range = query.in_range(0, 100);
         assert_eq!(in_range.len(), 2);
@@ -552,7 +572,7 @@ mod tests {
         let tree = Tree::new()
             .with_function("func1", 0..50, |f| f)
             .with_function("func2", 51..100, |f| f);
-        
+
         let query = Query::new(&tree);
         let results = query.find_where(|e| e.name() == Some("func1"));
         assert_eq!(results.len(), 1);

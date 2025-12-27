@@ -1268,10 +1268,18 @@ pub fn err<T>(kind: Kind, reason: Reason, message: &str) -> Result<T> {
 #[macro_export]
 macro_rules! err {
     ($kind:tt, $reason:tt) => {
-        Err(Error::new($crate::error::Kind::$kind, crate::error::Reason::$reason, None))
+        Err(Error::new(
+            $crate::error::Kind::$kind,
+            $crate::error::Reason::$reason,
+            None,
+        ))
     };
     ($kind:tt, $reason:tt, $message:expr) => {
-        Err(Error::new($crate::error::Kind::$kind, crate::error::Reason::$reason, Some($message.into())))
+        Err(Error::new(
+            $crate::error::Kind::$kind,
+            $crate::error::Reason::$reason,
+            Some($message.into()),
+        ))
     };
 }
 

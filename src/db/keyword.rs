@@ -6,7 +6,7 @@
 //!
 //! Uses the Entry/Build pattern for integration with the Web database.
 
-use crate::db::web::{Entry, Build};
+use crate::db::web::{Build, Entry};
 use std::collections::HashMap;
 
 // ============================================================================
@@ -150,7 +150,8 @@ impl Keyword {
 
     /// Get all keywords this can follow
     pub fn followers(&self) -> Vec<&String> {
-        self.relations.iter()
+        self.relations
+            .iter()
             .filter(|(_, (f, _))| *f)
             .map(|(k, _)| k)
             .collect()
@@ -158,7 +159,8 @@ impl Keyword {
 
     /// Get all keywords this can precede
     pub fn preceders(&self) -> Vec<&String> {
-        self.relations.iter()
+        self.relations
+            .iter()
             .filter(|(_, (_, p))| *p)
             .map(|(k, _)| k)
             .collect()
@@ -166,7 +168,10 @@ impl Keyword {
 
     /// Check if this keyword is a C type keyword
     pub fn is_type(&self) -> bool {
-        matches!(self.category, KeywordCategory::TypeDeclaration | KeywordCategory::BasicType)
+        matches!(
+            self.category,
+            KeywordCategory::TypeDeclaration | KeywordCategory::BasicType
+        )
     }
 
     /// Check if this keyword is a storage class
@@ -193,19 +198,27 @@ impl Keyword {
 impl Build for Keyword {
     fn to_entry(&self) -> Entry {
         let mut attrs = HashMap::new();
-        attrs.insert("category".to_string(), Entry::string(self.category.as_str()));
+        attrs.insert(
+            "category".to_string(),
+            Entry::string(self.category.as_str()),
+        );
         attrs.insert("priority".to_string(), Entry::i16(self.priority));
-        
+
         // Convert relations to nested structure
         if !self.relations.is_empty() {
-            let relations_map: HashMap<String, Entry> = self.relations.iter()
+            let relations_map: HashMap<String, Entry> = self
+                .relations
+                .iter()
                 .map(|(kw, (can_follow, can_precede))| {
-                    (kw.clone(), Entry::pair(Entry::bool(*can_follow), Entry::bool(*can_precede)))
+                    (
+                        kw.clone(),
+                        Entry::pair(Entry::bool(*can_follow), Entry::bool(*can_precede)),
+                    )
                 })
                 .collect();
             attrs.insert("relations".to_string(), Entry::hashmap(relations_map));
         }
-        
+
         Entry::node_with_attrs("keyword", &self.text, attrs)
     }
 
@@ -272,7 +285,10 @@ impl Order {
         }
         // In `to` keyword: can follow `from`
         if let Some(kw) = self.keywords.get_mut(to) {
-            let entry = kw.relations.entry(from.to_string()).or_insert((false, false));
+            let entry = kw
+                .relations
+                .entry(from.to_string())
+                .or_insert((false, false));
             entry.0 = true; // can_follow
         }
     }
@@ -284,13 +300,20 @@ impl Order {
             entry.1 = false;
         }
         if let Some(kw) = self.keywords.get_mut(to) {
-            let entry = kw.relations.entry(from.to_string()).or_insert((false, false));
+            let entry = kw
+                .relations
+                .entry(from.to_string())
+                .or_insert((false, false));
             entry.0 = false;
         }
     }
 
     /// Add node transition rule
-    pub fn add_node_transition(&mut self, parent: impl Into<String>, children: Vec<impl Into<String>>) {
+    pub fn add_node_transition(
+        &mut self,
+        parent: impl Into<String>,
+        children: Vec<impl Into<String>>,
+    ) {
         self.node_transitions.insert(
             parent.into(),
             children.into_iter().map(|s| s.into()).collect(),
@@ -377,20 +400,27 @@ impl Order {
 impl Build for Order {
     fn to_entry(&self) -> Entry {
         // Convert keywords to Entry::HashMap
-        let keywords_map: HashMap<String, Entry> = self.keywords.iter()
+        let keywords_map: HashMap<String, Entry> = self
+            .keywords
+            .iter()
             .map(|(k, v)| (k.clone(), v.to_entry()))
             .collect();
-        
+
         // Convert node_transitions to Entry::HashMap
-        let transitions_map: HashMap<String, Entry> = self.node_transitions.iter()
+        let transitions_map: HashMap<String, Entry> = self
+            .node_transitions
+            .iter()
             .map(|(k, v)| {
                 let children: Vec<Entry> = v.iter().map(|s| Entry::string(s.clone())).collect();
                 (k.clone(), Entry::vec(children))
             })
             .collect();
-        
+
         // Use Entry::pair to store both HashMaps
-        Entry::pair(Entry::hashmap(keywords_map), Entry::hashmap(transitions_map))
+        Entry::pair(
+            Entry::hashmap(keywords_map),
+            Entry::hashmap(transitions_map),
+        )
     }
 
     fn kind(&self) -> &str {
@@ -422,7 +452,15 @@ impl Order {
         self.register(Keyword::new("typedef", KeywordCategory::TypeDeclaration).with_priority(110));
 
         // Storage classes
-        for &kw in &["static", "extern", "register", "auto", "inline", "__inline", "__inline__"] {
+        for &kw in &[
+            "static",
+            "extern",
+            "register",
+            "auto",
+            "inline",
+            "__inline",
+            "__inline__",
+        ] {
             self.register(Keyword::new(kw, KeywordCategory::StorageClass).with_priority(90));
         }
 
@@ -441,7 +479,10 @@ impl Order {
 
         // Preprocessor
         self.register(Keyword::new("#", KeywordCategory::Preprocessor).with_priority(200));
-        for &kw in &["define", "include", "ifdef", "ifndef", "endif", "elif", "pragma", "warning", "error", "undef", "line"] {
+        for &kw in &[
+            "define", "include", "ifdef", "ifndef", "endif", "elif", "pragma", "warning", "error",
+            "undef", "line",
+        ] {
             self.register(Keyword::new(kw, KeywordCategory::Preprocessor).with_priority(190));
         }
 
@@ -469,7 +510,10 @@ impl Order {
 
     fn create_ordering_chain(&mut self) {
         // typedef -> type keywords
-        for &to in &["struct", "enum", "union", "int", "char", "float", "double", "void", "long", "short", "unsigned", "signed"] {
+        for &to in &[
+            "struct", "enum", "union", "int", "char", "float", "double", "void", "long", "short",
+            "unsigned", "signed",
+        ] {
             self.link("typedef", to);
         }
 
@@ -484,7 +528,10 @@ impl Order {
 
         // Storage classes -> types
         for &from in &["static", "extern", "register", "auto"] {
-            for &to in &["int", "char", "float", "double", "void", "long", "short", "unsigned", "signed", "const", "volatile", "struct", "enum", "union"] {
+            for &to in &[
+                "int", "char", "float", "double", "void", "long", "short", "unsigned", "signed",
+                "const", "volatile", "struct", "enum", "union",
+            ] {
                 self.link(from, to);
             }
             // Cannot follow typedef or each other
@@ -495,7 +542,10 @@ impl Order {
 
         // Type qualifiers -> types
         for &from in &["const", "volatile", "restrict"] {
-            for &to in &["int", "char", "float", "double", "void", "long", "short", "unsigned", "signed", "struct", "enum", "union"] {
+            for &to in &[
+                "int", "char", "float", "double", "void", "long", "short", "unsigned", "signed",
+                "struct", "enum", "union",
+            ] {
                 self.link(from, to);
             }
             // Qualifiers can follow each other
@@ -521,11 +571,16 @@ impl Order {
         }
 
         // # -> preprocessor directives
-        for &to in &["define", "include", "ifdef", "ifndef", "endif", "elif", "pragma", "warning", "error", "undef", "line"] {
+        for &to in &[
+            "define", "include", "ifdef", "ifndef", "endif", "elif", "pragma", "warning", "error",
+            "undef", "line",
+        ] {
             self.link("#", to);
         }
         // # cannot be followed by type keywords
-        for &to in &["struct", "enum", "typedef", "int", "char", "float", "double"] {
+        for &to in &[
+            "struct", "enum", "typedef", "int", "char", "float", "double",
+        ] {
             self.unlink("#", to);
         }
 
@@ -563,19 +618,35 @@ impl Order {
     fn populate_node_transitions(&mut self) {
         // Top-level nodes
         let top_level = vec![
-            "function", "struct", "enum", "typedef", "global", "variable",
-            "array", "macro", "include", "comment", "type",
+            "function", "struct", "enum", "typedef", "global", "variable", "array", "macro",
+            "include", "comment", "type",
         ];
         for kind in &top_level {
             self.add_node_transition(*kind, top_level.clone());
         }
 
         // Function can contain
-        self.add_node_transition("function", vec![
-            "parameter", "return_type", "function_body", "variable_declaration",
-            "assignment", "expression", "if_statement", "while_loop", "for_loop",
-            "do_while", "switch", "return", "break", "continue", "function_call", "comment",
-        ]);
+        self.add_node_transition(
+            "function",
+            vec![
+                "parameter",
+                "return_type",
+                "function_body",
+                "variable_declaration",
+                "assignment",
+                "expression",
+                "if_statement",
+                "while_loop",
+                "for_loop",
+                "do_while",
+                "switch",
+                "return",
+                "break",
+                "continue",
+                "function_call",
+                "comment",
+            ],
+        );
 
         // Struct contains fields
         self.add_node_transition("struct", vec!["field", "comment"]);
@@ -584,17 +655,39 @@ impl Order {
         self.add_node_transition("enum", vec!["variant", "comment"]);
 
         // Function body
-        self.add_node_transition("function_body", vec![
-            "variable_declaration", "assignment", "expression", "if_statement",
-            "while_loop", "for_loop", "do_while", "switch", "case", "return",
-            "break", "continue", "function_call", "comment",
-        ]);
+        self.add_node_transition(
+            "function_body",
+            vec![
+                "variable_declaration",
+                "assignment",
+                "expression",
+                "if_statement",
+                "while_loop",
+                "for_loop",
+                "do_while",
+                "switch",
+                "case",
+                "return",
+                "break",
+                "continue",
+                "function_call",
+                "comment",
+            ],
+        );
 
         // Control flow
         let control_children = vec![
-            "expression", "function_body", "variable_declaration", "assignment",
-            "function_call", "if_statement", "while_loop", "for_loop",
-            "return", "break", "continue",
+            "expression",
+            "function_body",
+            "variable_declaration",
+            "assignment",
+            "function_call",
+            "if_statement",
+            "while_loop",
+            "for_loop",
+            "return",
+            "break",
+            "continue",
         ];
         for kind in &["if_statement", "while_loop", "for_loop", "do_while"] {
             self.add_node_transition(*kind, control_children.clone());
@@ -606,7 +699,10 @@ impl Order {
         self.add_node_transition("switch", switch_children);
 
         // Expression
-        self.add_node_transition("expression", vec!["function_call", "expression", "variable"]);
+        self.add_node_transition(
+            "expression",
+            vec!["function_call", "expression", "variable"],
+        );
 
         // Variable declaration
         self.add_node_transition("variable_declaration", vec!["assignment", "expression"]);
@@ -627,16 +723,29 @@ pub fn c_order() -> Order {
 
 /// Check if a keyword is a C type keyword
 pub fn is_type_keyword(keyword: &str) -> bool {
-    matches!(keyword, 
-        "int" | "char" | "float" | "double" | "void" | "long" | "short" |
-        "unsigned" | "signed" | "struct" | "enum" | "union"
+    matches!(
+        keyword,
+        "int"
+            | "char"
+            | "float"
+            | "double"
+            | "void"
+            | "long"
+            | "short"
+            | "unsigned"
+            | "signed"
+            | "struct"
+            | "enum"
+            | "union"
     )
 }
 
 /// Check if a keyword is a storage class
 pub fn is_storage_class(keyword: &str) -> bool {
-    matches!(keyword, "static" | "extern" | "register" | "auto" | 
-                      "inline" | "__inline" | "__inline__")
+    matches!(
+        keyword,
+        "static" | "extern" | "register" | "auto" | "inline" | "__inline" | "__inline__"
+    )
 }
 
 /// Check if a keyword is a type qualifier
@@ -646,17 +755,39 @@ pub fn is_type_qualifier(keyword: &str) -> bool {
 
 /// Check if a keyword is control flow
 pub fn is_control_flow(keyword: &str) -> bool {
-    matches!(keyword,
-        "if" | "else" | "while" | "for" | "do" | "switch" | "case" |
-        "default" | "break" | "continue" | "goto" | "return"
+    matches!(
+        keyword,
+        "if" | "else"
+            | "while"
+            | "for"
+            | "do"
+            | "switch"
+            | "case"
+            | "default"
+            | "break"
+            | "continue"
+            | "goto"
+            | "return"
     )
 }
 
 /// Check if a keyword is a preprocessor directive
 pub fn is_preprocessor(keyword: &str) -> bool {
-    matches!(keyword,
-        "#" | "define" | "include" | "ifdef" | "ifndef" | "endif" |
-        "if" | "else" | "elif" | "pragma" | "warning" | "error" | "undef" | "line"
+    matches!(
+        keyword,
+        "#" | "define"
+            | "include"
+            | "ifdef"
+            | "ifndef"
+            | "endif"
+            | "if"
+            | "else"
+            | "elif"
+            | "pragma"
+            | "warning"
+            | "error"
+            | "undef"
+            | "line"
     )
 }
 
@@ -687,7 +818,11 @@ mod tests {
         let order = Order::with_c_rules();
 
         // Valid: typedef struct identifier
-        let valid_seq = vec!["typedef".to_string(), "struct".to_string(), "identifier".to_string()];
+        let valid_seq = vec![
+            "typedef".to_string(),
+            "struct".to_string(),
+            "identifier".to_string(),
+        ];
         assert!(order.validate(&valid_seq));
 
         // Invalid: struct struct
@@ -709,7 +844,7 @@ mod tests {
             .precedes("identifier")
             .precedes("{")
             .with_priority(100);
-        
+
         let entry = kw.to_entry();
         assert!(entry.name().is_some());
     }
@@ -717,7 +852,7 @@ mod tests {
     #[test]
     fn test_node_transitions() {
         let order = Order::with_c_rules();
-        
+
         assert!(order.is_valid_transition("function", "parameter"));
         assert!(order.is_valid_transition("struct", "field"));
         assert!(order.is_valid_transition("enum", "variant"));
@@ -727,7 +862,7 @@ mod tests {
     #[test]
     fn test_suggest() {
         let order = Order::with_c_rules();
-        
+
         let suggestions = order.suggest("typedef");
         assert!(!suggestions.is_empty());
     }
@@ -739,12 +874,12 @@ mod tests {
             .precedes("{")
             .not_precedes("struct")
             .with_priority(100);
-        
+
         assert_eq!(kw.can_precede("identifier"), Some(true));
         assert_eq!(kw.can_precede("struct"), Some(false));
         assert!(kw.is_type());
         assert!(!kw.is_control_flow());
-        
+
         let preceders = kw.preceders();
         assert!(preceders.contains(&&"identifier".to_string()));
     }
@@ -754,11 +889,11 @@ mod tests {
         let mut order = Order::new();
         order.register(Keyword::new("a", KeywordCategory::Identifier));
         order.register(Keyword::new("b", KeywordCategory::Identifier));
-        
+
         // Link a -> b
         order.link("a", "b");
         assert!(order.can_follow("a", "b"));
-        
+
         // Unlink
         order.unlink("a", "b");
         assert!(!order.can_follow("a", "b"));

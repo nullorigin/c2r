@@ -15,27 +15,27 @@ use std::time::SystemTime;
 pub trait Store<K, V> {
     /// Get a value by key
     fn get(&self, key: &K) -> Option<&V>;
-    
+
     /// Get a mutable value by key
     fn get_mut(&mut self, key: &K) -> Option<&mut V>;
-    
+
     /// Insert a value, returning the old value if present
     fn insert(&mut self, key: K, value: V) -> Option<V>;
-    
+
     /// Remove a value by key
     fn remove(&mut self, key: &K) -> Option<V>;
-    
+
     /// Check if key exists
     fn contains(&self, key: &K) -> bool;
-    
+
     /// Get number of entries
     fn len(&self) -> usize;
-    
+
     /// Check if empty
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    
+
     /// Clear all entries
     fn clear(&mut self);
 }
@@ -44,12 +44,12 @@ pub trait Store<K, V> {
 pub trait Queryable<Q, V> {
     /// Find all values matching a query
     fn query(&self, query: &Q) -> Vec<&V>;
-    
+
     /// Find first value matching a query
     fn query_first(&self, query: &Q) -> Option<&V> {
         self.query(query).into_iter().next()
     }
-    
+
     /// Count values matching a query
     fn query_count(&self, query: &Q) -> usize {
         self.query(query).len()
@@ -60,10 +60,10 @@ pub trait Queryable<Q, V> {
 pub trait Indexed<K, V> {
     /// Add an index on a field
     fn add_index(&mut self, field: &str);
-    
+
     /// Remove an index
     fn remove_index(&mut self, field: &str);
-    
+
     /// Get values by indexed field
     fn get_by_index(&self, field: &str, value: &str) -> Vec<&V>;
 }
@@ -71,10 +71,10 @@ pub trait Indexed<K, V> {
 /// A store that tracks statistics
 pub trait StatsTracking {
     type Stats;
-    
+
     /// Get current statistics
     fn stats(&self) -> &Self::Stats;
-    
+
     /// Reset statistics
     fn reset_stats(&mut self);
 }
@@ -88,19 +88,19 @@ pub trait StatsTracking {
 pub struct Record<T> {
     /// Unique identifier
     pub id: String,
-    
+
     /// The actual data
     pub data: T,
-    
+
     /// Creation timestamp
     pub created_at: SystemTime,
-    
+
     /// Last modification timestamp
     pub modified_at: SystemTime,
-    
+
     /// Additional metadata
     pub metadata: HashMap<String, String>,
-    
+
     /// Tags for categorization
     pub tags: Vec<String>,
 }
@@ -118,41 +118,41 @@ impl<T> Record<T> {
             tags: Vec::new(),
         }
     }
-    
+
     /// Add metadata
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
         self
     }
-    
+
     /// Add a tag
     pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
         self.tags.push(tag.into());
         self
     }
-    
+
     /// Add multiple tags
     pub fn with_tags(mut self, tags: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.tags.extend(tags.into_iter().map(|t| t.into()));
         self
     }
-    
+
     /// Mark as modified
     pub fn touch(&mut self) {
         self.modified_at = SystemTime::now();
     }
-    
+
     /// Update the data
     pub fn update(&mut self, data: T) {
         self.data = data;
         self.touch();
     }
-    
+
     /// Check if has a specific tag
     pub fn has_tag(&self, tag: &str) -> bool {
         self.tags.iter().any(|t| t == tag)
     }
-    
+
     /// Get metadata value
     pub fn get_metadata(&self, key: &str) -> Option<&String> {
         self.metadata.get(key)
@@ -177,24 +177,24 @@ impl<K: Eq + Hash + Clone, V> HashStore<K, V> {
             indices: HashMap::new(),
         }
     }
-    
+
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             data: HashMap::with_capacity(capacity),
             indices: HashMap::new(),
         }
     }
-    
+
     /// Iterate over all values
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.data.values()
     }
-    
+
     /// Iterate over all key-value pairs
     pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
         self.data.iter()
     }
-    
+
     /// Get all keys
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.data.keys()
@@ -211,27 +211,27 @@ impl<K: Eq + Hash + Clone, V> Store<K, V> for HashStore<K, V> {
     fn get(&self, key: &K) -> Option<&V> {
         self.data.get(key)
     }
-    
+
     fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.data.get_mut(key)
     }
-    
+
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         self.data.insert(key, value)
     }
-    
+
     fn remove(&mut self, key: &K) -> Option<V> {
         self.data.remove(key)
     }
-    
+
     fn contains(&self, key: &K) -> bool {
         self.data.contains_key(key)
     }
-    
+
     fn len(&self) -> usize {
         self.data.len()
     }
-    
+
     fn clear(&mut self) {
         self.data.clear();
         self.indices.clear();
@@ -247,7 +247,7 @@ impl<K: Eq + Hash + Clone, V> Store<K, V> for HashStore<K, V> {
 pub struct GroupedStore<V> {
     /// All values by ID
     values: HashMap<String, V>,
-    
+
     /// Values grouped by category
     groups: HashMap<String, Vec<String>>,
 }
@@ -259,21 +259,21 @@ impl<V> GroupedStore<V> {
             groups: HashMap::new(),
         }
     }
-    
+
     /// Add a value to a group
     pub fn add(&mut self, id: impl Into<String>, group: impl Into<String>, value: V) {
         let id = id.into();
         let group = group.into();
-        
+
         self.groups.entry(group).or_default().push(id.clone());
         self.values.insert(id, value);
     }
-    
+
     /// Get a value by ID
     pub fn get(&self, id: &str) -> Option<&V> {
         self.values.get(id)
     }
-    
+
     /// Get all values in a group
     pub fn get_group(&self, group: &str) -> Vec<&V> {
         self.groups
@@ -281,27 +281,27 @@ impl<V> GroupedStore<V> {
             .map(|ids| ids.iter().filter_map(|id| self.values.get(id)).collect())
             .unwrap_or_default()
     }
-    
+
     /// Get all group names
     pub fn groups(&self) -> impl Iterator<Item = &String> {
         self.groups.keys()
     }
-    
+
     /// Get count in a group
     pub fn group_count(&self, group: &str) -> usize {
         self.groups.get(group).map(|v| v.len()).unwrap_or(0)
     }
-    
+
     /// Total value count
     pub fn len(&self) -> usize {
         self.values.len()
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
     }
-    
+
     /// Clear all
     pub fn clear(&mut self) {
         self.values.clear();
@@ -324,10 +324,10 @@ impl<V> Default for GroupedStore<V> {
 pub struct PriorityStore<V> {
     /// Values by ID
     values: HashMap<String, V>,
-    
+
     /// Priority index: (priority, id)
     priority_index: Vec<(i32, String)>,
-    
+
     /// Whether index needs rebuilding
     dirty: bool,
 }
@@ -340,7 +340,7 @@ impl<V> PriorityStore<V> {
             dirty: false,
         }
     }
-    
+
     /// Add a value with priority
     pub fn add(&mut self, id: impl Into<String>, priority: i32, value: V) {
         let id = id.into();
@@ -348,35 +348,35 @@ impl<V> PriorityStore<V> {
         self.values.insert(id, value);
         self.dirty = true;
     }
-    
+
     /// Get by ID
     pub fn get(&self, id: &str) -> Option<&V> {
         self.values.get(id)
     }
-    
+
     /// Get all values in priority order (highest first)
     pub fn by_priority(&mut self) -> Vec<&V> {
         if self.dirty {
             self.priority_index.sort_by(|a, b| b.0.cmp(&a.0));
             self.dirty = false;
         }
-        
+
         self.priority_index
             .iter()
             .filter_map(|(_, id)| self.values.get(id))
             .collect()
     }
-    
+
     /// Get top N by priority
     pub fn top(&mut self, n: usize) -> Vec<&V> {
         self.by_priority().into_iter().take(n).collect()
     }
-    
+
     /// Get count
     pub fn len(&self) -> usize {
         self.values.len()
     }
-    
+
     /// Check if empty
     pub fn is_empty(&self) -> bool {
         self.values.is_empty()
@@ -422,10 +422,16 @@ impl<V> IndexedStore<V> {
     }
 
     /// Add a value with ID, group, and priority
-    pub fn add(&mut self, id: impl Into<String>, group: impl Into<String>, priority: i32, value: V) {
+    pub fn add(
+        &mut self,
+        id: impl Into<String>,
+        group: impl Into<String>,
+        priority: i32,
+        value: V,
+    ) {
         let id = id.into();
         let group = group.into();
-        
+
         self.groups.entry(group).or_default().push(id.clone());
         self.priority_index.push((priority, id.clone()));
         self.values.insert(id, value);
@@ -486,7 +492,12 @@ impl<V> IndexedStore<V> {
     }
 
     /// Add a secondary index on a field
-    pub fn add_to_index(&mut self, index_name: &str, key: impl Into<String>, id: impl Into<String>) {
+    pub fn add_to_index(
+        &mut self,
+        index_name: &str,
+        key: impl Into<String>,
+        id: impl Into<String>,
+    ) {
         self.indices
             .entry(index_name.to_string())
             .or_default()
@@ -590,13 +601,13 @@ impl<V> Default for IndexedStore<V> {
 pub struct StoreStats {
     /// Counter values
     pub counters: HashMap<String, u64>,
-    
+
     /// Gauge values (current value)
     pub gauges: HashMap<String, f64>,
-    
+
     /// Histogram data
     pub histograms: HashMap<String, Vec<f64>>,
-    
+
     /// Timestamps
     pub timestamps: HashMap<String, SystemTime>,
 }
@@ -605,54 +616,64 @@ impl StoreStats {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Increment a counter
     pub fn inc(&mut self, name: &str) {
         *self.counters.entry(name.to_string()).or_default() += 1;
     }
-    
+
     /// Increment by amount
     pub fn inc_by(&mut self, name: &str, amount: u64) {
         *self.counters.entry(name.to_string()).or_default() += amount;
     }
-    
+
     /// Get counter value
     pub fn counter(&self, name: &str) -> u64 {
         self.counters.get(name).copied().unwrap_or(0)
     }
-    
+
     /// Set a gauge value
     pub fn set_gauge(&mut self, name: &str, value: f64) {
         self.gauges.insert(name.to_string(), value);
     }
-    
+
     /// Get gauge value
     pub fn gauge(&self, name: &str) -> f64 {
         self.gauges.get(name).copied().unwrap_or(0.0)
     }
-    
+
     /// Record a histogram value
     pub fn record(&mut self, name: &str, value: f64) {
-        self.histograms.entry(name.to_string()).or_default().push(value);
+        self.histograms
+            .entry(name.to_string())
+            .or_default()
+            .push(value);
     }
-    
+
     /// Get histogram average
     pub fn histogram_avg(&self, name: &str) -> f64 {
-        self.histograms.get(name).map(|v| {
-            if v.is_empty() { 0.0 } else { v.iter().sum::<f64>() / v.len() as f64 }
-        }).unwrap_or(0.0)
+        self.histograms
+            .get(name)
+            .map(|v| {
+                if v.is_empty() {
+                    0.0
+                } else {
+                    v.iter().sum::<f64>() / v.len() as f64
+                }
+            })
+            .unwrap_or(0.0)
     }
-    
+
     /// Mark a timestamp
     pub fn mark(&mut self, name: &str) {
         self.timestamps.insert(name.to_string(), SystemTime::now());
     }
-    
+
     /// Get a timestamp
     pub fn timestamp(&self, name: &str) -> Option<&SystemTime> {
         self.timestamps.get(name)
     }
-    
+
     /// Reset all statistics
     pub fn reset(&mut self) {
         self.counters.clear();
@@ -675,7 +696,7 @@ mod tests {
         let record = Record::new("test-1", "data")
             .with_metadata("key", "value")
             .with_tag("important");
-        
+
         assert_eq!(record.id, "test-1");
         assert_eq!(record.data, "data");
         assert!(record.has_tag("important"));
@@ -687,7 +708,7 @@ mod tests {
         let mut store: HashStore<String, i32> = HashStore::new();
         store.insert("a".to_string(), 1);
         store.insert("b".to_string(), 2);
-        
+
         assert_eq!(store.get(&"a".to_string()), Some(&1));
         assert_eq!(store.len(), 2);
         assert!(store.contains(&"b".to_string()));
@@ -699,7 +720,7 @@ mod tests {
         store.add("item1", "group_a", "value1".to_string());
         store.add("item2", "group_a", "value2".to_string());
         store.add("item3", "group_b", "value3".to_string());
-        
+
         assert_eq!(store.group_count("group_a"), 2);
         assert_eq!(store.group_count("group_b"), 1);
         assert_eq!(store.len(), 3);
@@ -711,7 +732,7 @@ mod tests {
         store.add("low", 1, "low".to_string());
         store.add("high", 100, "high".to_string());
         store.add("med", 50, "med".to_string());
-        
+
         let ordered: Vec<_> = store.by_priority();
         assert_eq!(ordered[0], &"high".to_string());
         assert_eq!(ordered[1], &"med".to_string());
@@ -726,7 +747,7 @@ mod tests {
         stats.set_gauge("cpu", 75.5);
         stats.record("latency", 10.0);
         stats.record("latency", 20.0);
-        
+
         assert_eq!(stats.counter("requests"), 2);
         assert_eq!(stats.gauge("cpu"), 75.5);
         assert_eq!(stats.histogram_avg("latency"), 15.0);
@@ -738,20 +759,20 @@ mod tests {
         store.add("pattern1", "function", 100, "fn_def".to_string());
         store.add("pattern2", "function", 50, "fn_decl".to_string());
         store.add("pattern3", "struct", 75, "struct_def".to_string());
-        
+
         // Test get
         assert_eq!(store.get("pattern1"), Some(&"fn_def".to_string()));
-        
+
         // Test group
         let functions = store.get_group("function");
         assert_eq!(functions.len(), 2);
-        
+
         // Test priority ordering
         let by_priority = store.by_priority();
         assert_eq!(by_priority[0], &"fn_def".to_string()); // priority 100
         assert_eq!(by_priority[1], &"struct_def".to_string()); // priority 75
         assert_eq!(by_priority[2], &"fn_decl".to_string()); // priority 50
-        
+
         // Test remove
         assert!(store.remove("pattern2").is_some());
         assert_eq!(store.len(), 2);

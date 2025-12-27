@@ -7,9 +7,9 @@
 //! - `#else` -> handled as part of conditional blocks
 //! - `#elif` -> `#[cfg(all(not(...), ...))]`
 
-use crate::db::web::{Entry, Build};
-use crate::db::token::Token;
 use crate::db::pattern::{Pattern, PatternRule};
+use crate::db::token::Token;
+use crate::db::web::{Build, Entry};
 use crate::handlers::process::{ProcessStage, Processor};
 use crate::handlers::validation::SequenceValidator;
 use std::ops::Range;
@@ -87,12 +87,12 @@ impl PreprocessorHandler {
             input_tokens: Vec::new(),
         }
     }
-    
+
     /// Convert C preprocessor symbol to Rust feature name
     fn symbol_to_feature(symbol: &str) -> String {
         // Convert common C macros to Rust conventions
         let s = symbol.to_lowercase();
-        
+
         // Handle platform-specific macros
         match symbol {
             "_WIN32" | "_WIN64" | "WIN32" | "WIN64" => "windows".to_string(),
@@ -115,18 +115,27 @@ impl PreprocessorHandler {
             _ => s.replace("__", "_").trim_matches('_').to_string(),
         }
     }
-    
+
     /// Check if a symbol maps to a target_os cfg
     fn is_target_os(symbol: &str) -> bool {
-        matches!(symbol, 
-            "_WIN32" | "_WIN64" | "WIN32" | "WIN64" |
-            "__linux__" | "__linux" | "linux" |
-            "__APPLE__" | "__MACH__" |
-            "__unix__" | "__unix" |
-            "__FreeBSD__" | "__ANDROID__"
+        matches!(
+            symbol,
+            "_WIN32"
+                | "_WIN64"
+                | "WIN32"
+                | "WIN64"
+                | "__linux__"
+                | "__linux"
+                | "linux"
+                | "__APPLE__"
+                | "__MACH__"
+                | "__unix__"
+                | "__unix"
+                | "__FreeBSD__"
+                | "__ANDROID__"
         )
     }
-    
+
     /// Check if a symbol maps to a target_env cfg
     fn is_target_env(symbol: &str) -> bool {
         matches!(symbol, "_MSC_VER" | "__GNUC__" | "__clang__")
@@ -143,122 +152,178 @@ impl Processor for PreprocessorHandler {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn supported_patterns(&self) -> &[&str] {
         &["ifdef", "ifndef", "endif", "else", "elif", "if_defined"]
     }
-    
-    fn patterns(&self) -> Vec<Pattern> {
+
+    fn patterns(&self) -> Vec<(Pattern, Pattern)> {
         vec![
             // #ifdef SYMBOL
-            Pattern::definition(700, "ifdef", vec![
-                PatternRule::exact("#ifdef"),
-                PatternRule::identifier(),
-            ])
-            .with_category("preprocessor")
-            .with_priority(900)
-            .with_min_tokens(2)
-            .with_description("C #ifdef directive"),
-            
+            (
+                Pattern::definition(
+                    700,
+                    "ifdef",
+                    vec![PatternRule::exact("#ifdef"), PatternRule::identifier()],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #ifdef directive"),
+                Pattern::definition(
+                    700,
+                    "ifdef",
+                    vec![PatternRule::exact("#ifdef"), PatternRule::identifier()],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #ifdef directive"),
+            ),
             // #ifndef SYMBOL
-            Pattern::definition(701, "ifndef", vec![
-                PatternRule::exact("#ifndef"),
-                PatternRule::identifier(),
-            ])
-            .with_category("preprocessor")
-            .with_priority(900)
-            .with_min_tokens(2)
-            .with_description("C #ifndef directive"),
-            
+            (
+                Pattern::definition(
+                    701,
+                    "ifndef",
+                    vec![PatternRule::exact("#ifndef"), PatternRule::identifier()],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #ifndef directive"),
+                Pattern::definition(
+                    701,
+                    "ifndef",
+                    vec![PatternRule::exact("#ifndef"), PatternRule::identifier()],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #ifndef directive"),
+            ),
             // #endif
-            Pattern::definition(702, "endif", vec![
-                PatternRule::exact("#endif"),
-            ])
-            .with_category("preprocessor")
-            .with_priority(900)
-            .with_min_tokens(1)
-            .with_description("C #endif directive"),
-            
+            (
+                Pattern::definition(702, "endif", vec![PatternRule::exact("#endif")])
+                    .with_category("preprocessor")
+                    .with_priority(900)
+                    .with_min_tokens(1)
+                    .with_description("C #endif directive"),
+                Pattern::definition(702, "endif", vec![PatternRule::exact("#endif")])
+                    .with_category("preprocessor")
+                    .with_priority(900)
+                    .with_min_tokens(1)
+                    .with_description("C #endif directive"),
+            ),
             // #else
-            Pattern::definition(703, "else_directive", vec![
-                PatternRule::exact("#else"),
-            ])
-            .with_category("preprocessor")
-            .with_priority(900)
-            .with_min_tokens(1)
-            .with_description("C #else directive"),
-            
+            (
+                Pattern::definition(703, "else_directive", vec![PatternRule::exact("#else")])
+                    .with_category("preprocessor")
+                    .with_priority(900)
+                    .with_min_tokens(1)
+                    .with_description("C #else directive"),
+                Pattern::definition(703, "else_directive", vec![PatternRule::exact("#else")])
+                    .with_category("preprocessor")
+                    .with_priority(900)
+                    .with_min_tokens(1)
+                    .with_description("C #else directive"),
+            ),
             // #elif expression
-            Pattern::definition(704, "elif", vec![
-                PatternRule::exact("#elif"),
-                PatternRule::any().with_can_repeat(true),
-            ])
-            .with_category("preprocessor")
-            .with_priority(900)
-            .with_min_tokens(2)
-            .with_description("C #elif directive"),
-            
+            (
+                Pattern::definition(
+                    704,
+                    "elif",
+                    vec![PatternRule::exact("#elif"), PatternRule::any().repeat(-1)],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #elif directive"),
+                Pattern::definition(
+                    704,
+                    "elif",
+                    vec![PatternRule::exact("#elif"), PatternRule::any().repeat(-1)],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #elif directive"),
+            ),
             // #if defined(SYMBOL)
-            Pattern::definition(705, "if_defined", vec![
-                PatternRule::exact("#if"),
-                PatternRule::any().with_can_repeat(true),
-            ])
-            .with_category("preprocessor")
-            .with_priority(900)
-            .with_min_tokens(2)
-            .with_description("C #if directive"),
+            (
+                Pattern::definition(
+                    705,
+                    "if_defined",
+                    vec![PatternRule::exact("#if"), PatternRule::any().repeat(-1)],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #if directive"),
+                Pattern::definition(
+                    705,
+                    "if_defined",
+                    vec![PatternRule::exact("#if"), PatternRule::any().repeat(-1)],
+                )
+                .with_category("preprocessor")
+                .with_priority(900)
+                .with_min_tokens(2)
+                .with_description("C #if directive"),
+            ),
         ]
     }
-    
+
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.is_empty() {
             self.error = Some("No tokens for preprocessor".to_string());
             return false;
         }
-        
+
         self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
         self.range = 0..tokens.len();
-        
+
         let first = &self.input_tokens[0];
-        
+
         // Check if it's a preprocessor directive
-        let is_preprocessor = first.starts_with('#') || 
-            first == "#" ||
-            matches!(first.as_str(), "#ifdef" | "#ifndef" | "#endif" | "#else" | "#elif" | "#if");
-        
+        let is_preprocessor = first.starts_with('#')
+            || first == "#"
+            || matches!(
+                first.as_str(),
+                "#ifdef" | "#ifndef" | "#endif" | "#else" | "#elif" | "#if"
+            );
+
         if !is_preprocessor {
             self.error = Some("Not a preprocessor directive".to_string());
             return false;
         }
-        
+
         // Use keyword validation for sequence checking
         let validator = SequenceValidator::new();
         let validation_result = validator.validate_preprocessor(tokens);
-        
+
         // Adjust confidence based on validation
         self.confidence = validation_result.adjust_confidence(0.9);
-        
+
         if !validation_result.is_valid {
             if let Some(reason) = &validation_result.reason {
                 self.error = Some(reason.clone());
             }
             // Still return true - we can try to process, just with lower confidence
         }
-        
+
         true
     }
-    
+
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
         self.data.original_line = token_strs.join(" ");
-        
+
         if token_strs.is_empty() {
             self.error = Some("Empty token list".to_string());
             return false;
         }
-        
+
         let first = &token_strs[0];
-        
+
         // Parse directive type - handle both "# ifdef" and "#ifdef" formats
         let (directive, symbol_start_idx) = if first == "#" && token_strs.len() > 1 {
             (format!("#{}", token_strs[1]), 2)
@@ -268,9 +333,9 @@ impl Processor for PreprocessorHandler {
             // Might be just the directive name without #
             (format!("#{}", first), 1)
         };
-        
+
         self.data.directive = directive.clone();
-        
+
         match directive.as_str() {
             "#ifdef" => {
                 self.data.is_negated = false;
@@ -321,15 +386,15 @@ impl Processor for PreprocessorHandler {
                 return false;
             }
         }
-        
+
         true
     }
-    
+
     fn convert(&mut self) -> Option<String> {
         let output = match self.data.directive.as_str() {
             "#ifdef" | "#ifndef" => {
                 let feature = Self::symbol_to_feature(&self.data.symbol);
-                
+
                 // Determine the appropriate cfg type
                 let cfg_expr = if Self::is_target_os(&self.data.symbol) {
                     format!("target_os = \"{}\"", feature)
@@ -340,7 +405,7 @@ impl Processor for PreprocessorHandler {
                 } else {
                     format!("feature = \"{}\"", feature)
                 };
-                
+
                 if self.data.is_negated {
                     if cfg_expr.starts_with("not(") {
                         // Already negated (like NDEBUG)
@@ -355,7 +420,7 @@ impl Processor for PreprocessorHandler {
             "#if" => {
                 if !self.data.symbol.is_empty() {
                     let feature = Self::symbol_to_feature(&self.data.symbol);
-                    
+
                     let cfg_expr = if Self::is_target_os(&self.data.symbol) {
                         format!("target_os = \"{}\"", feature)
                     } else if Self::is_target_env(&self.data.symbol) {
@@ -363,14 +428,17 @@ impl Processor for PreprocessorHandler {
                     } else {
                         format!("feature = \"{}\"", feature)
                     };
-                    
+
                     if self.data.is_negated {
                         format!("#[cfg(not({}))]", cfg_expr)
                     } else {
                         format!("#[cfg({})]", cfg_expr)
                     }
                 } else {
-                    format!("// TODO: Convert #if expression: {}", self.data.original_line)
+                    format!(
+                        "// TODO: Convert #if expression: {}",
+                        self.data.original_line
+                    )
                 }
             }
             "#elif" => {
@@ -380,7 +448,10 @@ impl Processor for PreprocessorHandler {
                     let feature = Self::symbol_to_feature(&self.data.symbol);
                     format!("// #elif converted:\n#[cfg(feature = \"{}\")]", feature)
                 } else {
-                    format!("// TODO: Convert #elif expression: {}", self.data.original_line)
+                    format!(
+                        "// TODO: Convert #elif expression: {}",
+                        self.data.original_line
+                    )
                 }
             }
             "#else" => {
@@ -396,19 +467,35 @@ impl Processor for PreprocessorHandler {
                 format!("// Unknown preprocessor: {}", self.data.original_line)
             }
         };
-        
+
         self.output = Some(output.clone());
         Some(output)
     }
-    
-    fn current_stage(&self) -> ProcessStage { self.stage }
-    fn set_stage(&mut self, stage: ProcessStage) { self.stage = stage; }
-    fn output(&self) -> Option<String> { self.output.clone() }
-    fn set_output(&mut self, output: String) { self.output = Some(output); }
-    fn error(&self) -> Option<String> { self.error.clone() }
-    fn set_error(&mut self, error: String) { self.error = Some(error); }
-    fn confidence(&self) -> f64 { self.confidence }
-    fn set_confidence(&mut self, confidence: f64) { self.confidence = confidence; }
+
+    fn current_stage(&self) -> ProcessStage {
+        self.stage
+    }
+    fn set_stage(&mut self, stage: ProcessStage) {
+        self.stage = stage;
+    }
+    fn output(&self) -> Option<String> {
+        self.output.clone()
+    }
+    fn set_output(&mut self, output: String) {
+        self.output = Some(output);
+    }
+    fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+    fn set_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+    fn confidence(&self) -> f64 {
+        self.confidence
+    }
+    fn set_confidence(&mut self, confidence: f64) {
+        self.confidence = confidence;
+    }
 }
 
 impl Build for PreprocessorHandler {
@@ -424,10 +511,16 @@ impl Build for PreprocessorHandler {
         }
         entry
     }
-    
-    fn kind(&self) -> &str { "Handler" }
-    fn name(&self) -> Option<&str> { Some("PreprocessorHandler") }
-    fn category(&self) -> Option<&str> { Some("preprocessor") }
+
+    fn kind(&self) -> &str {
+        "Handler"
+    }
+    fn name(&self) -> Option<&str> {
+        Some("PreprocessorHandler")
+    }
+    fn category(&self) -> Option<&str> {
+        Some("preprocessor")
+    }
 }
 
 // ============================================================================
@@ -475,17 +568,20 @@ impl DefineHandler {
             input_tokens: Vec::new(),
         }
     }
-    
+
     /// Convert a function-like C macro to Rust macro_rules!
     fn convert_function_like_macro(&self) -> String {
         let macro_name = self.data.name.to_lowercase();
-        
+
         // Build parameter pattern: $a:expr, $b:expr, etc.
-        let param_pattern: String = self.data.params.iter()
+        let param_pattern: String = self
+            .data
+            .params
+            .iter()
             .map(|p| format!("${}:expr", p))
             .collect::<Vec<_>>()
             .join(", ");
-        
+
         // Convert body - replace parameter references with $param
         let mut body = self.data.value.clone();
         for param in &self.data.params {
@@ -493,27 +589,27 @@ impl DefineHandler {
             // Handle cases like: (a) > (b) ? (a) : (b)
             body = self.replace_param_in_body(&body, param);
         }
-        
+
         // Convert common C operators/patterns to Rust
         body = self.convert_c_expr_to_rust(&body);
-        
+
         if body.is_empty() {
             body = "/* empty */".to_string();
         }
-        
+
         format!(
             "macro_rules! {} {{\n    ({}) => {{\n        {}\n    }};\n}}",
             macro_name, param_pattern, body
         )
     }
-    
+
     /// Replace a parameter name in the macro body with $param
     fn replace_param_in_body(&self, body: &str, param: &str) -> String {
         let mut result = String::new();
         let chars: Vec<char> = body.chars().collect();
         let param_chars: Vec<char> = param.chars().collect();
         let mut i = 0;
-        
+
         while i < chars.len() {
             // Check if we're at the start of the parameter name
             let mut matches = true;
@@ -524,14 +620,15 @@ impl DefineHandler {
                         break;
                     }
                 }
-                
+
                 // Make sure it's a whole word (not part of a larger identifier)
                 if matches {
-                    let before_ok = i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_';
-                    let after_ok = i + param_chars.len() >= chars.len() || 
-                                   !chars[i + param_chars.len()].is_alphanumeric() && 
-                                   chars[i + param_chars.len()] != '_';
-                    
+                    let before_ok =
+                        i == 0 || !chars[i - 1].is_alphanumeric() && chars[i - 1] != '_';
+                    let after_ok = i + param_chars.len() >= chars.len()
+                        || !chars[i + param_chars.len()].is_alphanumeric()
+                            && chars[i + param_chars.len()] != '_';
+
                     if before_ok && after_ok {
                         result.push('$');
                         result.push_str(param);
@@ -540,18 +637,18 @@ impl DefineHandler {
                     }
                 }
             }
-            
+
             result.push(chars[i]);
             i += 1;
         }
-        
+
         result
     }
-    
+
     /// Convert C expression patterns to Rust equivalents
     fn convert_c_expr_to_rust(&self, expr: &str) -> String {
         let mut result = expr.to_string();
-        
+
         // Ternary operator: (cond) ? (a) : (b) -> if cond { a } else { b }
         // This is a simplified conversion - complex ternaries may need manual fixes
         if result.contains('?') && result.contains(':') {
@@ -559,26 +656,38 @@ impl DefineHandler {
                 result = converted;
             }
         }
-        
+
         result
     }
-    
+
     /// Attempt to convert C ternary operator to Rust if/else
     fn convert_ternary(&self, expr: &str) -> Option<String> {
         // Simple pattern: cond ? true_val : false_val
         let q_pos = expr.find('?')?;
         let c_pos = expr[q_pos..].find(':')? + q_pos;
-        
+
         let condition = expr[..q_pos].trim();
         let true_val = expr[q_pos + 1..c_pos].trim();
         let false_val = expr[c_pos + 1..].trim();
-        
+
         // Remove outer parens if present
-        let condition = condition.trim_start_matches('(').trim_end_matches(')').trim();
-        let true_val = true_val.trim_start_matches('(').trim_end_matches(')').trim();
-        let false_val = false_val.trim_start_matches('(').trim_end_matches(')').trim();
-        
-        Some(format!("if {} {{ {} }} else {{ {} }}", condition, true_val, false_val))
+        let condition = condition
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        let true_val = true_val
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+        let false_val = false_val
+            .trim_start_matches('(')
+            .trim_end_matches(')')
+            .trim();
+
+        Some(format!(
+            "if {} {{ {} }} else {{ {} }}",
+            condition, true_val, false_val
+        ))
     }
 }
 
@@ -592,75 +701,112 @@ impl Processor for DefineHandler {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn supported_patterns(&self) -> &[&str] {
-        &["define", "define_const", "define_macro"]
+        &["validate_define_constant", "extract_define_constant"]
     }
-    
-    fn patterns(&self) -> Vec<Pattern> {
-        vec![
-            Pattern::definition(710, "define_const", vec![
-                PatternRule::exact("#"),
-                PatternRule::exact("define"),
-                PatternRule::identifier(),
-                PatternRule::any().optional().with_can_repeat(true),
-            ])
+
+    fn patterns(&self) -> Vec<(Pattern, Pattern)> {
+        vec![(
+            Pattern::definition(
+                711,
+                "validate_define_const",
+                vec![
+                    PatternRule::exact("#"),
+                    PatternRule::exact("define"),
+                    PatternRule::identifier(),
+                    PatternRule::any().optional().repeat(-1),
+                ],
+            )
             .with_category("macro")
             .with_priority(890)
             .with_min_tokens(3)
-            .with_description("C #define constant"),
-        ]
+            .with_description("C #define"),
+            Pattern::definition(
+                711,
+                "extract_define_const",
+                vec![
+                    PatternRule::exact("#"),
+                    PatternRule::exact("define").with_extract(|rule, ctx| {
+                        ctx.set_value("directive", "define");
+                        rule.clone()
+                    }),
+                    PatternRule::identifier().with_extract(|rule, ctx| {
+                        let token = ctx.current_token.clone();
+                        if ctx.did_match {
+                            ctx.set_value("macro_name", &token);
+                        }
+                        rule.clone()
+                    }),
+                    PatternRule::any()
+                        .optional()
+                        .repeat(-1)
+                        .with_extract(|rule, ctx| {
+                            let token = ctx.current_token.clone();
+                            if ctx.did_match {
+                                ctx.push_list("value_tokens", &token);
+                            }
+                            rule.clone()
+                        }),
+                ],
+            )
+            .with_category("macro")
+            .with_priority(890)
+            .with_min_tokens(3)
+            .with_description("C #define"),
+        )]
     }
-    
+
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.len() < 3 {
             self.error = Some("Too few tokens for #define".to_string());
             return false;
         }
-        
+
         self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
         self.range = 0..tokens.len();
-        
+
         // Check for #define pattern
-        let has_define = (self.input_tokens[0] == "#" && 
-                         self.input_tokens.len() > 1 && 
-                         self.input_tokens[1] == "define") ||
-                        self.input_tokens[0] == "#define";
-        
+        let has_define = (self.input_tokens[0] == "#"
+            && self.input_tokens.len() > 1
+            && self.input_tokens[1] == "define")
+            || self.input_tokens[0] == "#define";
+
         if !has_define {
             self.error = Some("Not a #define directive".to_string());
             return false;
         }
-        
+
         self.confidence = 0.9;
         true
     }
-    
+
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
         self.data.original_line = token_strs.join(" ");
-        
+
         // Find where macro name starts
         let name_idx = if token_strs[0] == "#" { 2 } else { 1 };
-        
+
         if token_strs.len() <= name_idx {
             self.error = Some("No macro name found".to_string());
             return false;
         }
-        
+
         let name_token = &token_strs[name_idx];
-        
+
         // Check for function-like macro: NAME(params) or NAME ( params )
         if let Some(paren_pos) = name_token.find('(') {
             // Params are in the same token as name: MAX(a,b)
             self.data.name = name_token[..paren_pos].to_string();
             self.data.is_function_like = true;
-            
+
             // Extract parameters - they might be split across tokens
             if let Some(close_paren) = name_token.find(')') {
                 // All params in one token: MAX(a,b)
                 let params_str = &name_token[paren_pos + 1..close_paren];
-                self.data.params = params_str.split(',')
+                self.data.params = params_str
+                    .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
@@ -682,7 +828,7 @@ impl Processor for DefineHandler {
                         }
                     }
                 }
-                
+
                 let mut value_start = token_strs.len();
                 for (i, t) in token_strs.iter().enumerate().skip(name_idx + 1) {
                     if t == "(" {
@@ -704,7 +850,7 @@ impl Processor for DefineHandler {
             }
         } else {
             self.data.name = name_token.clone();
-            
+
             // Check if next token is (
             if token_strs.len() > name_idx + 1 && token_strs[name_idx + 1] == "(" {
                 self.data.is_function_like = true;
@@ -739,10 +885,10 @@ impl Processor for DefineHandler {
                 }
             }
         }
-        
+
         true
     }
-    
+
     fn convert(&mut self) -> Option<String> {
         let output = if self.data.is_function_like {
             // Convert to Rust macro_rules!
@@ -759,27 +905,45 @@ impl Processor for DefineHandler {
             } else {
                 "/* unknown type */"
             };
-            
+
             format!("pub const {}: {} = {};", self.data.name, rust_type, value)
         } else {
             // Empty define - use as feature flag
-            format!("// Feature flag: {}\n#[cfg(feature = \"{}\")]", 
-                    self.data.name, 
-                    self.data.name.to_lowercase())
+            format!(
+                "// Feature flag: {}\n#[cfg(feature = \"{}\")]",
+                self.data.name,
+                self.data.name.to_lowercase()
+            )
         };
-        
+
         self.output = Some(output.clone());
         Some(output)
     }
-    
-    fn current_stage(&self) -> ProcessStage { self.stage }
-    fn set_stage(&mut self, stage: ProcessStage) { self.stage = stage; }
-    fn output(&self) -> Option<String> { self.output.clone() }
-    fn set_output(&mut self, output: String) { self.output = Some(output); }
-    fn error(&self) -> Option<String> { self.error.clone() }
-    fn set_error(&mut self, error: String) { self.error = Some(error); }
-    fn confidence(&self) -> f64 { self.confidence }
-    fn set_confidence(&mut self, confidence: f64) { self.confidence = confidence; }
+
+    fn current_stage(&self) -> ProcessStage {
+        self.stage
+    }
+    fn set_stage(&mut self, stage: ProcessStage) {
+        self.stage = stage;
+    }
+    fn output(&self) -> Option<String> {
+        self.output.clone()
+    }
+    fn set_output(&mut self, output: String) {
+        self.output = Some(output);
+    }
+    fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+    fn set_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+    fn confidence(&self) -> f64 {
+        self.confidence
+    }
+    fn set_confidence(&mut self, confidence: f64) {
+        self.confidence = confidence;
+    }
 }
 
 impl Build for DefineHandler {
@@ -794,10 +958,16 @@ impl Build for DefineHandler {
         }
         entry
     }
-    
-    fn kind(&self) -> &str { "Handler" }
-    fn name(&self) -> Option<&str> { Some("DefineHandler") }
-    fn category(&self) -> Option<&str> { Some("macro") }
+
+    fn kind(&self) -> &str {
+        "Handler"
+    }
+    fn name(&self) -> Option<&str> {
+        Some("DefineHandler")
+    }
+    fn category(&self) -> Option<&str> {
+        Some("macro")
+    }
 }
 
 // ============================================================================
@@ -841,15 +1011,20 @@ impl IncludeHandler {
             input_tokens: Vec::new(),
         }
     }
-    
+
     /// Map C standard library headers to Rust equivalents
     fn map_header_to_rust(header: &str) -> Option<String> {
         match header {
             "stdio.h" => Some("use std::io::{self, Write, Read};".to_string()),
             "stdlib.h" => Some("use std::process; // and other stdlib functions".to_string()),
-            "string.h" => Some("// String functions are built into Rust's String/str types".to_string()),
+            "string.h" => {
+                Some("// String functions are built into Rust's String/str types".to_string())
+            }
             "math.h" => Some("// Math functions available via f32/f64 methods".to_string()),
-            "stdint.h" | "inttypes.h" => Some("// Fixed-width integers are built-in: i8, i16, i32, i64, u8, u16, u32, u64".to_string()),
+            "stdint.h" | "inttypes.h" => Some(
+                "// Fixed-width integers are built-in: i8, i16, i32, i64, u8, u16, u32, u64"
+                    .to_string(),
+            ),
             "stdbool.h" => Some("// bool is a built-in type in Rust".to_string()),
             "stddef.h" => Some("// size_t is usize in Rust".to_string()),
             "assert.h" => Some("// Use assert! or debug_assert! macros".to_string()),
@@ -862,8 +1037,12 @@ impl IncludeHandler {
             "sys/types.h" | "sys/stat.h" => Some("use std::fs;".to_string()),
             "limits.h" => Some("// Use i32::MAX, u64::MAX, etc.".to_string()),
             "float.h" => Some("// Use f32::MAX, f64::EPSILON, etc.".to_string()),
-            "ctype.h" => Some("// Use char methods: is_alphabetic(), is_numeric(), etc.".to_string()),
-            "memory.h" => Some("// Memory operations are handled by Rust's ownership system".to_string()),
+            "ctype.h" => {
+                Some("// Use char methods: is_alphabetic(), is_numeric(), etc.".to_string())
+            }
+            "memory.h" => {
+                Some("// Memory operations are handled by Rust's ownership system".to_string())
+            }
             _ => None,
         }
     }
@@ -879,62 +1058,107 @@ impl Processor for IncludeHandler {
     fn name(&self) -> &str {
         &self.name
     }
-    
+
     fn supported_patterns(&self) -> &[&str] {
         &["include", "include_system", "include_local"]
     }
-    
-    fn patterns(&self) -> Vec<Pattern> {
-        vec![
-            Pattern::definition(720, "include", vec![
-                PatternRule::exact("#"),
-                PatternRule::exact("include"),
-                PatternRule::any(),
-            ])
+
+    fn patterns(&self) -> Vec<(Pattern, Pattern)> {
+        vec![(
+            Pattern::definition(
+                720,
+                "include",
+                vec![
+                    PatternRule::exact("#"),
+                    PatternRule::exact("include"),
+                    PatternRule::any(),
+                ],
+            )
             .with_category("macro")
             .with_priority(895)
             .with_min_tokens(3)
             .with_description("C #include directive"),
-        ]
+            Pattern::definition(
+                720,
+                "extract_include",
+                vec![
+                    PatternRule::exact("#"),
+                    PatternRule::exact("include").with_extract(|rule, ctx| {
+                        ctx.set_value("directive", "include");
+                        rule.clone()
+                    }),
+                    PatternRule::any().with_extract(|rule, ctx| {
+                        let token = ctx.current_token.clone();
+                        if ctx.did_match {
+                            ctx.set_value("path", &token);
+                        }
+                        rule.clone()
+                    }),
+                ],
+            )
+            .with_category("macro")
+            .with_priority(895)
+            .with_min_tokens(3)
+            .with_description("C #include directive"),
+        )]
     }
-    
+
     fn validate(&mut self, tokens: &[Token]) -> bool {
-        if tokens.len() < 3 {
-            self.error = Some("Too few tokens for #include".to_string());
+        if tokens.is_empty() {
+            self.error = Some("No tokens for #include".to_string());
             return false;
         }
-        
+
         self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
         self.range = 0..tokens.len();
-        
-        let has_include = (self.input_tokens[0] == "#" && 
-                          self.input_tokens.len() > 1 && 
-                          self.input_tokens[1] == "include") ||
-                         self.input_tokens[0] == "#include";
-        
+
+        // Check for single-token format: "#include <stdio.h>" or "#include \"header.h\""
+        let first = &self.input_tokens[0];
+        let has_include = first.starts_with("#include ")
+            || first == "#include"
+            || (self.input_tokens[0] == "#"
+                && self.input_tokens.len() > 1
+                && self.input_tokens[1] == "include");
+
         if !has_include {
             self.error = Some("Not an #include directive".to_string());
             return false;
         }
-        
+
         self.confidence = 0.9;
         true
     }
-    
+
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
         self.data.original_line = token_strs.join(" ");
+
+        let first = &token_strs[0];
         
-        // Find include path - starts after "include"
+        // Handle single-token format: "#include <stdio.h>" or "#include \"header.h\""
+        if first.starts_with("#include ") {
+            let path_part = first.trim_start_matches("#include ").trim();
+            if path_part.starts_with('<') && path_part.ends_with('>') {
+                self.data.is_system = true;
+                self.data.path = path_part[1..path_part.len()-1].to_string();
+                return true;
+            } else if path_part.starts_with('"') && path_part.ends_with('"') {
+                self.data.is_system = false;
+                self.data.path = path_part[1..path_part.len()-1].to_string();
+                return true;
+            }
+        }
+
+        // Fallback: Find include path - starts after "include" (multi-token format)
         let path_idx = if token_strs[0] == "#" { 2 } else { 1 };
-        
+
         if token_strs.len() <= path_idx {
             self.error = Some("No include path found".to_string());
             return false;
         }
-        
+
         let path_token = &token_strs[path_idx];
-        
+
         // Handle angle bracket includes: < header . h >
         if path_token == "<" {
             self.data.is_system = true;
@@ -945,7 +1169,8 @@ impl Processor for IncludeHandler {
                     break;
                 }
                 // Don't add space before . or /
-                if !path_parts.is_empty() && !t.starts_with('.') && !t.starts_with('/') && *t != "." {
+                if !path_parts.is_empty() && !t.starts_with('.') && !t.starts_with('/') && *t != "."
+                {
                     path_parts.push(t.clone());
                 } else {
                     path_parts.push(t.clone());
@@ -956,7 +1181,7 @@ impl Processor for IncludeHandler {
         } else if path_token.starts_with('<') && path_token.ends_with('>') {
             // Already combined: <header.h>
             self.data.is_system = true;
-            self.data.path = path_token[1..path_token.len()-1].to_string();
+            self.data.path = path_token[1..path_token.len() - 1].to_string();
         } else if path_token.starts_with('<') {
             self.data.is_system = true;
             // Partial: <header - collect rest
@@ -970,7 +1195,7 @@ impl Processor for IncludeHandler {
             self.data.is_system = false;
             // Handle quoted includes
             if path_token.ends_with('"') && path_token.len() > 2 {
-                self.data.path = path_token[1..path_token.len()-1].to_string();
+                self.data.path = path_token[1..path_token.len() - 1].to_string();
             } else {
                 // Collect tokens until closing quote
                 let full_path = token_strs[path_idx..].join("");
@@ -984,41 +1209,64 @@ impl Processor for IncludeHandler {
             // Unknown format - use as-is
             self.data.path = path_token.clone();
         }
-        
+
         true
     }
-    
+
     fn convert(&mut self) -> Option<String> {
         let output = if self.data.is_system {
-            // System include - map to Rust equivalent
+            // System include - map to Rust pub use
+            let module_name = self.data.path
+                .trim_end_matches(".h")
+                .replace('.', "_");
+            
             if let Some(rust_equiv) = Self::map_header_to_rust(&self.data.path) {
                 rust_equiv
             } else {
-                format!("// #include <{}> - consider using appropriate Rust crate", self.data.path)
+                // Output as pub use with a comment about the original
+                format!("pub use {}; // from <{}>", module_name, self.data.path)
             }
         } else {
-            // Local include - convert to mod
-            let module_name = self.data.path
+            // Local include - convert to pub use mod
+            let module_name = self
+                .data
+                .path
                 .trim_end_matches(".h")
                 .trim_end_matches(".c")
                 .replace('/', "::")
                 .replace('\\', "::");
-            
-            format!("mod {};", module_name)
+
+            format!("pub use {};", module_name)
         };
-        
+
         self.output = Some(output.clone());
         Some(output)
     }
-    
-    fn current_stage(&self) -> ProcessStage { self.stage }
-    fn set_stage(&mut self, stage: ProcessStage) { self.stage = stage; }
-    fn output(&self) -> Option<String> { self.output.clone() }
-    fn set_output(&mut self, output: String) { self.output = Some(output); }
-    fn error(&self) -> Option<String> { self.error.clone() }
-    fn set_error(&mut self, error: String) { self.error = Some(error); }
-    fn confidence(&self) -> f64 { self.confidence }
-    fn set_confidence(&mut self, confidence: f64) { self.confidence = confidence; }
+
+    fn current_stage(&self) -> ProcessStage {
+        self.stage
+    }
+    fn set_stage(&mut self, stage: ProcessStage) {
+        self.stage = stage;
+    }
+    fn output(&self) -> Option<String> {
+        self.output.clone()
+    }
+    fn set_output(&mut self, output: String) {
+        self.output = Some(output);
+    }
+    fn error(&self) -> Option<String> {
+        self.error.clone()
+    }
+    fn set_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+    fn confidence(&self) -> f64 {
+        self.confidence
+    }
+    fn set_confidence(&mut self, confidence: f64) {
+        self.confidence = confidence;
+    }
 }
 
 impl Build for IncludeHandler {
@@ -1033,8 +1281,14 @@ impl Build for IncludeHandler {
         }
         entry
     }
-    
-    fn kind(&self) -> &str { "Handler" }
-    fn name(&self) -> Option<&str> { Some("IncludeHandler") }
-    fn category(&self) -> Option<&str> { Some("macro") }
+
+    fn kind(&self) -> &str {
+        "Handler"
+    }
+    fn name(&self) -> Option<&str> {
+        Some("IncludeHandler")
+    }
+    fn category(&self) -> Option<&str> {
+        Some("macro")
+    }
 }

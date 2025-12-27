@@ -153,7 +153,11 @@ impl SampleEdge {
 
 impl Debug for SampleEdge {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SampleEdge({:?}->{}, w={:.2})", self.kind, self.target, self.weight)
+        write!(
+            f,
+            "SampleEdge({:?}->{}, w={:.2})",
+            self.kind, self.target, self.weight
+        )
     }
 }
 
@@ -260,7 +264,13 @@ impl SampleNode {
 
 impl Debug for SampleNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "SampleNode({}, {:?}, {} edges)", self.id, self.kind, self.edges.len())
+        write!(
+            f,
+            "SampleNode({}, {:?}, {} edges)",
+            self.id,
+            self.kind,
+            self.edges.len()
+        )
     }
 }
 
@@ -428,13 +438,13 @@ impl GenerationResult {
 /// Quality level of a pattern match or generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum MatchQuality {
-    Exact,    // 100% match
-    High,     // 90%+ match
-    Good,     // 70%+ match
-    Partial,  // 50%+ match
-    Low,      // 30%+ match
+    Exact,   // 100% match
+    High,    // 90%+ match
+    Good,    // 70%+ match
+    Partial, // 50%+ match
+    Low,     // 30%+ match
     #[default]
-    None,     // No match
+    None, // No match
 }
 
 impl MatchQuality {
@@ -522,7 +532,10 @@ impl ConfidenceResult {
         attrs.insert("overall".to_string(), Entry::f64(self.overall));
         attrs.insert("token_score".to_string(), Entry::f64(self.token_score));
         attrs.insert("pattern_score".to_string(), Entry::f64(self.pattern_score));
-        attrs.insert("frequency_score".to_string(), Entry::f64(self.frequency_score));
+        attrs.insert(
+            "frequency_score".to_string(),
+            Entry::f64(self.frequency_score),
+        );
         attrs.insert("quality".to_string(), Entry::string(self.quality.as_str()));
         Entry::node_with_attrs("confidence", "result", attrs)
     }
@@ -548,12 +561,27 @@ impl SampleStats {
     pub fn to_entry(&self) -> Entry {
         let mut attrs = HashMap::new();
         attrs.insert("total_nodes".to_string(), Entry::usize(self.total_nodes));
-        attrs.insert("total_patterns".to_string(), Entry::usize(self.total_patterns));
+        attrs.insert(
+            "total_patterns".to_string(),
+            Entry::usize(self.total_patterns),
+        );
         attrs.insert("total_edges".to_string(), Entry::usize(self.total_edges));
-        attrs.insert("unique_entries".to_string(), Entry::usize(self.unique_entries));
-        attrs.insert("unique_bigrams".to_string(), Entry::usize(self.unique_bigrams));
-        attrs.insert("avg_path_length".to_string(), Entry::f64(self.avg_path_length));
-        attrs.insert("generation_count".to_string(), Entry::u32(self.generation_count));
+        attrs.insert(
+            "unique_entries".to_string(),
+            Entry::usize(self.unique_entries),
+        );
+        attrs.insert(
+            "unique_bigrams".to_string(),
+            Entry::usize(self.unique_bigrams),
+        );
+        attrs.insert(
+            "avg_path_length".to_string(),
+            Entry::f64(self.avg_path_length),
+        );
+        attrs.insert(
+            "generation_count".to_string(),
+            Entry::u32(self.generation_count),
+        );
         Entry::node_with_attrs("sample_stats", "statistics", attrs)
     }
 }
@@ -644,7 +672,8 @@ impl Sample {
     /// Add sequence of strings
     pub fn strings(mut self, values: &[&str]) -> Self {
         for s in values {
-            self.elements.push(SampleElement::Literal(Entry::string(*s)));
+            self.elements
+                .push(SampleElement::Literal(Entry::string(*s)));
         }
         self
     }
@@ -670,7 +699,8 @@ impl Sample {
 
     /// Add optional elements
     pub fn optional(mut self, values: &[Entry]) -> Self {
-        let elements: Vec<SampleElement> = values.iter()
+        let elements: Vec<SampleElement> = values
+            .iter()
             .map(|v| SampleElement::Literal(v.clone()))
             .collect();
         self.elements.push(SampleElement::Optional(elements));
@@ -691,7 +721,9 @@ impl Sample {
 
     /// Convert elements to Entry representation
     fn elements_to_entry(&self) -> Entry {
-        let entries: Vec<Entry> = self.elements.iter()
+        let entries: Vec<Entry> = self
+            .elements
+            .iter()
             .map(|e| self.element_to_entry(e))
             .collect();
         Entry::vec(entries)
@@ -701,28 +733,22 @@ impl Sample {
         match element {
             SampleElement::Literal(e) => e.clone(),
             SampleElement::Choice(alts) => {
-                let alt_entries: Vec<Entry> = alts.iter()
+                let alt_entries: Vec<Entry> = alts
+                    .iter()
                     .map(|alt| {
-                        let items: Vec<Entry> = alt.iter()
-                            .map(|e| self.element_to_entry(e))
-                            .collect();
+                        let items: Vec<Entry> =
+                            alt.iter().map(|e| self.element_to_entry(e)).collect();
                         Entry::vec(items)
                     })
                     .collect();
-                Entry::node("Choice", "")
-                    .with_attr("alternatives", Entry::vec(alt_entries))
+                Entry::node("Choice", "").with_attr("alternatives", Entry::vec(alt_entries))
             }
             SampleElement::Optional(elements) => {
-                let items: Vec<Entry> = elements.iter()
-                    .map(|e| self.element_to_entry(e))
-                    .collect();
-                Entry::node("Optional", "")
-                    .with_attr("elements", Entry::vec(items))
+                let items: Vec<Entry> = elements.iter().map(|e| self.element_to_entry(e)).collect();
+                Entry::node("Optional", "").with_attr("elements", Entry::vec(items))
             }
             SampleElement::Sequence(elements) => {
-                let items: Vec<Entry> = elements.iter()
-                    .map(|e| self.element_to_entry(e))
-                    .collect();
+                let items: Vec<Entry> = elements.iter().map(|e| self.element_to_entry(e)).collect();
                 Entry::vec(items)
             }
         }
@@ -776,7 +802,6 @@ impl EntryBuilderExt for Entry {
     }
 }
 
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -794,12 +819,12 @@ mod tests {
             .with_category("testing")
             .with_priority(5)
             .strings(&["hello", "world"]);
-        
+
         assert_eq!(Build::kind(&sample), "Sample");
         assert_eq!(Build::name(&sample), Some("test_pattern"));
         assert_eq!(Build::category(&sample), Some("testing"));
         assert_eq!(Build::priority(&sample), 5);
-        
+
         let entry = sample.to_entry();
         assert_eq!(entry.kind(), Some("Sample"));
         assert_eq!(entry.name(), Some("test_pattern"));

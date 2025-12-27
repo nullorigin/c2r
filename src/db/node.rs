@@ -192,22 +192,22 @@ pub fn comment(text: impl Into<String>) -> Entry {
 pub trait NodeExt {
     /// Add an attribute with builder pattern.
     fn with_attr(self, key: impl Into<String>, value: Entry) -> Self;
-    
+
     /// Set source range with builder pattern.
     fn with_range(self, range: Range<usize>) -> Self;
-    
+
     /// Set depth with builder pattern.
     fn with_depth(self, depth: usize) -> Self;
-    
+
     /// Set owner with builder pattern.
     fn with_owner(self, owner: impl Into<String>) -> Self;
-    
+
     /// Set declaration order with builder pattern.
     fn with_order(self, order: usize) -> Self;
-    
+
     /// Add a child node (stored in "children" attribute).
     fn with_child(self, child: Entry) -> Self;
-    
+
     /// Add multiple children.
     fn with_children(self, children: Vec<Entry>) -> Self;
 }
@@ -217,27 +217,27 @@ impl NodeExt for Entry {
         self.set_attr(key, value);
         self
     }
-    
+
     fn with_range(mut self, range: Range<usize>) -> Self {
         self.set_attr("source_range", Entry::range(range));
         self
     }
-    
+
     fn with_depth(mut self, depth: usize) -> Self {
         self.set_depth(depth);
         self
     }
-    
+
     fn with_owner(mut self, owner: impl Into<String>) -> Self {
         self.set_attr("owner", Entry::string(owner.into()));
         self
     }
-    
+
     fn with_order(mut self, order: usize) -> Self {
         self.set_attr("declaration_order", Entry::usize(order));
         self
     }
-    
+
     fn with_child(mut self, child: Entry) -> Self {
         match &mut self {
             Entry::Node { attrs, .. } => {
@@ -252,7 +252,7 @@ impl NodeExt for Entry {
         }
         self
     }
-    
+
     fn with_children(mut self, children: Vec<Entry>) -> Self {
         for child in children {
             self = self.with_child(child);
@@ -280,7 +280,10 @@ pub struct Param {
 
 impl Param {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
-        Self { name: name.into(), type_name: type_name.into() }
+        Self {
+            name: name.into(),
+            type_name: type_name.into(),
+        }
     }
 }
 
@@ -355,7 +358,7 @@ impl Function {
 impl Build for Function {
     fn to_entry(&self) -> Entry {
         let mut node = function(&self.name);
-        
+
         if let Some(ref range) = self.range {
             node = node.with_range(range.clone());
         }
@@ -380,8 +383,12 @@ impl Build for Function {
         node
     }
 
-    fn kind(&self) -> &str { FUNCTION }
-    fn name(&self) -> Option<&str> { Some(&self.name) }
+    fn kind(&self) -> &str {
+        FUNCTION
+    }
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
 }
 
 /// Alias for backwards compatibility
@@ -400,7 +407,10 @@ pub struct Field {
 
 impl Field {
     pub fn new(name: impl Into<String>, type_name: impl Into<String>) -> Self {
-        Self { name: name.into(), type_name: type_name.into() }
+        Self {
+            name: name.into(),
+            type_name: type_name.into(),
+        }
     }
 }
 
@@ -454,7 +464,7 @@ impl Struct {
 impl Build for Struct {
     fn to_entry(&self) -> Entry {
         let mut node = struct_node(&self.name);
-        
+
         if let Some(ref range) = self.range {
             node = node.with_range(range.clone());
         }
@@ -470,8 +480,12 @@ impl Build for Struct {
         node
     }
 
-    fn kind(&self) -> &str { STRUCT }
-    fn name(&self) -> Option<&str> { Some(&self.name) }
+    fn kind(&self) -> &str {
+        STRUCT
+    }
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
 }
 
 /// Alias for backwards compatibility
@@ -490,11 +504,17 @@ pub struct Variant {
 
 impl Variant {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into(), value: None }
+        Self {
+            name: name.into(),
+            value: None,
+        }
     }
-    
+
     pub fn with_value(name: impl Into<String>, value: i64) -> Self {
-        Self { name: name.into(), value: Some(value) }
+        Self {
+            name: name.into(),
+            value: Some(value),
+        }
     }
 }
 
@@ -546,7 +566,7 @@ impl Enum {
 impl Build for Enum {
     fn to_entry(&self) -> Entry {
         let mut node = enum_node(&self.name);
-        
+
         if let Some(ref range) = self.range {
             node = node.with_range(range.clone());
         }
@@ -564,8 +584,12 @@ impl Build for Enum {
         node
     }
 
-    fn kind(&self) -> &str { ENUM }
-    fn name(&self) -> Option<&str> { Some(&self.name) }
+    fn kind(&self) -> &str {
+        ENUM
+    }
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
 }
 
 /// Alias for backwards compatibility
@@ -611,13 +635,12 @@ mod tests {
 
     #[test]
     fn test_function_builder() {
-        let tree = Tree::new()
-            .with_function("main", 0..100, |f| {
-                f.returns("int")
-                 .param("argc", "int")
-                 .param("argv", "char**")
-            });
-        
+        let tree = Tree::new().with_function("main", 0..100, |f| {
+            f.returns("int")
+                .param("argc", "int")
+                .param("argv", "char**")
+        });
+
         assert_eq!(tree.len(), 1);
         let funcs = tree.functions();
         assert_eq!(funcs.len(), 1);
@@ -626,25 +649,21 @@ mod tests {
 
     #[test]
     fn test_struct_builder() {
-        let tree = Tree::new()
-            .with_struct("Point", 0..50, |s| {
-                s.field("x", "int")
-                 .field("y", "int")
-            });
-        
+        let tree =
+            Tree::new().with_struct("Point", 0..50, |s| s.field("x", "int").field("y", "int"));
+
         let structs = tree.structs();
         assert_eq!(structs.len(), 1);
     }
 
     #[test]
     fn test_enum_builder() {
-        let tree = Tree::new()
-            .with_enum("Color", 0..80, |e| {
-                e.variant("Red")
-                 .variant_value("Green", 1)
-                 .variant_value("Blue", 2)
-            });
-        
+        let tree = Tree::new().with_enum("Color", 0..80, |e| {
+            e.variant("Red")
+                .variant_value("Green", 1)
+                .variant_value("Blue", 2)
+        });
+
         let enums = tree.enums();
         assert_eq!(enums.len(), 1);
     }
@@ -656,7 +675,7 @@ mod tests {
             .with_global("g_count", "int", 21..40)
             .with_function("init", 41..100, |f| f.returns("void"))
             .with_metadata("source", Entry::string("test.c"));
-        
+
         assert_eq!(tree.includes().len(), 1);
         assert_eq!(tree.globals().len(), 1);
         assert_eq!(tree.functions().len(), 1);
@@ -668,7 +687,7 @@ mod tests {
             .with_range(0..100)
             .with_depth(0)
             .with_order(1);
-        
+
         assert_eq!(n.get_string_attr("return_type"), Some("void"));
         assert_eq!(n.source_range(), Some(0..100));
         assert_eq!(n.depth(), 0);
@@ -680,20 +699,20 @@ mod tests {
         let f = function("main")
             .with_child(param("argc", "int"))
             .with_child(param("argv", "char**"));
-        
+
         let children = f.get_vec_attr("children");
         assert!(children.is_some());
         assert_eq!(children.unwrap().len(), 2);
     }
-        #[test]
+    #[test]
     fn test_declaration_order() {
         let mut tree = Tree::new();
-        tree.add(node::function("first"));
-        tree.add(node::function("second"));
-        tree.add(node::function("third"));
-        
+        tree.add(function("first"));
+        tree.add(function("second"));
+        tree.add(function("third"));
+
         let funcs = tree.functions();
-        
+
         assert_eq!(funcs[0].declaration_order(), Some(0));
         assert_eq!(funcs[1].declaration_order(), Some(1));
         assert_eq!(funcs[2].declaration_order(), Some(2));

@@ -15,7 +15,7 @@ pub mod validation;
 pub mod variables;
 
 // Re-export process types for convenience
-pub use process::{ProcessStage, ProcessDecision, Processor};
+pub use process::{ProcessDecision, ProcessStage, Processor};
 
 // Re-export handler types from db module for convenience
 pub use crate::db::handler::{

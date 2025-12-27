@@ -3,8 +3,8 @@
 //! Tree wraps Site to provide a clean API for working with
 //! intermediate format trees. Includes builder pattern methods.
 
-use crate::db::web::{SiteStats, Entry, Site, BranchOp, Links};
-use crate::db::node::{self, kind, NodeExt, Function, Struct, Enum};
+use crate::db::node::{self, kind, Enum, Function, NodeExt, Struct};
+use crate::db::web::{BranchOp, Entry, Links, Site, SiteStats};
 use std::ops::Range;
 
 /// A tree structure for the Entry-based intermediate format.
@@ -188,25 +188,45 @@ impl Tree {
     }
 
     /// Add a global variable.
-    pub fn add_global(&mut self, name: impl Into<String>, type_name: impl Into<String>, range: Range<usize>) -> usize {
+    pub fn add_global(
+        &mut self,
+        name: impl Into<String>,
+        type_name: impl Into<String>,
+        range: Range<usize>,
+    ) -> usize {
         let g = node::global(name, type_name).with_range(range);
         self.add(g)
     }
 
     /// Add a global with builder pattern.
-    pub fn with_global(mut self, name: impl Into<String>, type_name: impl Into<String>, range: Range<usize>) -> Self {
+    pub fn with_global(
+        mut self,
+        name: impl Into<String>,
+        type_name: impl Into<String>,
+        range: Range<usize>,
+    ) -> Self {
         self.add_global(name, type_name, range);
         self
     }
 
     /// Add a typedef.
-    pub fn add_typedef(&mut self, name: impl Into<String>, target: impl Into<String>, range: Range<usize>) -> usize {
+    pub fn add_typedef(
+        &mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        range: Range<usize>,
+    ) -> usize {
         let t = node::typedef(name, target).with_range(range);
         self.add(t)
     }
 
     /// Add a typedef with builder pattern.
-    pub fn with_typedef(mut self, name: impl Into<String>, target: impl Into<String>, range: Range<usize>) -> Self {
+    pub fn with_typedef(
+        mut self,
+        name: impl Into<String>,
+        target: impl Into<String>,
+        range: Range<usize>,
+    ) -> Self {
         self.add_typedef(name, target, range);
         self
     }
@@ -224,13 +244,23 @@ impl Tree {
     }
 
     /// Add an include.
-    pub fn add_include(&mut self, path: impl Into<String>, is_system: bool, range: Range<usize>) -> usize {
+    pub fn add_include(
+        &mut self,
+        path: impl Into<String>,
+        is_system: bool,
+        range: Range<usize>,
+    ) -> usize {
         let i = node::include(path, is_system).with_range(range);
         self.add(i)
     }
 
     /// Add an include with builder pattern.
-    pub fn with_include(mut self, path: impl Into<String>, is_system: bool, range: Range<usize>) -> Self {
+    pub fn with_include(
+        mut self,
+        path: impl Into<String>,
+        is_system: bool,
+        range: Range<usize>,
+    ) -> Self {
         self.add_include(path, is_system, range);
         self
     }
@@ -308,7 +338,8 @@ impl Tree {
 
     /// Evaluate a branch node and return the selected path.
     pub fn evaluate_branch(&self, branch_idx: usize, context: &Entry) -> Option<&Vec<Entry>> {
-        self.get(branch_idx).and_then(|entry| entry.evaluate_branch(context))
+        self.get(branch_idx)
+            .and_then(|entry| entry.evaluate_branch(context))
     }
 
     // ========================================================================
@@ -317,7 +348,8 @@ impl Tree {
 
     /// Find all nodes by kind.
     pub fn find_by_kind(&self, kind: &str) -> Vec<&Entry> {
-        self.site.find_by_kind(kind)
+        self.site
+            .find_by_kind(kind)
             .iter()
             .filter_map(|&i| self.site.get(i))
             .collect()
@@ -325,7 +357,8 @@ impl Tree {
 
     /// Find all nodes by name pattern (case-insensitive contains).
     pub fn find_by_name(&self, pattern: &str) -> Vec<&Entry> {
-        self.site.find_by_name(pattern)
+        self.site
+            .find_by_name(pattern)
             .iter()
             .filter_map(|&i| self.site.get(i))
             .collect()
@@ -333,7 +366,8 @@ impl Tree {
 
     /// Find all nodes with a specific attribute.
     pub fn find_with_attr(&self, key: &str) -> Vec<&Entry> {
-        self.site.find_with_attr(key)
+        self.site
+            .find_with_attr(key)
             .iter()
             .filter_map(|&i| self.site.get(i))
             .collect()
@@ -527,13 +561,13 @@ impl Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::node::{function, struct_node, param};
+    use crate::db::node::{function, param, struct_node};
 
     #[test]
     fn test_tree_basic() {
         let mut tree = Tree::new();
         let fn_idx = tree.add_root(function("main"));
-        
+
         assert_eq!(tree.len(), 1);
         assert_eq!(tree.root_count(), 1);
         assert!(tree.get(fn_idx).is_some());
@@ -545,7 +579,7 @@ mod tests {
         let fn_idx = tree.add_root(function("main"));
         let p1 = tree.add_child(fn_idx, param("argc", "int")).unwrap();
         let p2 = tree.add_child(fn_idx, param("argv", "char**")).unwrap();
-        
+
         assert_eq!(tree.len(), 3);
         assert_eq!(tree.site.children_of(fn_idx), vec![p1, p2]);
     }
@@ -556,7 +590,7 @@ mod tests {
         tree.add_root(function("func1"));
         tree.add_root(function("func2"));
         tree.add_root(struct_node("MyStruct"));
-        
+
         assert_eq!(tree.functions().len(), 2);
         assert_eq!(tree.structs().len(), 1);
     }
@@ -566,7 +600,7 @@ mod tests {
         let tree = Tree::new()
             .with_metadata("source_file", Entry::string("test.c"))
             .with_metadata("version", Entry::string("1.0"));
-        
+
         assert_eq!(
             tree.get_metadata("source_file")
                 .and_then(|e| e.name())
@@ -580,7 +614,7 @@ mod tests {
         let mut tree = Tree::new();
         tree.add_root(function("main"));
         tree.add_root(struct_node("Point"));
-        
+
         let stats = tree.stats();
         assert_eq!(stats.total_sites, 2);
         assert_eq!(stats.node_count, 2);
