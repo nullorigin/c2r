@@ -46,18 +46,18 @@ pub enum TypeCategory {
 impl TypeCategory {
     pub fn as_str(&self) -> &str {
         match self {
-            TypeCategory::Boolean => "Boolean",
-            TypeCategory::Integer => "Integer",
-            TypeCategory::Float => "Float",
-            TypeCategory::SizeType => "SizeType",
-            TypeCategory::SystemType => "SystemType",
-            TypeCategory::PointerType => "PointerType",
-            TypeCategory::StorageQualifier => "StorageQualifier",
-            TypeCategory::UserDefined => "UserDefined",
-            TypeCategory::FunctionPointer => "FunctionPointer",
-            TypeCategory::Struct => "Struct",
-            TypeCategory::Union => "Union",
-            TypeCategory::Enum => "Enum",
+            TypeCategory::Boolean => "boolean",
+            TypeCategory::Integer => "integer",
+            TypeCategory::Float => "float",
+            TypeCategory::SizeType => "size",
+            TypeCategory::SystemType => "system",
+            TypeCategory::PointerType => "pointer",
+            TypeCategory::StorageQualifier => "storage",
+            TypeCategory::UserDefined => "type",
+            TypeCategory::FunctionPointer => "function_pointer",
+            TypeCategory::Struct => "struct",
+            TypeCategory::Union => "union",
+            TypeCategory::Enum => "enum",
             TypeCategory::Custom(s) => s.as_str(),
         }
     }
@@ -150,6 +150,10 @@ impl TypeMetadata {
 impl Build for TypeMetadata {
     fn kind(&self) -> &str {
         "TypeMetadata"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.source_type)
     }
     
     /// Convert to an Entry representation
@@ -793,6 +797,9 @@ pub fn sanitize_rust_identifier(identifier: &str) -> String {
         "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
         "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
         "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield",
+        // Rust primitive types that conflict with C variable names
+        "str", "bool", "char", "i8", "i16", "i32", "i64", "i128", "isize",
+        "u8", "u16", "u32", "u64", "u128", "usize", "f32", "f64",
     ];
 
     if identifier.is_empty() {
@@ -1299,6 +1306,324 @@ impl IdentifierConverter {
 }
 
 impl Default for IdentifierConverter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// ============================================================================
+// Variable Conversion System
+// ============================================================================
+
+/// Metadata for variable registrations
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableMetadata {
+    /// Variable name
+    pub name: String,
+    /// C type of the variable
+    pub c_type: String,
+    /// Rust type of the variable
+    pub rust_type: String,
+    /// Whether this is a pointer
+    pub is_pointer: bool,
+    /// Pointer indirection level
+    pub pointer_level: usize,
+    /// Whether this is an array
+    pub is_array: bool,
+    /// Array dimensions (if applicable)
+    pub array_dims: Vec<usize>,
+    /// Whether this is const
+    pub is_const: bool,
+    /// Whether this is static
+    pub is_static: bool,
+    /// Scope level (0 = global, higher = nested)
+    pub scope_level: usize,
+    /// Size in bytes (if known)
+    pub size_bytes: Option<usize>,
+}
+
+impl VariableMetadata {
+    /// Create new variable metadata
+    pub fn new(name: &str, c_type: &str, rust_type: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            c_type: c_type.to_string(),
+            rust_type: rust_type.to_string(),
+            is_pointer: false,
+            pointer_level: 0,
+            is_array: false,
+            array_dims: Vec::new(),
+            is_const: false,
+            is_static: false,
+            scope_level: 0,
+            size_bytes: None,
+        }
+    }
+
+    /// Mark as pointer with level
+    pub fn as_pointer(mut self, level: usize) -> Self {
+        self.is_pointer = level > 0;
+        self.pointer_level = level;
+        self
+    }
+
+    /// Mark as array with dimensions
+    pub fn as_array(mut self, dims: Vec<usize>) -> Self {
+        self.is_array = !dims.is_empty();
+        self.array_dims = dims;
+        self
+    }
+
+    /// Mark as const
+    pub fn as_const(mut self) -> Self {
+        self.is_const = true;
+        self
+    }
+
+    /// Mark as static
+    pub fn as_static(mut self) -> Self {
+        self.is_static = true;
+        self
+    }
+
+    /// Set scope level
+    pub fn with_scope(mut self, level: usize) -> Self {
+        self.scope_level = level;
+        self
+    }
+
+    /// Set size in bytes
+    pub fn with_size(mut self, size: usize) -> Self {
+        self.size_bytes = Some(size);
+        self
+    }
+
+    /// Get the base type (without pointer/array modifiers)
+    pub fn base_type(&self) -> &str {
+        &self.rust_type
+    }
+
+    /// Convert to an Entry representation
+    pub fn to_entry(&self) -> Entry {
+        let mut node = Entry::node("Variable", &self.name);
+        node.set_attr("c_type", Entry::string(&self.c_type));
+        node.set_attr("rust_type", Entry::string(&self.rust_type));
+        node.set_attr("is_pointer", Entry::bool(self.is_pointer));
+        node.set_attr("pointer_level", Entry::usize(self.pointer_level));
+        node.set_attr("is_array", Entry::bool(self.is_array));
+        node.set_attr("is_const", Entry::bool(self.is_const));
+        node.set_attr("is_static", Entry::bool(self.is_static));
+        node.set_attr("scope_level", Entry::usize(self.scope_level));
+        if let Some(size) = self.size_bytes {
+            node.set_attr("size_bytes", Entry::usize(size));
+        }
+        if !self.array_dims.is_empty() {
+            let dims: Vec<Entry> = self.array_dims.iter().map(|&d| Entry::usize(d)).collect();
+            node.set_attr("array_dims", Entry::vec(dims));
+        }
+        node
+    }
+}
+
+/// Variable conversion engine
+///
+/// Tracks declared variables and their types for:
+/// - sizeof() conversions (needs to know type of variable)
+/// - Type inference in expressions
+/// - Pointer/array access validation
+#[derive(Debug, Clone)]
+pub struct VariableConverter {
+    /// Variable mappings (name -> metadata)
+    var_map: HashMap<String, VariableMetadata>,
+    /// Scope stack for nested scopes (function bodies, blocks)
+    scope_stack: Vec<HashMap<String, VariableMetadata>>,
+    /// Current scope level
+    current_scope: usize,
+    /// Cached lookups for performance
+    lookup_cache: HashMap<String, String>,
+}
+
+impl VariableConverter {
+    /// Create a new variable converter
+    pub fn new() -> Self {
+        Self {
+            var_map: HashMap::new(),
+            scope_stack: vec![HashMap::new()], // Global scope
+            current_scope: 0,
+            lookup_cache: HashMap::new(),
+        }
+    }
+
+    /// Register a variable with its type information
+    pub fn register(&mut self, name: &str, c_type: &str, rust_type: &str) {
+        let metadata = VariableMetadata::new(name, c_type, rust_type)
+            .with_scope(self.current_scope);
+        self.register_metadata(name, metadata);
+    }
+
+    /// Register a variable with full metadata
+    pub fn register_metadata(&mut self, name: &str, metadata: VariableMetadata) {
+        // Add to current scope
+        if let Some(scope) = self.scope_stack.last_mut() {
+            scope.insert(name.to_string(), metadata.clone());
+        }
+        // Also add to global map for quick lookup
+        self.var_map.insert(name.to_string(), metadata);
+        // Invalidate cache
+        self.lookup_cache.remove(name);
+    }
+
+    /// Register a pointer variable
+    pub fn register_pointer(&mut self, name: &str, base_c_type: &str, base_rust_type: &str, level: usize) {
+        let rust_ptr = if level == 1 {
+            format!("*mut {}", base_rust_type)
+        } else {
+            let mut result = base_rust_type.to_string();
+            for _ in 0..level {
+                result = format!("*mut {}", result);
+            }
+            result
+        };
+        let metadata = VariableMetadata::new(name, &format!("{}*", base_c_type), &rust_ptr)
+            .as_pointer(level)
+            .with_scope(self.current_scope);
+        self.register_metadata(name, metadata);
+    }
+
+    /// Register an array variable
+    pub fn register_array(&mut self, name: &str, element_c_type: &str, element_rust_type: &str, dims: Vec<usize>) {
+        let rust_type = if dims.len() == 1 {
+            format!("[{}; {}]", element_rust_type, dims[0])
+        } else {
+            // Multi-dimensional array
+            let mut result = element_rust_type.to_string();
+            for &dim in dims.iter().rev() {
+                result = format!("[{}; {}]", result, dim);
+            }
+            result
+        };
+        let metadata = VariableMetadata::new(name, &format!("{}[]", element_c_type), &rust_type)
+            .as_array(dims)
+            .with_scope(self.current_scope);
+        self.register_metadata(name, metadata);
+    }
+
+    /// Look up a variable's Rust type by name
+    pub fn lookup(&self, name: &str) -> Option<String> {
+        // Check cache first
+        if let Some(cached) = self.lookup_cache.get(name) {
+            return Some(cached.clone());
+        }
+
+        // Search from innermost scope to outermost
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(meta) = scope.get(name) {
+                return Some(meta.rust_type.clone());
+            }
+        }
+
+        // Fall back to global map
+        self.var_map.get(name).map(|m| m.rust_type.clone())
+    }
+
+    /// Look up a variable's C type by name
+    pub fn lookup_c_type(&self, name: &str) -> Option<String> {
+        // Search from innermost scope to outermost
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(meta) = scope.get(name) {
+                return Some(meta.c_type.clone());
+            }
+        }
+        self.var_map.get(name).map(|m| m.c_type.clone())
+    }
+
+    /// Get full metadata for a variable
+    pub fn get_metadata(&self, name: &str) -> Option<&VariableMetadata> {
+        // Search from innermost scope to outermost
+        for scope in self.scope_stack.iter().rev() {
+            if let Some(meta) = scope.get(name) {
+                return Some(meta);
+            }
+        }
+        self.var_map.get(name)
+    }
+
+    /// Check if a variable is registered
+    pub fn is_registered(&self, name: &str) -> bool {
+        self.lookup(name).is_some()
+    }
+
+    /// Enter a new scope (e.g., function body, block)
+    pub fn push_scope(&mut self) {
+        self.current_scope += 1;
+        self.scope_stack.push(HashMap::new());
+    }
+
+    /// Exit current scope
+    pub fn pop_scope(&mut self) {
+        if self.current_scope > 0 {
+            if let Some(popped) = self.scope_stack.pop() {
+                // Remove variables from global map that were in this scope
+                for name in popped.keys() {
+                    self.var_map.remove(name);
+                    self.lookup_cache.remove(name);
+                }
+            }
+            self.current_scope -= 1;
+        }
+    }
+
+    /// Get current scope level
+    pub fn scope_level(&self) -> usize {
+        self.current_scope
+    }
+
+    /// Clear all variables (reset state)
+    pub fn clear(&mut self) {
+        self.var_map.clear();
+        self.scope_stack.clear();
+        self.scope_stack.push(HashMap::new());
+        self.current_scope = 0;
+        self.lookup_cache.clear();
+    }
+
+    /// Get all registered variables as (name, rust_type) pairs
+    pub fn get_all_mappings(&self) -> Vec<(&str, &str, &str)> {
+        self.var_map
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.rust_type.as_str(), v.c_type.as_str()))
+            .collect()
+    }
+
+    /// Get all variables in current scope
+    pub fn get_current_scope_vars(&self) -> Vec<&str> {
+        self.scope_stack
+            .last()
+            .map(|scope| scope.keys().map(|k| k.as_str()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Get the size of a variable's type in bytes (if known)
+    pub fn get_size(&self, name: &str) -> Option<usize> {
+        self.get_metadata(name).and_then(|m| m.size_bytes)
+    }
+
+    /// Estimate size based on Rust type (for sizeof conversions)
+    pub fn estimate_size_for_type(rust_type: &str) -> Option<usize> {
+        match rust_type {
+            "i8" | "u8" | "bool" => Some(1),
+            "i16" | "u16" => Some(2),
+            "i32" | "u32" | "f32" => Some(4),
+            "i64" | "u64" | "f64" | "isize" | "usize" => Some(8),
+            "i128" | "u128" => Some(16),
+            "()" => Some(0),
+            _ if rust_type.starts_with("*") => Some(8), // Pointers are 8 bytes on 64-bit
+            _ => None,
+        }
+    }
+}
+
+impl Default for VariableConverter {
     fn default() -> Self {
         Self::new()
     }

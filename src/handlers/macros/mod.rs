@@ -149,9 +149,6 @@ impl Default for PreprocessorHandler {
 }
 
 impl Processor for PreprocessorHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
 
     fn supported_patterns(&self) -> &[&str] {
         &["ifdef", "ifndef", "endif", "else", "elif", "if_defined"]
@@ -689,6 +686,59 @@ impl DefineHandler {
             condition, true_val, false_val
         ))
     }
+
+    /// Convert a type-defining macro (struct/enum/union) to macro_rules!
+    fn convert_type_macro(&self, body: &str) -> String {
+        let macro_name = self.data.name.to_lowercase();
+        let rust_body = self.convert_c_to_rust(body);
+        
+        format!(
+            "macro_rules! {} {{\n    () => {{\n        {}\n    }};\n}}",
+            macro_name, rust_body
+        )
+    }
+
+    /// Convert C type syntax to Rust
+    fn convert_c_to_rust(&self, c_code: &str) -> String {
+        let mut result = c_code.to_string();
+        
+        // Basic C to Rust type conversions
+        result = result.replace("int", "i32");
+        result = result.replace("float", "f32");
+        result = result.replace("double", "f64");
+        result = result.replace("char", "i8");
+        result = result.replace("void", "()");
+        
+        // Clean up whitespace
+        result.split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// Convert a simple single-line define to a Rust constant
+    fn convert_simple_constant(&self, value: &str) -> String {
+        // Determine type from value
+        let (rust_type, rust_value) = if value.parse::<i64>().is_ok() {
+            ("i32", value.to_string())
+        } else if value.parse::<f64>().is_ok() {
+            ("f64", value.to_string())
+        } else if value.starts_with('"') && value.ends_with('"') {
+            ("&str", value.to_string())
+        } else if value.starts_with('\'') && value.ends_with('\'') {
+            ("char", value.to_string())
+        } else if value.starts_with("0x") || value.starts_with("0X") {
+            // Hex literal
+            ("i32", value.to_string())
+        } else if value == "true" || value == "false" {
+            ("bool", value.to_string())
+        } else if value == "NULL" || value == "nullptr" {
+            // Null pointer - use Option
+            ("Option<*const ()>", "None".to_string())
+        } else {
+            // Unknown - keep as-is with unknown type comment
+            ("/* TODO: determine type */", value.to_string())
+        };
+
+        format!("pub const {}: {} = {};", self.data.name, rust_type, rust_value)
+    }
 }
 
 impl Default for DefineHandler {
@@ -698,9 +748,6 @@ impl Default for DefineHandler {
 }
 
 impl Processor for DefineHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
 
     fn supported_patterns(&self) -> &[&str] {
         &["validate_define_constant", "extract_define_constant"]
@@ -758,13 +805,20 @@ impl Processor for DefineHandler {
     }
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
-        if tokens.len() < 3 {
+        // Filter out backslash tokens (line continuations) - join onto one logical line
+        let filtered_tokens: Vec<Token> = tokens
+            .iter()
+            .filter(|t| t.to_string() != "\\")
+            .cloned()
+            .collect();
+        
+        if filtered_tokens.len() < 3 {
             self.error = Some("Too few tokens for #define".to_string());
             return false;
         }
 
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
+        self.input_tokens = filtered_tokens.iter().map(|t| t.to_string()).collect();
+        self.range = 0..filtered_tokens.len();
 
         // Check for #define pattern
         let has_define = (self.input_tokens[0] == "#"
@@ -782,7 +836,12 @@ impl Processor for DefineHandler {
     }
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
-        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+        // Filter out backslash tokens (line continuations)
+        let token_strs: Vec<String> = tokens
+            .iter()
+            .map(|t| t.to_string())
+            .filter(|s| s != "\\")
+            .collect();
         self.data.original_line = token_strs.join(" ");
 
         // Find where macro name starts
@@ -894,19 +953,19 @@ impl Processor for DefineHandler {
             // Convert to Rust macro_rules!
             self.convert_function_like_macro()
         } else if !self.data.value.is_empty() {
-            // Try to determine type from value
-            let value = &self.data.value;
-            let rust_type = if value.parse::<i64>().is_ok() {
-                "i32"
-            } else if value.parse::<f64>().is_ok() {
-                "f64"
-            } else if value.starts_with('"') {
-                "&str"
+            let value = self.data.value.trim();
+            
+            // Check if this is a complex/multi-line define (has braces or type keywords)
+            let is_complex = value.contains('{') || value.contains('}') ||
+                value.starts_with("struct") || value.starts_with("enum") || value.starts_with("union");
+            
+            if is_complex {
+                // Complex type definition - convert to macro_rules!
+                self.convert_type_macro(value)
             } else {
-                "/* unknown type */"
-            };
-
-            format!("pub const {}: {} = {};", self.data.name, rust_type, value)
+                // Single-line define - convert to constant
+                self.convert_simple_constant(value)
+            }
         } else {
             // Empty define - use as feature flag
             format!(
@@ -1055,9 +1114,6 @@ impl Default for IncludeHandler {
 }
 
 impl Processor for IncludeHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
 
     fn supported_patterns(&self) -> &[&str] {
         &["include", "include_system", "include_local"]

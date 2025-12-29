@@ -57,35 +57,21 @@ impl Build for TypedefData {
 /// Typedef handler state for processing
 #[derive(Debug, Clone)]
 pub struct TypedefHandler {
-    /// Handler name
-    name: String,
-    /// Current processing stage
     stage: ProcessStage,
-    /// Extracted typedef data
-    data: TypedefData,
-    /// Generated Rust output
-    output: Option<String>,
-    /// Error message if failed
-    error: Option<String>,
-    /// Confidence score
     confidence: f64,
-    /// Token range processed
-    range: Range<usize>,
-    /// Input tokens (stored for Build trait)
-    input_tokens: Vec<String>,
+    error: Option<String>,
+    output: Option<String>,
+    data: TypedefData,
 }
 
 impl TypedefHandler {
     pub fn new() -> Self {
         Self {
-            name: "typedef".to_string(),
             stage: ProcessStage::Pending,
-            data: TypedefData::default(),
-            output: None,
-            error: None,
             confidence: 0.0,
-            range: 0..0,
-            input_tokens: Vec::new(),
+            error: None,
+            output: None,
+            data: TypedefData::default(),
         }
     }
 }
@@ -97,10 +83,6 @@ impl Default for TypedefHandler {
 }
 
 impl Processor for TypedefHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &[
             "validate_typedef_struct",
@@ -234,9 +216,7 @@ impl Processor for TypedefHandler {
             return false;
         }
 
-        // Store tokens for later
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
+        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
         // First token should be "typedef"
         let first = tokens[0].to_string();
@@ -256,7 +236,7 @@ impl Processor for TypedefHandler {
         let second = tokens.get(1).map(|t| t.to_string()).unwrap_or_default();
         if matches!(second.as_str(), "struct" | "enum" | "union") {
             // If there's a { in the tokens, this is a definition with body - reject
-            if self.input_tokens.iter().any(|t| t == "{") {
+            if token_strs.iter().any(|t| t == "{") {
                 self.error = Some(format!("typedef {} with body should be handled by {}Handler", second, second));
                 return false;
             }
@@ -265,7 +245,7 @@ impl Processor for TypedefHandler {
         // Try matching against our patterns
         let mut best_confidence = 0.0;
         for (pattern, _) in self.patterns() {
-            if let Some(confidence) = pattern.matches_tokens(&self.input_tokens) {
+            if let Some(confidence) = pattern.matches_tokens(&token_strs) {
                 if confidence > best_confidence {
                     best_confidence = confidence;
                 }
@@ -533,15 +513,7 @@ impl Build for TypedefHandler {
             attrs.insert("error".to_string(), Entry::string(error));
         }
 
-        // Store input tokens
-        let tokens: Vec<Entry> = self.input_tokens.iter().map(|t| Entry::string(t)).collect();
-        attrs.insert("input_tokens".to_string(), Entry::vec(tokens));
-
-        // Store range
-        attrs.insert("range_start".to_string(), Entry::usize(self.range.start));
-        attrs.insert("range_end".to_string(), Entry::usize(self.range.end));
-
-        Entry::node_with_attrs("TypedefHandler", &self.data.alias_name, attrs)
+        Entry::node_with_attrs("Handler", "TypedefHandler", attrs)
     }
 
     fn kind(&self) -> &str {

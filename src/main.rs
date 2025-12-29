@@ -66,6 +66,10 @@ fn main() {
                 }
                 initialize(verbose_count);
             }
+            "--register-builds" | "--track-handlers" => {
+                system().enable_build_registration();
+                debug!("Build registration enabled - handlers will register to database");
+            }
             "-o" | "--output-file" => {
                 if let Some(file_path) = args_iter.next() {
                     output_file = file_path.clone();

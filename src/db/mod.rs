@@ -84,7 +84,7 @@ pub use convert::{
     convert_identifier, convert_operator, is_assignment_operator, is_binary_operator, is_c_keyword,
     is_operator, is_valid_c_identifier, sanitize_rust_identifier, to_camel_case, to_pascal_case,
     to_screaming_snake_case, to_snake_case, IdentifierCase, TypeCategory,
-    TypeConverter, TypeMetadata,
+    TypeConverter, TypeMetadata, VariableConverter, VariableMetadata,
 };
 pub use filter::{
     builtin_categories, builtin_kinds, is_builtin_category, is_builtin_kind, Category, CategoryFilter, Kind,
@@ -96,8 +96,19 @@ pub use handler::{
     RoutingCondition, RoutingRule, Selection, SelectionStrategy, SuccessRecord, TokenRange,
 };
 pub use keyword::{
-    c_order, is_control_flow, is_preprocessor, is_storage_class, is_type_keyword, is_type_qualifier, Keyword,
-    KeywordCategory, Order,
+    // C keyword functions
+    all_c_keywords, c_order, is_c_control_flow, is_preprocessor, is_c_punctuation,
+    is_c_storage_class, is_c_type_declaration, is_c_type_keyword, is_c_type_qualifier,
+    is_c_operator as is_keyword_operator,
+    // Rust keyword functions
+    all_rust_keywords, all_rust_primitive_types, c_to_rust_qualifier, c_to_rust_storage,
+    c_to_rust_type, is_rust_attribute, is_rust_container_type, is_rust_control_flow,
+    is_rust_function, is_rust_keyword, is_rust_macro, is_rust_module,
+    is_rust_operator_keyword, is_rust_primitive_type, is_rust_reserved, is_rust_storage,
+    is_rust_strict_keyword, is_rust_type_declaration, is_rust_type_qualifier,
+    is_rust_visibility, needs_raw_identifier, rust_order, to_raw_identifier,
+    // Types
+    Keyword, KeywordCategory, Order,
 };
 pub use pattern::{
     Edge, LogicalOp, MachineNode, MachinePattern, MatchResult, MatchSegment, Matcher, Pattern,
@@ -105,9 +116,10 @@ pub use pattern::{
 };
 pub use report::{format_report, Report};
 pub use routing::{
-    create_routing, get_routing_entry, get_routing_result, pending_routings_for, routing_stats, set_routing_failed,
-    set_routing_result, RoutingDecision, RoutingResult, RoutingStats,
-    RoutingStatus,
+    Route, RouteQuery, RouteStats, RouteStatus,
+    // Compatibility exports
+    create_routing, set_routing_result, set_routing_failed, routing_stats,
+    RoutingStats, RoutingStatus,
 };
 pub use sample::{
     ConfidenceResult, GenerationResult, MatchQuality, Sample, SampleEdge, SampleEdgeKind,

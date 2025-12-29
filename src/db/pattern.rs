@@ -576,9 +576,21 @@ pub struct PatternRule {
     /// - 0 = no repeat (false)
     /// - 1+ = specific number of repeats allowed
     /// - -1 = infinite repeats allowed
-    pub can_repeat: i32,
-    pub forbidden_next: Vec<String>,
-    pub required_next: Vec<String>,
+    pub repeatable: i32,
+    pub forbid_next: Vec<String>,
+    pub require_next: Vec<String>,
+    /// Tokens that must NOT appear anywhere before this rule
+    pub forbid_previous: Vec<String>,
+    /// Tokens that MUST appear anywhere before this rule
+    pub require_previous: Vec<String>,
+    /// Token that must be IMMEDIATELY before this rule (None = no constraint)
+    pub directly_before: Option<String>,
+    /// Token that must NOT be immediately before this rule
+    pub not_directly_before: Option<String>,
+    /// Token that must be IMMEDIATELY after this rule (None = no constraint)
+    pub directly_after: Option<String>,
+    /// Token that must NOT be immediately after this rule
+    pub not_directly_after: Option<String>,
     /// Named callbacks for rule transformations: Vec<(name, callback)>
     pub callbacks: Vec<(String, PatternRuleCallback)>,
     /// Extraction callback - called during matching to populate context
@@ -594,9 +606,15 @@ impl PatternRule {
             rule_type: RuleType::Exact,
             value: value.to_string(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -609,9 +627,15 @@ impl PatternRule {
             rule_type: RuleType::TypeKeyword,
             value: String::new(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -624,9 +648,15 @@ impl PatternRule {
             rule_type: RuleType::Keyword,
             value: String::new(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -639,9 +669,15 @@ impl PatternRule {
             rule_type: RuleType::Identifier,
             value: String::new(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -654,9 +690,15 @@ impl PatternRule {
             rule_type: RuleType::OneOf,
             value: options.join("|"),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -669,9 +711,15 @@ impl PatternRule {
             rule_type: RuleType::Any,
             value: String::new(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -685,9 +733,15 @@ impl PatternRule {
             rule_type: RuleType::AnyExcept,
             value: exclusions.into(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -700,9 +754,15 @@ impl PatternRule {
             rule_type: RuleType::Custom(name.into()),
             value: String::new(),
             optional: false,
-            can_repeat: REPEAT_NONE,
-            forbidden_next: Vec::new(),
-            required_next: Vec::new(),
+            repeatable: REPEAT_NONE,
+            forbid_next: Vec::new(),
+            require_next: Vec::new(),
+            forbid_previous: Vec::new(),
+            require_previous: Vec::new(),
+            directly_before: None,
+            not_directly_before: None,
+            directly_after: None,
+            not_directly_after: None,
             callbacks: Vec::new(),
             extract_cb: None,
             nested_pattern: None,
@@ -721,10 +781,10 @@ impl PatternRule {
     ///   - `-1` for infinite repeats
     ///   - `1+` for specific number of repeats
     pub fn repeatable(&self) -> Option<i32> {
-        if self.can_repeat == REPEAT_NONE {
+        if self.repeatable == REPEAT_NONE {
             None
         } else {
-            Some(self.can_repeat)
+            Some(self.repeatable)
         }
     }
 
@@ -733,7 +793,7 @@ impl PatternRule {
     /// - `1+` = specific number of repeats
     /// - `-1` = infinite repeats
     pub fn repeat(mut self, count: i32) -> Self {
-        self.can_repeat = count;
+        self.repeatable = count;
         self
     }
 
@@ -757,14 +817,28 @@ impl PatternRule {
     }
 
     /// Add forbidden next tokens
-    pub fn with_forbidden_next(mut self, forbidden: Vec<String>) -> Self {
-        self.forbidden_next = forbidden;
+    pub fn with_forbid_next(mut self, forbidden: Vec<String>) -> Self {
+        self.forbid_next = forbidden;
         self
     }
 
     /// Add required next tokens
-    pub fn with_required_next(mut self, required: Vec<String>) -> Self {
-        self.required_next = required;
+    pub fn with_require_next(mut self, required: Vec<String>) -> Self {
+        self.require_next = required;
+        self
+    }
+
+    /// Add tokens that cannot precede this rule (validation constraint)
+    /// If any of these tokens appear before this rule, the pattern fails to match
+    pub fn with_forbid_previous(mut self, tokens: Vec<String>) -> Self {
+        self.forbid_previous = tokens;
+        self
+    }
+
+    /// Add tokens that must precede this rule (validation constraint)
+    /// At least one of these tokens must appear before this rule for pattern to match
+    pub fn with_require_previous(mut self, tokens: Vec<String>) -> Self {
+        self.require_previous = tokens;
         self
     }
 
@@ -947,33 +1021,83 @@ impl PatternRule {
     /// Alias for repeat() - set the can_repeat value directly
     /// - 0 = no repeat, 1+ = specific count, -1 = infinite
     pub fn with_repeat(mut self, count: i32) -> Self {
-        self.can_repeat = count;
+        self.repeatable = count;
         self
     }
 
     /// Add a single forbidden next token
     pub fn forbid_next(mut self, token: &str) -> Self {
-        if !self.forbidden_next.contains(&token.to_string()) {
-            self.forbidden_next.push(token.to_string());
+        if !self.forbid_next.contains(&token.to_string()) {
+            self.forbid_next.push(token.to_string());
         }
         self
     }
 
     /// Add a single required next token
     pub fn require_next(mut self, token: &str) -> Self {
-        if !self.required_next.contains(&token.to_string()) {
-            self.required_next.push(token.to_string());
+        if !self.require_next.contains(&token.to_string()) {
+            self.require_next.push(token.to_string());
+        }
+        self
+    }
+    pub fn forbid_previous(mut self, token: &str) -> Self {
+        if !self.forbid_previous.contains(&token.to_string()) {
+            self.forbid_previous.push(token.to_string());
         }
         self
     }
 
+    /// Add a single required previous token
+    pub fn require_previous(mut self, token: &str) -> Self {
+        if !self.require_previous.contains(&token.to_string()) {
+            self.require_previous.push(token.to_string());
+        }
+        self
+    }
+
+    /// Forbid a token from appearing ANYWHERE before the current token.
+    /// If the forbidden token exists at any position before this rule, matching fails.
+    pub fn forbid_before(self, token: &str) -> Self {
+        self.forbid_previous(token)
+    }
+
+    /// Require a token to appear ANYWHERE before the current token.
+    /// If the required token doesn't exist at some position before this rule, matching fails.
+    pub fn require_before(self, token: &str) -> Self {
+        self.require_previous(token)
+    }
+
+    /// Require the IMMEDIATELY previous token to be this exact token.
+    pub fn directly_before(mut self, token: &str) -> Self {
+        self.directly_before = Some(token.to_string());
+        self
+    }
+
+    /// Forbid the IMMEDIATELY previous token from being this exact token.
+    pub fn not_directly_before(mut self, token: &str) -> Self {
+        self.not_directly_before = Some(token.to_string());
+        self
+    }
+
+    /// Require the IMMEDIATELY next token to be this exact token.
+    pub fn directly_after(mut self, token: &str) -> Self {
+        self.directly_after = Some(token.to_string());
+        self
+    }
+
+    /// Forbid the IMMEDIATELY next token from being this exact token.
+    pub fn not_directly_after(mut self, token: &str) -> Self {
+        self.not_directly_after = Some(token.to_string());
+        self
+    }
+
     /// Create a modified copy using an external callback (not stored)
-    pub fn modified_by(self, callback: &PatternRuleCallback) -> Self {
+    pub fn modify_by(self, callback: &PatternRuleCallback) -> Self {
         callback.with(&self)
     }
 
     /// Create a modified copy using inverted external callback (not stored)
-    pub fn modified_without(self, callback: &PatternRuleCallback) -> Self {
+    pub fn modify_without(self, callback: &PatternRuleCallback) -> Self {
         callback.without(&self)
     }
 
@@ -995,7 +1119,7 @@ impl PatternRule {
     pub fn repeatable_callback() -> PatternRuleCallback {
         PatternRuleCallback::new("repeatable", |rule, flag| {
             let mut r = rule.clone();
-            r.can_repeat = if flag { REPEAT_INFINITE } else { REPEAT_NONE };
+            r.repeatable = if flag { REPEAT_INFINITE } else { REPEAT_NONE };
             r
         })
         .with_description("Makes the rule repeatable (infinite repeats when true)")
@@ -1005,7 +1129,7 @@ impl PatternRule {
     pub fn repeat_count_callback(count: i32) -> PatternRuleCallback {
         PatternRuleCallback::new("repeat_count", move |rule, flag| {
             let mut r = rule.clone();
-            r.can_repeat = if flag { count } else { REPEAT_NONE };
+            r.repeatable = if flag { count } else { REPEAT_NONE };
             r
         })
         .with_description("Sets specific repeat count when true, disables when false")
@@ -1017,11 +1141,11 @@ impl PatternRule {
         PatternRuleCallback::new("forbid_next", move |rule, flag| {
             let mut r = rule.clone();
             if flag {
-                if !r.forbidden_next.contains(&token) {
-                    r.forbidden_next.push(token.clone());
+                if !r.forbid_next.contains(&token) {
+                    r.forbid_next.push(token.clone());
                 }
             } else {
-                r.forbidden_next.retain(|t| t != &token);
+                r.forbid_next.retain(|t| t != &token);
             }
             r
         })
@@ -1034,11 +1158,11 @@ impl PatternRule {
         PatternRuleCallback::new("require_next", move |rule, flag| {
             let mut r = rule.clone();
             if flag {
-                if !r.required_next.contains(&token) {
-                    r.required_next.push(token.clone());
+                if !r.require_next.contains(&token) {
+                    r.require_next.push(token.clone());
                 }
             } else {
-                r.required_next.retain(|t| t != &token);
+                r.require_next.retain(|t| t != &token);
             }
             r
         })
@@ -1121,6 +1245,24 @@ impl Capture {
     pub fn len(&self) -> usize {
         self.tokens.len()
     }
+}
+
+impl Build for Capture {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("Capture", &format!("rule_{}", self.rule_idx));
+        entry.set_attr("start", Entry::usize(self.start));
+        entry.set_attr("end", Entry::usize(self.end));
+        entry.set_attr("tokens", Entry::vec(self.tokens.iter().map(|s| Entry::string(s)).collect()));
+        entry.set_attr("repeated", Entry::bool(self.repeated));
+        if let Some(ref rt) = self.rule_type {
+            entry.set_attr("rule_type", Entry::string(&format!("{:?}", rt)));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str { "Capture" }
+    fn name(&self) -> Option<&str> { None }
+    fn category(&self) -> Option<&str> { Some("pattern") }
 }
 
 /// Extracted data from a pattern match (for handler use)
@@ -1259,6 +1401,22 @@ impl ExtractedMatch {
     }
 }
 
+impl Build for ExtractedMatch {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("ExtractedMatch", &self.pattern_name);
+        entry.set_attr("confidence", Entry::f64(self.confidence));
+        entry.set_attr("tokens_consumed", Entry::usize(self.tokens_consumed));
+        entry.set_attr("captures", Entry::vec(self.captures.iter().map(|c| c.to_entry()).collect()));
+        entry.set_attr("matched_tokens", Entry::vec(self.matched_tokens.iter().map(|s| Entry::string(s)).collect()));
+        entry.set_attr("modifiers", Entry::vec(self.modifiers.iter().map(|s| Entry::string(s)).collect()));
+        entry
+    }
+
+    fn kind(&self) -> &str { "ExtractedMatch" }
+    fn name(&self) -> Option<&str> { Some(&self.pattern_name) }
+    fn category(&self) -> Option<&str> { Some("pattern") }
+}
+
 // ============================================================================
 // Pattern Definition
 // ============================================================================
@@ -1288,6 +1446,28 @@ pub struct PatternStats {
     pub match_quality: Option<String>,
     /// Additional metadata
     pub metadata: HashMap<String, String>,
+}
+
+impl Build for PatternStats {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("PatternStats", "stats");
+        entry.set_attr("confidence", Entry::f64(self.confidence));
+        entry.set_attr("match_count", Entry::usize(self.match_count as usize));
+        entry.set_attr("validation_success", Entry::usize(self.validation_success as usize));
+        entry.set_attr("validation_failures", Entry::usize(self.validation_failures as usize));
+        entry.set_attr("success_rate", Entry::f64(self.success_rate));
+        entry.set_attr("avg_tokens_consumed", Entry::f64(self.avg_tokens_consumed));
+        entry.set_attr("min_tokens_consumed", Entry::usize(self.min_tokens_consumed));
+        entry.set_attr("max_tokens_consumed", Entry::usize(self.max_tokens_consumed));
+        if let Some(ref quality) = self.match_quality {
+            entry.set_attr("match_quality", Entry::string(quality));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str { "PatternStats" }
+    fn name(&self) -> Option<&str> { None }
+    fn category(&self) -> Option<&str> { Some("pattern") }
 }
 
 // ============================================================================
@@ -1788,22 +1968,47 @@ impl Pattern<String> {
         while rule_idx < rules.len() && token_idx < tokens.len() {
             let rule = &rules[rule_idx];
             let token = &tokens[token_idx];
+            let preceding = &tokens[..token_idx];
 
-            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
+            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1), preceding);
 
             if matches {
                 matched_rules += 1;
                 token_idx += 1;
 
-                // Handle repeating rules
-                if rule.can_repeat != REPEAT_NONE && token_idx < tokens.len() {
+                // Handle repeating rules (non-greedy: stop when next rule can match)
+                if rule.repeatable != REPEAT_NONE && token_idx < tokens.len() {
+                    let next_rule = rules.get(rule_idx + 1);
+                    let mut repeat_count = 1; // Already matched once
+                    
                     while token_idx < tokens.len() {
+                        // Check if next rule can match current token - if so, stop repeating
+                        if let Some(nr) = next_rule {
+                            let preceding = &tokens[..token_idx];
+                            if Self::rule_matches_token(
+                                nr,
+                                &tokens[token_idx],
+                                tokens.get(token_idx + 1),
+                                preceding,
+                            ) {
+                                break; // Let next rule handle this token
+                            }
+                        }
+                        
+                        // Check repeat limit (-1 = infinite, otherwise limit)
+                        if rule.repeatable > 0 && repeat_count >= rule.repeatable {
+                            break;
+                        }
+                        
+                        let preceding = &tokens[..token_idx];
                         if Self::rule_matches_token(
                             rule,
                             &tokens[token_idx],
                             tokens.get(token_idx + 1),
+                            preceding,
                         ) {
                             token_idx += 1;
+                            repeat_count += 1;
                         } else {
                             break;
                         }
@@ -1835,17 +2040,76 @@ impl Pattern<String> {
     }
 
     /// Check if a single rule matches a token
-    fn rule_matches_token(rule: &PatternRule, token: &str, next_token: Option<&String>) -> bool {
+    /// `preceding_tokens` contains all tokens that came before the current position
+    fn rule_matches_token(
+        rule: &PatternRule,
+        token: &str,
+        next_token: Option<&String>,
+        preceding_tokens: &[String],
+    ) -> bool {
+        // Check forbidden_next constraint
         if let Some(next) = next_token {
-            if rule.forbidden_next.contains(next) {
+            if rule.forbid_next.contains(next) {
                 return false;
+            }
+        }
+
+        // Check cannot_precede constraint: fail if any forbidden token appears before
+        if !rule.forbid_previous.is_empty() {
+            for forbidden in &rule.forbid_previous {
+                if preceding_tokens.iter().any(|t| t == forbidden) {
+                    return false;
+                }
+            }
+        }
+
+        // Check must_precede constraint: fail if none of the required tokens appear before
+        if !rule.require_previous.is_empty() {
+            let has_required = rule.require_previous.iter().any(|required| {
+                preceding_tokens.iter().any(|t| t == required)
+            });
+            if !has_required {
+                return false;
+            }
+        }
+
+        // Check directly_before constraint: immediately previous token must match
+        if let Some(ref required) = rule.directly_before {
+            let prev_token = preceding_tokens.last();
+            if prev_token.map(|t| t.as_str()) != Some(required.as_str()) {
+                return false;
+            }
+        }
+
+        // Check not_directly_before constraint: immediately previous token must NOT match
+        if let Some(ref forbidden) = rule.not_directly_before {
+            if let Some(prev_token) = preceding_tokens.last() {
+                if prev_token == forbidden {
+                    return false;
+                }
+            }
+        }
+
+        // Check directly_after constraint: immediately next token must match
+        if let Some(ref required) = rule.directly_after {
+            if next_token.map(|t| t.as_str()) != Some(required.as_str()) {
+                return false;
+            }
+        }
+
+        // Check not_directly_after constraint: immediately next token must NOT match
+        if let Some(ref forbidden) = rule.not_directly_after {
+            if let Some(next) = next_token {
+                if next == forbidden {
+                    return false;
+                }
             }
         }
 
         match &rule.rule_type {
             RuleType::Exact => token == rule.value,
             RuleType::TypeKeyword => {
-                crate::db::keyword::is_type_keyword(token)
+                crate::db::keyword::is_c_type_keyword(token)
                     || matches!(
                         token,
                         "bool"
@@ -1859,11 +2123,13 @@ impl Pattern<String> {
                             | "int32_t"
                             | "int64_t"
                     )
+                    // Also match registered custom types (typedefs, structs, enums, unions)
+                    || crate::system::system().is_custom_type(token)
             }
             RuleType::Keyword => {
-                crate::db::keyword::is_control_flow(token)
-                    || crate::db::keyword::is_storage_class(token)
-                    || crate::db::keyword::is_type_qualifier(token)
+                crate::db::keyword::is_c_control_flow(token)
+                    || crate::db::keyword::is_c_storage_class(token)
+                    || crate::db::keyword::is_c_type_qualifier(token)
                     || matches!(token, "typedef" | "inline")
             }
             RuleType::Identifier => {
@@ -1917,13 +2183,14 @@ impl Pattern<String> {
         while rule_idx < rules.len() && token_idx < tokens.len() {
             let rule = &rules[rule_idx];
             let token = &tokens[token_idx];
+            let preceding = &tokens[..token_idx];
 
             // Track modifiers
             if modifiers.contains(&token.as_str()) {
                 result.modifiers.insert(token.clone());
             }
 
-            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
+            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1), preceding);
 
             if matches {
                 let start = token_idx;
@@ -1931,12 +2198,14 @@ impl Pattern<String> {
 
                 // Handle repeating rules - collect all matching tokens
                 let mut repeated = false;
-                if rule.can_repeat != REPEAT_NONE && token_idx < tokens.len() {
+                if rule.repeatable != REPEAT_NONE && token_idx < tokens.len() {
                     while token_idx < tokens.len() {
+                        let preceding = &tokens[..token_idx];
                         if Self::rule_matches_token(
                             rule,
                             &tokens[token_idx],
                             tokens.get(token_idx + 1),
+                            preceding,
                         ) {
                             // Track modifiers in repeated tokens too
                             if modifiers.contains(&tokens[token_idx].as_str()) {
@@ -2046,12 +2315,13 @@ impl Pattern<String> {
         while rule_idx < rules.len() && token_idx < tokens.len() {
             let rule = &rules[rule_idx];
             let token = &tokens[token_idx];
+            let preceding = &tokens[..token_idx];
 
             // Set current token in context for callback access
             ctx.current_token = token.clone();
             ctx.token_idx = token_idx;
 
-            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1));
+            let matches = Self::rule_matches_token(rule, token, tokens.get(token_idx + 1), preceding);
             ctx.did_match = matches;
 
             if matches {
@@ -2065,10 +2335,11 @@ impl Pattern<String> {
                 token_idx += 1;
 
                 // Handle repeating rules
-                if rule.can_repeat != REPEAT_NONE && token_idx < tokens.len() {
+                if rule.repeatable != REPEAT_NONE && token_idx < tokens.len() {
                     while token_idx < tokens.len() {
                         let next_token = &tokens[token_idx];
-                        if Self::rule_matches_token(rule, next_token, tokens.get(token_idx + 1)) {
+                        let preceding = &tokens[..token_idx];
+                        if Self::rule_matches_token(rule, next_token, tokens.get(token_idx + 1), preceding) {
                             ctx.current_token = next_token.clone();
                             ctx.token_idx = token_idx;
                             ctx.did_match = true;
@@ -2445,6 +2716,10 @@ impl Build for PatternMatch {
 
     fn name(&self) -> Option<&str> {
         None
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("pattern")
     }
 }
 

@@ -287,6 +287,26 @@ impl Param {
     }
 }
 
+impl Build for Param {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("Param", &self.name);
+        entry.set_attr("type", Entry::string(&self.type_name));
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "Param"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("parameter")
+    }
+}
+
 /// Function definition that implements Build trait.
 #[derive(Debug, Clone)]
 pub struct Function {
@@ -414,6 +434,26 @@ impl Field {
     }
 }
 
+impl Build for Field {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("Field", &self.name);
+        entry.set_attr("type", Entry::string(&self.type_name));
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "Field"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("field")
+    }
+}
+
 /// Struct definition that implements Build trait.
 #[derive(Debug, Clone)]
 pub struct Struct {
@@ -515,6 +555,28 @@ impl Variant {
             name: name.into(),
             value: Some(value),
         }
+    }
+}
+
+impl Build for Variant {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("Variant", &self.name);
+        if let Some(v) = self.value {
+            entry.set_attr("value", Entry::i64(v));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "Variant"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("enum")
     }
 }
 

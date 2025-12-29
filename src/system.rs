@@ -10,18 +10,19 @@
 use std::collections::HashMap;
 use std::fmt::{self, Write};
 use std::path::PathBuf;
+use std::result;
 
-use crate::db::TypeConverter;
-use crate::db::convert::IdentifierConverter;
+use crate::db::convert::{IdentifierConverter, VariableConverter};
 use crate::db::filter::{Category, CategoryFilter, Kind, KindFilter};
 use crate::db::format::{Formatter, OutputFormat};
 use crate::db::keyword::Order;
+use crate::db::{TypeConverter, is_c_keyword, is_rust_keyword, keyword};
 use crate::handlers::arrays::ArrayHandler;
 use crate::handlers::comments::CommentHandler;
 use crate::handlers::conditionals::{IfElseHandler, SwitchCaseHandler};
 use crate::handlers::enums::EnumHandler;
 use crate::handlers::expressions::ExpressionHandler;
-use crate::handlers::functions::{CallHandler, DefinitionHandler, FunctionHandler};
+use crate::handlers::functions::{CallHandler, FunctionHandler};
 use crate::handlers::globals::GlobalHandler;
 use crate::handlers::loops::LoopHandler;
 use crate::handlers::macros::{DefineHandler, IncludeHandler, PreprocessorHandler};
@@ -95,11 +96,13 @@ pub struct System {
     /// Index of the system config entry in the database
     config_idx: Option<usize>,
     /// Keyword ordering rules
-    keyword_order: Order,
-
+    c_order: Order,
+    rust_order: Order,
     type_converter: TypeConverter,
-
     identifier_converter: IdentifierConverter,
+    variable_converter: VariableConverter,
+    /// Whether Build objects should auto-register to database when completing
+    register_builds: bool,
 }
 
 /// Name used for the system configuration entry
@@ -111,15 +114,19 @@ impl System {
         let mut system = System {
             db: Web::new(),
             config_idx: None,
-            keyword_order: Order::with_c_rules(),
+            c_order: Order::with_c_rules(),
+            rust_order: Order::with_rust_rules(),
             type_converter: TypeConverter::new(),
             identifier_converter: IdentifierConverter::new(),
+            variable_converter: VariableConverter::new(),
+            register_builds: false,
         };
         // Register all handlers and their patterns
         system.register_handlers();
         // Load standard types and identifiers from converters
         system.register_types();
         system.register_identifiers();
+        system.register_order();
         system
     }
     pub fn register_type(&mut self, c_type: &str, rust_type: &str, category: &str) {
@@ -157,6 +164,233 @@ impl System {
         }
     }
 
+    /// Register the keyword ordering rules to the database
+    pub fn register_order(&mut self) {
+        self.db.add(&self.c_order);
+        self.db.add(&self.rust_order);
+    }
+    /// Lookup if 2 keywords can follow and precede each other from the database
+    /// Returns (keyword1_can_follow_keyword2, keyword1_can_precede_keyword2)
+    pub fn lookup_order_keyword(
+        &self,
+        keyword1: &str,
+        keyword2: &str,
+        lang: &str,
+    ) -> Option<(bool, bool)> {
+        let keyword1_can_precede_keyword2: bool;
+        let keyword2_can_precede_keyword1: bool;
+        match lang {
+            "c" => {
+                if !(keyword::is_c_keyword(keyword1) && keyword::is_c_keyword(keyword2)) {
+                    return None;
+                }
+                // can_follow(a, b) means b can follow a, i.e., a can precede b
+                keyword1_can_precede_keyword2 = self.c_order.can_follow(keyword1, keyword2);
+                keyword2_can_precede_keyword1 = self.c_order.can_follow(keyword2, keyword1);
+            },
+            "rust" => {
+                if !(keyword::is_rust_keyword(keyword1) && keyword::is_rust_keyword(keyword2)) {
+                    return None;
+                }
+                // can_follow(a, b) means b can follow a, i.e., a can precede b
+                keyword1_can_precede_keyword2 = self.rust_order.can_follow(keyword1, keyword2);
+                keyword2_can_precede_keyword1 = self.rust_order.can_follow(keyword2, keyword1);
+            },
+            _ => return None,
+        }
+        // keyword1 can follow keyword2 if keyword2 can precede keyword1
+        Some((keyword2_can_precede_keyword1, keyword1_can_precede_keyword2))
+    }
+
+    /// Lookup if a chain of keywords can all follow in order (left to right)
+    /// and if they can all precede in order (right to left)
+    /// Returns (all_can_follow_in_order, all_can_precede_in_order)
+    pub fn lookup_order_chain(&self, keywords: Vec<&str>, lang: &str) -> Option<(bool, bool)> {
+        if keywords.len() < 2 {
+            return Some((true, true));
+        }
+        let mut all_follow = true;
+        let mut all_precede = true;
+        let mut can_follow_forward = false;
+        let mut can_follow_reverse = false;
+        for index in 0..(keywords.len() - 1) {
+            let keyword1 = keywords[index];
+            let keyword2 = keywords[index + 1];
+            match lang {
+                "c" => {
+                    can_follow_forward = self.c_order.can_follow(keyword1, keyword2);
+                    can_follow_reverse = self.c_order.can_follow(keyword2, keyword1);
+                },
+                "rust" => {
+                    can_follow_forward = self.rust_order.can_follow(keyword1, keyword2);
+                    can_follow_reverse = self.rust_order.can_follow(keyword2, keyword1);
+                },
+                _ => return None,
+            }
+            // Check if keyword1 can precede keyword2 (same as above, but we track separately)
+            if !can_follow_forward {
+                all_follow = false;
+            }
+            // For precede chain: check if keyword1 can follow keyword2 (reverse direction
+            if !can_follow_reverse {
+                all_precede = false;
+            }
+            // Early exit if both are already false
+            if !all_follow && !all_precede {
+                return Some((false, false));
+            }
+        }
+        Some((all_follow, all_precede))
+    }
+    /// Check if a node transition is valid using the built-in Order
+    pub fn is_valid_node_transition(&self, parent: &str, child: &str, lang: &str) -> bool {
+        match lang {
+            "c" => self.c_order.is_valid_transition(parent, child),
+            "rust" => self.rust_order.is_valid_transition(parent, child),
+            _ => false,
+        }
+    }
+
+    /// Get keyword suggestions for what can follow a keyword
+    pub fn suggest_keywords(&self, current: &str, lang: &str) -> Vec<String> {
+        match lang {
+            "c" => self.c_order.suggest(current),
+            "rust" => self.rust_order.suggest(current),
+            _ => Vec::<String>::new(),
+        }
+    }
+
+    // ========================================================================
+    // Conversion Helper Methods (for handlers)
+    // ========================================================================
+
+    /// Validate that a sequence of C tokens follows valid keyword ordering.
+    /// Filters to only check keywords, skips identifiers/literals.
+    /// Returns (is_valid, first_invalid_pair) where first_invalid_pair is (kw1, kw2) that failed.
+    pub fn validate_c_token_order(&self, tokens: &[&str]) -> (bool, Option<(String, String)>) {
+        let keywords: Vec<&str> = tokens
+            .iter()
+            .filter(|t| keyword::is_c_keyword(t))
+            .copied()
+            .collect();
+        
+        if keywords.len() < 2 {
+            return (true, None);
+        }
+
+        for i in 0..keywords.len() - 1 {
+            if !self.c_order.can_follow(keywords[i], keywords[i + 1]) {
+                return (false, Some((keywords[i].to_string(), keywords[i + 1].to_string())));
+            }
+        }
+        (true, None)
+    }
+
+    /// Validate that a sequence of Rust tokens follows valid keyword ordering.
+    /// Returns (is_valid, first_invalid_pair).
+    pub fn validate_rust_token_order(&self, tokens: &[&str]) -> (bool, Option<(String, String)>) {
+        let keywords: Vec<&str> = tokens
+            .iter()
+            .filter(|t| keyword::is_rust_keyword(t))
+            .copied()
+            .collect();
+        
+        if keywords.len() < 2 {
+            return (true, None);
+        }
+
+        for i in 0..keywords.len() - 1 {
+            if !self.rust_order.can_follow(keywords[i], keywords[i + 1]) {
+                return (false, Some((keywords[i].to_string(), keywords[i + 1].to_string())));
+            }
+        }
+        (true, None)
+    }
+
+    /// Check if a C declaration prefix is valid (e.g., "static const int")
+    /// Returns true if keywords can appear in this order.
+    pub fn is_valid_c_declaration_prefix(&self, tokens: &[&str]) -> bool {
+        self.validate_c_token_order(tokens).0
+    }
+
+    /// Check if a Rust declaration prefix is valid (e.g., "pub const")
+    /// Returns true if keywords can appear in this order.
+    pub fn is_valid_rust_declaration_prefix(&self, tokens: &[&str]) -> bool {
+        self.validate_rust_token_order(tokens).0
+    }
+
+    /// Get valid Rust keywords that can follow after a given keyword.
+    /// Useful for building valid Rust output sequences.
+    pub fn valid_rust_followers(&self, keyword: &str) -> Vec<String> {
+        self.rust_order.suggest(keyword)
+    }
+
+    /// Get valid C keywords that can follow after a given keyword.
+    pub fn valid_c_followers(&self, keyword: &str) -> Vec<String> {
+        self.c_order.suggest(keyword)
+    }
+
+    /// Validate and potentially fix a Rust keyword sequence.
+    /// Returns the original if valid, or attempts to reorder if possible.
+    pub fn validate_or_fix_rust_order(&self, tokens: &[&str]) -> Vec<String> {
+        let (is_valid, _) = self.validate_rust_token_order(tokens);
+        if is_valid {
+            return tokens.iter().map(|s| s.to_string()).collect();
+        }
+
+        // Try common reorderings for Rust declarations
+        // Priority order: pub > async > unsafe > const > fn/struct/enum/trait
+        let mut visibility = Vec::new();
+        let mut modifiers = Vec::new();
+        let mut decl_type = Vec::new();
+        let mut rest = Vec::new();
+
+        for &token in tokens {
+            match token {
+                "pub" | "pub(crate)" | "pub(super)" | "pub(self)" => visibility.push(token),
+                "async" | "unsafe" | "const" | "mut" | "static" => modifiers.push(token),
+                "fn" | "struct" | "enum" | "trait" | "type" | "mod" | "use" | "impl" => decl_type.push(token),
+                _ => rest.push(token),
+            }
+        }
+
+        // Rebuild in correct order
+        let mut result: Vec<String> = Vec::new();
+        result.extend(visibility.iter().map(|s| s.to_string()));
+        result.extend(modifiers.iter().map(|s| s.to_string()));
+        result.extend(decl_type.iter().map(|s| s.to_string()));
+        result.extend(rest.iter().map(|s| s.to_string()));
+        result
+    }
+
+    /// Check if converting C keywords to Rust keywords maintains valid ordering.
+    /// Takes C tokens and their Rust equivalents, validates both sides.
+    pub fn validate_conversion_order(&self, c_tokens: &[&str], rust_tokens: &[&str]) -> bool {
+        self.validate_c_token_order(c_tokens).0 && self.validate_rust_token_order(rust_tokens).0
+    }
+
+    /// Get the Rust keyword that should follow a C keyword in conversion.
+    /// Uses type mapping and keyword ordering to suggest valid conversions.
+    pub fn suggest_rust_for_c_context(&self, c_keyword: &str, context: &[&str]) -> Option<String> {
+        // First, get the direct Rust equivalent
+        let rust_equiv = keyword::c_to_rust_type(c_keyword)
+            .or_else(|| keyword::c_to_rust_storage(c_keyword))
+            .or_else(|| keyword::c_to_rust_qualifier(c_keyword));
+
+        if let Some(equiv) = rust_equiv {
+            // Validate it can follow the context
+            if context.is_empty() {
+                return Some(equiv.to_string());
+            }
+            let last = context.last()?;
+            if self.rust_order.can_follow(last, equiv) {
+                return Some(equiv.to_string());
+            }
+        }
+
+        None
+    }
+
     /// Register all handlers and add their patterns to the database
     fn register_handlers(&mut self) {
         // Register TypedefHandler patterns
@@ -190,13 +424,6 @@ impl System {
         // Register CallHandler patterns
         let call_handler = CallHandler::new();
         for pattern in call_handler.patterns() {
-            self.db.add(&pattern.0);
-            self.db.add(&pattern.1);
-        }
-
-        // Register DefinitionHandler patterns
-        let definition_handler = DefinitionHandler::new();
-        for pattern in definition_handler.patterns() {
             self.db.add(&pattern.0);
             self.db.add(&pattern.1);
         }
@@ -816,6 +1043,13 @@ impl System {
             return result;
         }
 
+        // Register tokens to database if build registration is enabled
+        if self.register_builds {
+            let len = tokens.len();
+            let token_set = TokenSet::new(0..len, 0..len, tokens.clone());
+            self.db.add(&token_set);
+        }
+
         // Step 2: Process tokens with handlers
         let process_result = self.process_tokens(&tokens);
         result.patterns_matched = process_result.patterns_matched;
@@ -900,11 +1134,11 @@ impl System {
 
             // Find all matching handlers ordered by priority
             let matching_handlers = self.match_all_handler_patterns(&segment);
-            
+
             if !matching_handlers.is_empty() {
                 result.patterns_matched += 1;
                 let mut handler_succeeded = false;
-                
+
                 // Try handlers in order until one succeeds
                 for (handler_name, _confidence) in &matching_handlers {
                     match self.run_handler(handler_name, &segment) {
@@ -936,7 +1170,7 @@ impl System {
                         }
                     }
                 }
-                
+
                 // If all handlers failed, record error with the first handler's name
                 if !handler_succeeded && !matching_handlers.is_empty() {
                     let first_handler = &matching_handlers[0].0;
@@ -995,23 +1229,58 @@ impl System {
 
             // Check if we're in a preprocessor directive (current starts with #)
             if !current.is_empty() && current[0].to_string() == "#" {
-                // Preprocessor directives end at newline, but since we don't have newline tokens,
-                // we end when we see a token that clearly starts a new top-level construct
-                let starts_new_construct = matches!(
-                    token_str.as_str(),
-                    // Type keywords that start declarations
-                    "int" | "char" | "void" | "float" | "double" | "long" | "short" |
-                    "unsigned" | "signed" | "struct" | "enum" | "union" | "typedef" |
-                    // Storage classes that start declarations
-                    "static" | "extern" | "inline" | "const" | "volatile" |
-                    // Control flow
-                    "if" | "for" | "while" | "do" | "switch" | "return" | "break" | "continue" |
-                    // New preprocessor directive
-                    "#"
-                ) && current.len() > 2; // Only trigger if we have more than just "# directive"
+                // Check if this is a #define directive
+                let is_define = current.len() >= 2 && current[1].to_string() == "define";
+
+                // Track braces within preprocessor for #define with struct/enum bodies
+                if token_str == "{" {
+                    brace_depth += 1;
+                } else if token_str == "}" {
+                    brace_depth = brace_depth.saturating_sub(1);
+                }
+
+                // #define macros can contain struct/enum/etc. - only end on new # or
+                // balanced braces followed by new top-level construct
+                let starts_new_construct = if is_define {
+                    // Only split on new preprocessor directive when braces balanced
+                    token_str == "#" && brace_depth == 0 && current.len() > 3
+                } else {
+                    // Other directives (#include, #ifdef) end on new constructs
+                    matches!(
+                        token_str.as_str(),
+                        "int"
+                            | "char"
+                            | "void"
+                            | "float"
+                            | "double"
+                            | "long"
+                            | "short"
+                            | "unsigned"
+                            | "signed"
+                            | "struct"
+                            | "enum"
+                            | "union"
+                            | "typedef"
+                            | "static"
+                            | "extern"
+                            | "inline"
+                            | "const"
+                            | "volatile"
+                            | "if"
+                            | "for"
+                            | "while"
+                            | "do"
+                            | "switch"
+                            | "return"
+                            | "break"
+                            | "continue"
+                            | "#"
+                    ) && current.len() > 2
+                };
 
                 if starts_new_construct {
                     // Save preprocessor directive and start new segment
+                    brace_depth = 0;
                     segments.push(std::mem::take(&mut current));
                     current.push(token.clone());
                 } else {
@@ -1031,24 +1300,34 @@ impl System {
                     brace_depth = brace_depth.saturating_sub(1);
                     // End of block at top level - BUT check for constructs that need ; to end
                     if brace_depth == 0 && !current.is_empty() {
-                        let current_strs: Vec<String> = current.iter().map(|t| t.to_string()).collect();
+                        let current_strs: Vec<String> =
+                            current.iter().map(|t| t.to_string()).collect();
                         let first_token = current_strs.first().cloned().unwrap_or_default();
-                        
+
                         // Type definitions need ; after }
-                        let is_type_def = matches!(
+                        // BUT: "struct Node* funcName(...) {" is a FUNCTION, not a type def
+                        // Check: if there's a ( before the first {, it's likely a function
+                        let paren_pos = current_strs.iter().position(|t| t == "(");
+                        let brace_pos = current_strs.iter().position(|t| t == "{");
+                        let is_function = match (paren_pos, brace_pos) {
+                            (Some(p), Some(b)) => p < b,  // ( before { means function
+                            _ => false,
+                        };
+                        
+                        let is_type_def = !is_function && matches!(
                             first_token.as_str(),
                             "typedef" | "enum" | "struct" | "union"
                         );
-                        
+
                         // Array initializers (type name[] = {...};) also need ; after }
                         let has_bracket = current_strs.iter().any(|t| t == "[");
                         let has_equals = current_strs.iter().any(|t| t == "=");
                         let is_array_init = has_bracket && has_equals;
-                        
+
                         if !is_type_def && !is_array_init {
                             segments.push(std::mem::take(&mut current));
                         }
-                        // For type definitions and array initializers, continue until ; 
+                        // For type definitions and array initializers, continue until ;
                     }
                 }
                 "(" => {
@@ -1101,13 +1380,24 @@ impl System {
             return vec![("include".to_string(), 0.95)];
         }
 
+        // Special case: preprocessor directives starting with #
+        if !token_strings.is_empty() && token_strings[0] == "#" && token_strings.len() > 1 {
+            match token_strings[1].as_str() {
+                "define" => return vec![("define".to_string(), 0.95)],
+                "ifdef" | "ifndef" | "endif" | "else" | "elif" | "if" => {
+                    return vec![("preprocessor".to_string(), 0.95)];
+                }
+                _ => return vec![("macro".to_string(), 0.9)],
+            }
+        }
+
         // Query patterns from database by kind
         for entry in self.db.by_kind("Pattern") {
             if let Some(pattern) = Pattern::<String>::from_entry(entry) {
                 if let Some(confidence) = pattern.matches_tokens(&token_strings) {
                     let priority = pattern.priority() as usize;
                     let category = pattern.category().to_string();
-                    
+
                     // Avoid duplicates - only add if this category isn't already in matches
                     if !matches.iter().any(|(cat, _, _)| cat == &category) {
                         matches.push((category, confidence, priority));
@@ -1129,11 +1419,11 @@ impl System {
             // struct Name { ... } - definition
             // struct Name varname; - declaration (variable)
             // struct Name arr[3]; - declaration (array)
-            // Look for { appearing before any [ or ; 
+            // Look for { appearing before any [ or ;
             let brace_pos = token_strings.iter().position(|t| t == "{");
             let bracket_pos = token_strings.iter().position(|t| t == "[");
             let semi_pos = token_strings.iter().position(|t| t == ";");
-            
+
             match (brace_pos, bracket_pos, semi_pos) {
                 (Some(b), Some(br), _) => b < br, // { before [ means definition
                 (Some(_), None, _) => true,       // Has { but no [ means definition
@@ -1142,25 +1432,57 @@ impl System {
         } else {
             false
         };
-        
+
         if is_type_definition {
             let category = if first == "typedef" {
                 token_strings[1].as_str()
             } else {
                 first.as_str()
             };
+            // Remove any function matches - structs with function pointers are NOT functions
+            matches.retain(|(cat, _, _)| cat != "function" && cat != "function_definition");
             matches.insert(0, (category.to_string(), 0.95, 200));
         }
 
-        // Special case: function definitions (with body) should use DefinitionHandler
-        // Check if this looks like a function definition: has ( and { 
+        // Special case: function definitions (with body) should use FunctionHandler
+        // Check if this looks like a function definition: has ( and { but is NOT a struct/enum/union
         let has_paren = token_strings.iter().any(|t| t == "(");
         let has_brace = token_strings.iter().any(|t| t == "{");
-        if has_paren && has_brace {
-            // This is a function definition, not a declaration
+
+        // Detect struct-returning functions: struct Name funcName(...) {
+        // The ( comes AFTER two identifiers (struct name, function name)
+        let is_struct_returning_function = if first == "struct" && has_paren && has_brace {
+            // Check pattern: struct <name> <name> (
+            if let Some(paren_pos) = token_strings.iter().position(|t| t == "(") {
+                // Need at least: struct Name funcName (
+                paren_pos >= 3
+                    && token_strings
+                        .get(1)
+                        .map(|s| !s.starts_with("{") && s != "=")
+                        .unwrap_or(false)
+                    && token_strings
+                        .get(2)
+                        .map(|s| !s.starts_with("{") && s != "(")
+                        .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if is_struct_returning_function {
+            // This is a struct-returning function, route to FunctionHandler
+            matches.retain(|(cat, _, _)| cat != "struct" && cat != "function");
+            matches.insert(0, ("function_definition".to_string(), 0.98, 950));
+        } else if has_paren && has_brace && !is_type_definition {
+            // This is a function definition, not a declaration or struct
             // Remove any "function" match and ensure "function_definition" is first
             matches.retain(|(cat, _, _)| cat != "function");
-            if !matches.iter().any(|(cat, _, _)| cat == "function_definition") {
+            if !matches
+                .iter()
+                .any(|(cat, _, _)| cat == "function_definition")
+            {
                 matches.insert(0, ("function_definition".to_string(), 0.95, 200));
             }
         }
@@ -1184,11 +1506,15 @@ impl System {
 
         // Sort by priority (descending) then confidence (descending)
         matches.sort_by(|a, b| {
-            b.2.cmp(&a.2).then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
+            b.2.cmp(&a.2)
+                .then_with(|| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal))
         });
 
         // Return just category and confidence
-        matches.into_iter().map(|(cat, conf, _)| (cat, conf)).collect()
+        matches
+            .into_iter()
+            .map(|(cat, conf, _)| (cat, conf))
+            .collect()
     }
 
     /// Fallback keyword-based matching when no pattern matches
@@ -1200,7 +1526,7 @@ impl System {
         let first_token = &tokens[0];
 
         // Use keyword module for classification
-        if let Some(kw) = self.keyword_order.keyword(first_token) {
+        if let Some(kw) = self.c_order.keyword(first_token) {
             let category = match kw.category {
                 crate::db::keyword::KeywordCategory::TypeDeclaration => {
                     match first_token.as_str() {
@@ -1327,19 +1653,19 @@ impl System {
             }
             "array" | "ArrayHandler" => {
                 use crate::handlers::arrays::ArrayHandler;
-                self.run_handler_loop(ArrayHandler::new(), tokens, &mut nested_results)
+                self.run_handler_loop(
+                    ArrayHandler::new().with_global(true),
+                    tokens,
+                    &mut nested_results,
+                )
             }
-            "function" | "FunctionHandler" => {
-                use crate::handlers::functions::FunctionHandler;
-                self.run_handler_loop(FunctionHandler::new(), tokens, &mut nested_results)
-            }
-            "function_definition"
+            "function"
+            | "function_definition"
             | "static_function_definition"
             | "inline_function_definition"
             | "static_inline_function_definition"
-            | "DefinitionHandler" => {
-                use crate::handlers::functions::DefinitionHandler;
-                self.run_handler_loop(DefinitionHandler::new(), tokens, &mut nested_results)
+            | "FunctionHandler" => {
+                self.run_handler_loop(FunctionHandler::new(), tokens, &mut nested_results)
             }
             "call" | "CallHandler" => {
                 use crate::handlers::functions::CallHandler;
@@ -1502,6 +1828,21 @@ impl System {
         &mut self.db
     }
 
+    /// Enable auto-registration of Build objects to system database
+    pub fn enable_build_registration(&mut self) {
+        self.register_builds = true;
+    }
+
+    /// Disable auto-registration of Build objects to system database  
+    pub fn disable_build_registration(&mut self) {
+        self.register_builds = false;
+    }
+
+    /// Check if auto-registration is enabled
+    pub fn is_build_registration_enabled(&self) -> bool {
+        self.register_builds
+    }
+
     /// Look up struct field names from registered struct constructor
     pub fn lookup_struct_fields(&self, struct_name: &str) -> Option<Vec<String>> {
         // Look for StructConstructor entry with this name
@@ -1579,19 +1920,51 @@ impl System {
             .with_attr("c_type", Entry::string(c_name))
             .with_attr("rust_type", Entry::string(rust_name));
         self.db.add_entry(entry);
-        
+
         // Register type mappings for lookup_type()
-        self.register_type(c_name, rust_name, "Struct");
-        self.register_type(&format!("struct {}", c_name), rust_name, "Struct");
+        self.register_type(c_name, rust_name, "struct");
+        self.register_type(&format!("struct {}", c_name), rust_name, "struct");
         // Register pointer variants
-        self.register_type(&format!("{} *", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("{}*", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("struct {} *", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("struct {}*", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("const {} *", c_name), &format!("*const {}", rust_name), "PointerType");
-        self.register_type(&format!("const {}*", c_name), &format!("*const {}", rust_name), "PointerType");
-        self.register_type(&format!("const struct {} *", c_name), &format!("*const {}", rust_name), "PointerType");
-        self.register_type(&format!("const struct {}*", c_name), &format!("*const {}", rust_name), "PointerType");
+        self.register_type(
+            &format!("{} *", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("{}*", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("struct {} *", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("struct {}*", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("const {} *", c_name),
+            &format!("*const {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("const {}*", c_name),
+            &format!("*const {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("const struct {} *", c_name),
+            &format!("*const {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("const struct {}*", c_name),
+            &format!("*const {}", rust_name),
+            "pointer",
+        );
     }
 
     /// Register an enum type in the database
@@ -1602,27 +1975,48 @@ impl System {
 
     /// Register an enum type with its variants in the database
     /// Variants will be registered for lookup to add enum prefix
-    pub fn register_enum_with_variants(&mut self, c_name: &str, rust_name: &str, variants: &[&str]) {
+    pub fn register_enum_with_variants(
+        &mut self,
+        c_name: &str,
+        rust_name: &str,
+        variants: &[&str],
+    ) {
         use crate::db::node::{NodeExt, enum_node};
-        
+
         // Convert variants to Entry::Vec
         let variant_entries: Vec<Entry> = variants.iter().map(|v| Entry::string(*v)).collect();
-        
+
         let entry = enum_node(c_name)
             .with_attr("c_type", Entry::string(c_name))
             .with_attr("rust_type", Entry::string(rust_name))
             .with_attr("variants", Entry::vec(variant_entries));
         self.db.add_entry(entry);
-        
+
         // Register type mappings for lookup_type()
-        self.register_type(c_name, rust_name, "Enum");
-        self.register_type(&format!("enum {}", c_name), rust_name, "Enum");
+        self.register_type(c_name, rust_name, "enum");
+        self.register_type(&format!("enum {}", c_name), rust_name, "enum");
         // Register pointer variants
-        self.register_type(&format!("{} *", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("{}*", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("enum {} *", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("enum {}*", c_name), &format!("*mut {}", rust_name), "PointerType");
-        
+        self.register_type(
+            &format!("{} *", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("{}*", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("enum {} *", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("enum {}*", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+
         // Register each variant for lookup (variant_name -> EnumName::variant_name)
         for variant in variants {
             self.register_enum_variant(c_name, rust_name, variant);
@@ -1634,7 +2028,10 @@ impl System {
         use crate::db::node::{NodeExt, node};
         let entry = node("EnumVariant", variant)
             .with_attr("enum_name", Entry::string(enum_rust_name))
-            .with_attr("rust_value", Entry::string(&format!("{}::{}", enum_rust_name, variant)));
+            .with_attr(
+                "rust_value",
+                Entry::string(&format!("{}::{}", enum_rust_name, variant)),
+            );
         self.db.add_entry(entry);
     }
 
@@ -1662,15 +2059,31 @@ impl System {
             .with_attr("c_type", Entry::string(c_name))
             .with_attr("rust_type", Entry::string(rust_name));
         self.db.add_entry(entry);
-        
+
         // Register type mappings for lookup_type()
-        self.register_type(c_name, rust_name, "Union");
-        self.register_type(&format!("union {}", c_name), rust_name, "Union");
+        self.register_type(c_name, rust_name, "union");
+        self.register_type(&format!("union {}", c_name), rust_name, "union");
         // Register pointer variants
-        self.register_type(&format!("{} *", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("{}*", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("union {} *", c_name), &format!("*mut {}", rust_name), "PointerType");
-        self.register_type(&format!("union {}*", c_name), &format!("*mut {}", rust_name), "PointerType");
+        self.register_type(
+            &format!("{} *", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("{}*", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("union {} *", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
+        self.register_type(
+            &format!("union {}*", c_name),
+            &format!("*mut {}", rust_name),
+            "pointer",
+        );
     }
 
     /// Register a typedef in the database
@@ -1681,14 +2094,30 @@ impl System {
             .with_attr("c_type", Entry::string(alias))
             .with_attr("rust_type", Entry::string(rust_type));
         self.db.add_entry(entry);
-        
+
         // Register type mapping for lookup_type()
-        self.register_type(alias, rust_type, "Typedef");
+        self.register_type(alias, rust_type, "typedef");
         // Register pointer variants
-        self.register_type(&format!("{} *", alias), &format!("*mut {}", rust_type), "PointerType");
-        self.register_type(&format!("{}*", alias), &format!("*mut {}", rust_type), "PointerType");
-        self.register_type(&format!("const {} *", alias), &format!("*const {}", rust_type), "PointerType");
-        self.register_type(&format!("const {}*", alias), &format!("*const {}", rust_type), "PointerType");
+        self.register_type(
+            &format!("{} *", alias),
+            &format!("*mut {}", rust_type),
+            "pointer",
+        );
+        self.register_type(
+            &format!("{}*", alias),
+            &format!("*mut {}", rust_type),
+            "pointer",
+        );
+        self.register_type(
+            &format!("const {} *", alias),
+            &format!("*const {}", rust_type),
+            "pointer",
+        );
+        self.register_type(
+            &format!("const {}*", alias),
+            &format!("*const {}", rust_type),
+            "pointer",
+        );
     }
     /// Look up a registered identifier by C name
     pub fn lookup_identifier(&self, c_identifier: &str) -> Option<String> {
@@ -1816,6 +2245,30 @@ impl System {
         self.db.by_kind("Typedef")
     }
 
+    /// Check if a name is a registered typedef
+    pub fn is_typedef(&self, name: &str) -> bool {
+        let entries = self.db.by_name(name);
+        for entry in &entries {
+            if entry.kind() == Some("Typedef") {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if a name is a registered custom type (struct, enum, union, or typedef)
+    pub fn is_custom_type(&self, name: &str) -> bool {
+        let entries = self.db.by_name(name);
+        for entry in &entries {
+            if let Some(kind) = entry.kind() {
+                if matches!(kind, "Typedef" | "Struct" | "Enum" | "Union") {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     // ========================================================================
     // Function Registration
     // ========================================================================
@@ -1899,112 +2352,183 @@ impl System {
     }
 
     // ========================================================================
+    // Variable Registration and Lookup
+    // ========================================================================
+
+    /// Register a variable with its type information
+    /// Used for sizeof() and type inference
+    pub fn register_variable(&mut self, name: &str, c_type: &str, rust_type: &str) {
+        use crate::db::node::{NodeExt, node};
+        // Register in converter for quick lookup
+        self.variable_converter.register(name, c_type, rust_type);
+        
+        // Also add to database for persistence
+        let entry = node("Variable", name)
+            .with_attr("c_type", Entry::string(c_type))
+            .with_attr("rust_type", Entry::string(rust_type));
+        self.db.add_entry(entry);
+    }
+
+    /// Register a pointer variable
+    pub fn register_pointer_variable(&mut self, name: &str, base_c_type: &str, base_rust_type: &str, level: usize) {
+        self.variable_converter.register_pointer(name, base_c_type, base_rust_type, level);
+        
+        // Compute the full pointer type
+        let rust_type = if level == 1 {
+            format!("*mut {}", base_rust_type)
+        } else {
+            let mut result = base_rust_type.to_string();
+            for _ in 0..level {
+                result = format!("*mut {}", result);
+            }
+            result
+        };
+        
+        use crate::db::node::{NodeExt, node};
+        let entry = node("Variable", name)
+            .with_attr("c_type", Entry::string(&format!("{}*", base_c_type)))
+            .with_attr("rust_type", Entry::string(&rust_type))
+            .with_attr("is_pointer", Entry::bool(true))
+            .with_attr("pointer_level", Entry::usize(level));
+        self.db.add_entry(entry);
+    }
+
+    /// Register an array variable
+    pub fn register_array_variable(&mut self, name: &str, element_c_type: &str, element_rust_type: &str, dims: Vec<usize>) {
+        self.variable_converter.register_array(name, element_c_type, element_rust_type, dims.clone());
+        
+        let rust_type = if dims.len() == 1 {
+            format!("[{}; {}]", element_rust_type, dims[0])
+        } else {
+            let mut result = element_rust_type.to_string();
+            for &dim in dims.iter().rev() {
+                result = format!("[{}; {}]", result, dim);
+            }
+            result
+        };
+        
+        use crate::db::node::{NodeExt, node};
+        let dim_entries: Vec<Entry> = dims.iter().map(|&d| Entry::usize(d)).collect();
+        let entry = node("Variable", name)
+            .with_attr("c_type", Entry::string(&format!("{}[]", element_c_type)))
+            .with_attr("rust_type", Entry::string(&rust_type))
+            .with_attr("is_array", Entry::bool(true))
+            .with_attr("array_dims", Entry::vec(dim_entries));
+        self.db.add_entry(entry);
+    }
+
+    /// Look up a registered variable's Rust type by name
+    pub fn lookup_variable(&self, name: &str) -> Option<String> {
+        // Try converter first (fast path)
+        if let Some(rust_type) = self.variable_converter.lookup(name) {
+            return Some(rust_type);
+        }
+        
+        // Fall back to database lookup
+        let entries = self.db.by_name(name);
+        for entry in &entries {
+            if entry.kind() == Some("Variable") {
+                return entry.get_string_attr("rust_type").map(|s| s.to_string());
+            }
+        }
+        None
+    }
+
+    /// Look up a registered variable's C type by name
+    pub fn lookup_variable_c_type(&self, name: &str) -> Option<String> {
+        // Try converter first (fast path)
+        if let Some(c_type) = self.variable_converter.lookup_c_type(name) {
+            return Some(c_type);
+        }
+        
+        // Fall back to database lookup
+        let entries = self.db.by_name(name);
+        for entry in &entries {
+            if entry.kind() == Some("Variable") {
+                return entry.get_string_attr("c_type").map(|s| s.to_string());
+            }
+        }
+        None
+    }
+
+    /// Check if a variable is registered
+    pub fn is_variable_registered(&self, name: &str) -> bool {
+        self.lookup_variable(name).is_some()
+    }
+
+    /// Enter a new scope (for function bodies, blocks)
+    pub fn push_variable_scope(&mut self) {
+        self.variable_converter.push_scope();
+    }
+
+    /// Exit current scope
+    pub fn pop_variable_scope(&mut self) {
+        self.variable_converter.pop_scope();
+    }
+
+    /// Get all registered variables
+    pub fn registered_variables(&self) -> Vec<&Entry> {
+        self.db.by_kind("Variable")
+    }
+
+    // ========================================================================
     // Routing Management
     // ========================================================================
 
-    /// Get next routing ID from metadata
-    fn get_routing_next_id(&self) -> u64 {
+    /// Get next route ID from metadata
+    fn next_route_id(&self) -> u64 {
         self.db
-            .metadata("routing_next_id")
+            .metadata("route_next_id")
             .and_then(|e| e.get_usize_attr("value"))
             .map(|v| v as u64)
             .unwrap_or(1)
     }
 
-    /// Set next routing ID in metadata
-    fn set_routing_next_id(&mut self, id: u64) {
-        let mut entry = Entry::node("metadata", "routing_next_id");
+    /// Set next route ID in metadata
+    fn set_next_route_id(&mut self, id: u64) {
+        let mut entry = Entry::node("metadata", "route_next_id");
         entry.set_attr("value", Entry::usize(id as usize));
-        self.db.set_metadata("routing_next_id", entry);
+        self.db.set_metadata("route_next_id", entry);
     }
 
-    /// Allocate a new routing decision ID
-    pub fn allocate_routing_id(&mut self) -> u64 {
-        let id = self.get_routing_next_id();
-        self.set_routing_next_id(id + 1);
+    /// Register a new route and return its assigned ID
+    pub fn register_route(&mut self, mut route: crate::db::routing::Route) -> u64 {
+        let id = self.next_route_id();
+        self.set_next_route_id(id + 1);
+        route.id = id;
+        self.db.add(&route);
         id
     }
 
-    /// Add a routing decision to the database
-    pub fn add_routing_decision(&mut self, decision: &crate::db::routing::RoutingDecision) -> u64 {
-        let id = decision.id;
-        self.db.add(decision);
-        id
-    }
-
-    /// Get a routing decision Entry by ID
-    pub fn get_routing_entry(&self, id: u64) -> Option<&Entry> {
+    /// Lookup routes matching the given query
+    pub fn lookup_route(
+        &self,
+        query: crate::db::routing::RouteQuery,
+    ) -> Vec<crate::db::routing::Route> {
         self.db
-            .by_kind("RoutingDecision")
+            .by_kind("Route")
             .into_iter()
-            .find(|e| e.get_usize_attr("id") == Some(id as usize))
-    }
-
-    /// Get all routing decision entries
-    pub fn get_all_routings(&self) -> Vec<&Entry> {
-        self.db.by_kind("RoutingDecision")
-    }
-
-    /// Get routing entries by source handler
-    pub fn routings_by_source(&self, handler: &str) -> Vec<&Entry> {
-        self.db
-            .by_kind("RoutingDecision")
-            .into_iter()
-            .filter(|e| e.get_string_attr("source_handler") == Some(handler))
+            .filter(|e| query.matches(e))
+            .filter_map(|e| crate::db::routing::Route::from_entry(e))
             .collect()
     }
 
-    /// Get routing entries by target handler
-    pub fn routings_by_target(&self, handler: &str) -> Vec<&Entry> {
-        self.db
-            .by_kind("RoutingDecision")
+    /// Lookup a single route by ID
+    pub fn lookup_route_by_id(&self, id: u64) -> Option<crate::db::routing::Route> {
+        self.lookup_route(crate::db::routing::RouteQuery::by_id(id))
             .into_iter()
-            .filter(|e| e.get_string_attr("target_handler") == Some(handler))
-            .collect()
+            .next()
     }
 
-    /// Get pending routing entries
-    pub fn pending_routings(&self) -> Vec<&Entry> {
-        self.db
-            .by_kind("RoutingDecision")
-            .into_iter()
-            .filter(|e| e.get_string_attr("status") == Some("pending"))
-            .collect()
+    /// Update an existing route (adds new version with updated data)
+    pub fn update_route(&mut self, route: &crate::db::routing::Route) {
+        self.db.add(route);
     }
 
-    /// Update routing status in db (requires re-adding with new status)
-    pub fn update_routing_status(&mut self, id: u64, status: &str) {
-        let name = format!("routing_{}", id);
-        if let Some(entry) = self.db.by_name(&name).into_iter().next() {
-            let mut new_entry = entry.clone();
-            new_entry.set_attr("status", Entry::string(status));
-            // Note: Web doesn't have update, so we add a new version
-            // The latest one will be found first in queries
-        }
-    }
-
-    /// Get routing statistics from database
-    pub fn routing_stats(&self) -> crate::db::routing::RoutingStats {
-        let entries = self.db.by_kind("RoutingDecision");
-        let mut pending = 0;
-        let mut completed = 0;
-        let mut failed = 0;
-
-        for entry in &entries {
-            match entry.get_string_attr("status") {
-                Some("pending") | Some("in_progress") => pending += 1,
-                Some("completed") => completed += 1,
-                Some("failed") => failed += 1,
-                _ => {}
-            }
-        }
-
-        crate::db::routing::RoutingStats {
-            total: entries.len(),
-            pending,
-            completed,
-            failed,
-        }
+    /// Get route statistics
+    pub fn route_stats(&self) -> crate::db::routing::RouteStats {
+        let entries: Vec<&Entry> = self.db.by_kind("Route");
+        crate::db::routing::RouteStats::from_entries(&entries)
     }
 
     // ========================================================================

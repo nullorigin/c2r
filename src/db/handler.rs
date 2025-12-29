@@ -62,11 +62,19 @@ impl Build for CodeSegment {
         let tokens: Vec<Entry> = self.tokens.iter().map(|t| Entry::string(t)).collect();
         attrs.insert("tokens".to_string(), Entry::vec(tokens));
 
-        Entry::node_with_attrs("code_segment", &self.segment_type, attrs)
+        Entry::node_with_attrs("CodeSegment", &self.segment_type, attrs)
     }
 
     fn kind(&self) -> &str {
-        "code_segment"
+        "CodeSegment"
+    }
+
+    fn name(&self) -> Option<&str> {
+        if self.segment_type.is_empty() {
+            None
+        } else {
+            Some(&self.segment_type)
+        }
     }
 
     fn category(&self) -> Option<&str> {
@@ -224,11 +232,20 @@ impl Build for HandlerResult {
         attrs.insert("range_start".to_string(), Entry::usize(range.start));
         attrs.insert("range_end".to_string(), Entry::usize(range.end));
 
-        Entry::node_with_attrs("handler_result", status, attrs)
+        Entry::node_with_attrs("HandlerResult", status, attrs)
     }
 
     fn kind(&self) -> &str {
-        "handler_result"
+        "HandlerResult"
+    }
+
+    fn name(&self) -> Option<&str> {
+        match self {
+            Self::Completed { .. } => Some("completed"),
+            Self::Extracted { .. } => Some("extracted"),
+            Self::NotHandled { .. } => Some("not_handled"),
+            Self::Failed { .. } => Some("failed"),
+        }
     }
 
     fn category(&self) -> Option<&str> {
@@ -392,15 +409,19 @@ impl Build for HandlerStats {
             Entry::f64(self.average_time_ms),
         );
 
-        Entry::node_with_attrs("handler_stats", &self.name, attrs)
+        Entry::node_with_attrs("HandlerStats", &self.name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "handler_stats"
+        "HandlerStats"
     }
 
     fn name(&self) -> Option<&str> {
         Some(&self.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("handler")
     }
 }
 
@@ -472,11 +493,11 @@ impl Build for HandlerMetadata {
         let patterns: Vec<Entry> = self.patterns.iter().map(|p| Entry::string(p)).collect();
         attrs.insert("patterns".to_string(), Entry::vec(patterns));
 
-        Entry::node_with_attrs("handler_metadata", &self.name, attrs)
+        Entry::node_with_attrs("HandlerMetadata", &self.name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "handler_metadata"
+        "HandlerMetadata"
     }
 
     fn name(&self) -> Option<&str> {
@@ -543,15 +564,19 @@ impl Build for SuccessRecord {
         attrs.insert("confidence".to_string(), Entry::f64(self.confidence));
         attrs.insert("time_ms".to_string(), Entry::u64(self.time_ms));
 
-        Entry::node_with_attrs("success_record", &self.handler_name, attrs)
+        Entry::node_with_attrs("SuccessRecord", &self.handler_name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "success_record"
+        "SuccessRecord"
     }
 
     fn name(&self) -> Option<&str> {
         Some(&self.handler_name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("success")
     }
 }
 
@@ -598,11 +623,11 @@ impl Build for FailureRecord {
         attrs.insert("token_count".to_string(), Entry::usize(self.token_count));
         attrs.insert("reason".to_string(), Entry::string(&self.reason));
 
-        Entry::node_with_attrs("failure_record", &self.handler_name, attrs)
+        Entry::node_with_attrs("FailureRecord", &self.handler_name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "failure_record"
+        "FailureRecord"
     }
 
     fn name(&self) -> Option<&str> {
@@ -714,11 +739,19 @@ impl Build for RoutingRule {
         attrs.insert("enabled".to_string(), Entry::bool(self.enabled));
 
         let name = format!("{}->{}", self.from_handler, self.to_handler);
-        Entry::node_with_attrs("routing_rule", &name, attrs)
+        Entry::node_with_attrs("RoutingRule", &name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "routing_rule"
+        "RoutingRule"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.from_handler)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("routing")
     }
 
     fn priority(&self) -> i16 {
@@ -788,11 +821,19 @@ impl Build for PatternUsage {
             "average_confidence".to_string(),
             Entry::f64(self.average_confidence),
         );
-        Entry::node_with_attrs("pattern_usage", &self.pattern_name, attrs)
+        Entry::node_with_attrs("PatternUsage", &self.pattern_name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "pattern_usage"
+        "PatternUsage"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.pattern_name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("pattern")
     }
 }
 
@@ -986,11 +1027,19 @@ impl Build for RoutingStats {
             Entry::f64(self.avg_confidence_improvement),
         );
         let name = format!("{}->{}", self.from_handler, self.to_handler);
-        Entry::node_with_attrs("routing_stats", &name, attrs)
+        Entry::node_with_attrs("RoutingStats", &name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "routing_stats"
+        "RoutingStats"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.from_handler)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("routing")
     }
 }
 
@@ -1180,11 +1229,19 @@ impl Build for GlobalHandlerStats {
             "average_confidence".to_string(),
             Entry::f64(self.average_confidence),
         );
-        Entry::node_with_attrs("global_handler_stats", "global", attrs)
+        Entry::node_with_attrs("GlobalHandlerStats", "global", attrs)
     }
 
     fn kind(&self) -> &str {
-        "global_handler_stats"
+        "GlobalHandlerStats"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some("global")
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("handler")
     }
 }
 
@@ -1539,11 +1596,11 @@ impl Build for Handler {
             Entry::usize(self.routing_rules.len()),
         );
 
-        Entry::node_with_attrs("handler", &self.name, attrs)
+        Entry::node_with_attrs("Handler", &self.name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "handler"
+        "Handler"
     }
 
     fn name(&self) -> Option<&str> {

@@ -87,10 +87,6 @@ impl Default for CommentHandler {
 }
 
 impl Processor for CommentHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &[
             "validate_line_comment",
@@ -246,9 +242,15 @@ impl Processor for CommentHandler {
                     }
                 }
 
-                // Get content from pattern extraction
+                // Get content from pattern extraction - strip the comment prefix
                 if let Some(content) = ctx.value("content") {
-                    self.data.text = content.to_string();
+                    let prefix_len = if self.data.is_doc { 3 } else { 2 };
+                    self.data.text = content
+                        .chars()
+                        .skip(prefix_len)
+                        .collect::<String>()
+                        .trim()
+                        .to_string();
                     self.confidence = 1.0;
                     return true;
                 }

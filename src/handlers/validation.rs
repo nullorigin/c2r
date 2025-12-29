@@ -4,7 +4,7 @@
 //! This helps prevent misvalidations by ensuring tokens follow valid C grammar patterns.
 
 use crate::db::keyword::{
-    is_control_flow, is_preprocessor, is_storage_class, is_type_keyword, is_type_qualifier, Order,
+    is_c_control_flow, is_preprocessor, is_c_storage_class, is_c_type_keyword, is_c_type_qualifier, Order,
 };
 use crate::db::token::Token;
 
@@ -157,13 +157,15 @@ impl SequenceValidator {
         // Check for return type
         let mut has_type = false;
         for (i, token) in token_strs.iter().enumerate() {
-            if is_type_keyword(token) || is_storage_class(token) || is_type_qualifier(token) {
+            if is_c_type_keyword(token) || is_c_storage_class(token) || is_c_type_qualifier(token)
+                || crate::system::system().lookup_type(token).is_some() {
                 has_type = true;
             }
 
             // Found function name followed by (
             if i + 1 < token_strs.len() && token_strs[i + 1] == "(" {
-                if !has_type && !is_type_keyword(token) {
+                if !has_type && !is_c_type_keyword(token) 
+                    && crate::system::system().lookup_type(token).is_none() {
                     // Identifier followed by ( - could be function name
                     break;
                 }
@@ -193,14 +195,15 @@ impl SequenceValidator {
         let mut has_type = false;
 
         for token in &token_strs {
-            if is_type_keyword(token) || is_storage_class(token) || is_type_qualifier(token) {
+            if is_c_type_keyword(token) || is_c_storage_class(token) || is_c_type_qualifier(token)
+                || crate::system::system().lookup_type(token).is_some() {
                 has_type = true;
                 break;
             }
         }
 
         if !has_type {
-            // Could be a user-defined type
+            // Could be a user-defined type not yet registered
         }
 
         // Should end with ;
@@ -221,7 +224,7 @@ impl SequenceValidator {
 
         let first = &token_strs[0];
 
-        if !is_control_flow(first) {
+        if !is_c_control_flow(first) {
             return ValidationResult::invalid_with_reason(&format!(
                 "'{}' is not a control flow keyword",
                 first

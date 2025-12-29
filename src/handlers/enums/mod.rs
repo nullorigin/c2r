@@ -82,27 +82,21 @@ pub struct EnumData {
 /// Handler for C enum definitions
 #[derive(Debug)]
 pub struct EnumHandler {
-    name: String,
     stage: ProcessStage,
     confidence: f64,
     error: Option<String>,
     output: Option<String>,
     data: EnumData,
-    range: Range<usize>,
-    input_tokens: Vec<String>,
 }
 
 impl EnumHandler {
     pub fn new() -> Self {
         Self {
-            name: "enum".to_string(),
             stage: ProcessStage::Pending,
             confidence: 0.0,
             error: None,
             output: None,
             data: EnumData::default(),
-            range: 0..0,
-            input_tokens: Vec::new(),
         }
     }
 }
@@ -114,10 +108,6 @@ impl Default for EnumHandler {
 }
 
 impl Processor for EnumHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &[
             "validate_enum_definition",
@@ -268,46 +258,24 @@ impl Processor for EnumHandler {
     }
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
-        if tokens.len() < 4 {
-            self.error = Some("Too few tokens for enum".to_string());
-            return false;
-        }
+        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
-
-        // Try matching against our patterns
+        // Pattern matching handles min_tokens, "enum" keyword, and "{" requirement
         let mut best_confidence = 0.0;
         for (pattern, _) in self.patterns() {
-            if let Some(confidence) = pattern.matches_tokens(&self.input_tokens) {
+            if let Some(confidence) = pattern.matches_tokens(&token_strs) {
                 if confidence > best_confidence {
                     best_confidence = confidence;
                 }
             }
         }
 
-        // Check for enum keyword
-        let first = tokens[0].to_string();
-        let has_enum = first == "enum"
-            || (first == "typedef" && tokens.len() > 1 && tokens[1].to_string() == "enum");
-
-        if !has_enum {
+        if best_confidence == 0.0 {
             self.error = Some("Not an enum definition".to_string());
             return false;
         }
 
-        // Must have braces for definition
-        let has_brace = self.input_tokens.iter().any(|t| t == "{");
-        if !has_brace {
-            self.error = Some("Enum must have body".to_string());
-            return false;
-        }
-
-        self.confidence = if best_confidence > 0.0 {
-            best_confidence
-        } else {
-            0.7
-        };
+        self.confidence = best_confidence;
         true
     }
 
@@ -349,7 +317,7 @@ impl Processor for EnumHandler {
 
                 // If still no name, generate one
                 if self.data.main_enum.name.is_empty() {
-                    self.data.main_enum.name = format!("AnonymousEnum{}", self.range.start);
+                    self.data.main_enum.name = "AnonymousEnum".to_string();
                     self.data.main_enum.is_anonymous = true;
                 }
 
@@ -413,7 +381,7 @@ impl Processor for EnumHandler {
 
         // If still no name, generate one
         if self.data.main_enum.name.is_empty() {
-            self.data.main_enum.name = format!("AnonymousEnum{}", self.range.start);
+            self.data.main_enum.name = "AnonymousEnum".to_string();
             self.data.main_enum.is_anonymous = true;
         }
 
@@ -421,54 +389,57 @@ impl Processor for EnumHandler {
     }
 
     fn convert(&mut self) -> Option<String> {
-        let mut output = String::new();
-
+        let enum_name = &self.data.main_enum.name;
+        let variants = &self.data.main_enum.variants;
+        
         // Register the enum type with its variants
-        let variant_names: Vec<&str> = self.data.main_enum.variants
-            .iter()
-            .map(|v| v.name.as_str())
-            .collect();
-        crate::system::system()
-            .register_enum_with_variants(&self.data.main_enum.name, &self.data.main_enum.name, &variant_names);
+        let variant_names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        crate::system::system().register_enum_with_variants(enum_name, enum_name, &variant_names);
 
         // Register typedef alias if present
         if let Some(ref alias) = self.data.typedef_alias {
-            if alias != &self.data.main_enum.name {
-                crate::system::system().register_typedef(
-                    alias,
-                    alias,
-                    &self.data.main_enum.name,
-                );
+            if alias != enum_name {
+                crate::system::system().register_typedef(alias, alias, enum_name);
             }
         }
+
+        // Pre-calculate capacity for output string
+        let estimated_size = 80 + variants.len() * 32;
+        let mut output = String::with_capacity(estimated_size);
 
         // Generate Rust enum with repr(C) for FFI compatibility
-        output.push_str("#[repr(C)]\n");
-        output.push_str("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\n");
-        output.push_str(&format!("pub enum {} {{\n", self.data.main_enum.name));
+        output.push_str("#[repr(C)]\n#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum ");
+        output.push_str(enum_name);
+        output.push_str(" {\n");
 
-        for variant in &self.data.main_enum.variants {
-            if let Some(value) = variant.value {
-                output.push_str(&format!("    {} = {},\n", variant.name, value));
-            } else if let Some(ref expr) = variant.value_expr {
-                output.push_str(&format!(
-                    "    {} = {}, // TODO: evaluate expression\n",
-                    variant.name, expr
-                ));
-            } else {
-                output.push_str(&format!("    {},\n", variant.name));
+        for variant in variants {
+            output.push_str("    ");
+            output.push_str(&variant.name);
+            match (&variant.value, &variant.value_expr) {
+                (Some(value), _) => {
+                    output.push_str(" = ");
+                    output.push_str(&value.to_string());
+                }
+                (None, Some(expr)) => {
+                    output.push_str(" = ");
+                    output.push_str(expr);
+                    output.push_str(" // TODO: evaluate expression");
+                }
+                _ => {}
             }
+            output.push_str(",\n");
         }
 
-        output.push_str("}");
+        output.push('}');
 
         // Add type alias if typedef was used with a different name
         if let Some(ref alias) = self.data.typedef_alias {
-            if alias != &self.data.main_enum.name {
-                output.push_str(&format!(
-                    "\npub type {} = {};",
-                    alias, self.data.main_enum.name
-                ));
+            if alias != enum_name {
+                output.push_str("\npub type ");
+                output.push_str(alias);
+                output.push_str(" = ");
+                output.push_str(enum_name);
+                output.push(';');
             }
         }
 

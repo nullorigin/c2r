@@ -7,7 +7,7 @@ use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
 use crate::handlers::process::{ProcessStage, Processor};
-use crate::system;
+use crate::system::{self, system};
 
 // ============================================================================
 // Function Call Handler Implementation
@@ -69,10 +69,6 @@ impl Default for CallHandler {
 }
 
 impl Processor for CallHandler {
-    fn name(&self) -> &str {
-        "CallHandler"
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &["validate_function_call", "extract_function_call"]
     }
@@ -140,6 +136,29 @@ impl Processor for CallHandler {
         if paren_pos.is_none() || paren_pos == Some(0) {
             return false;
         }
+        let paren_idx = paren_pos.unwrap();
+
+        // Reject if "struct", "enum", "union" appears before ( - these are type declarations, not calls
+        // Use lookup_order_chain to validate this isn't a type declaration pattern
+        let before_paren: Vec<&str> = token_strs[..paren_idx].iter().map(|s| s.as_str()).collect();
+        
+        // Check for type declaration keywords that shouldn't precede a function call
+        for kw in &before_paren {
+            if matches!(*kw, "struct" | "enum" | "union" | "typedef") {
+                return false; // This is a type declaration, not a function call
+            }
+        }
+
+        // Use lookup_order_chain to validate the sequence before (
+        // A valid function call should have identifier(s) before (, not type keywords
+        if before_paren.len() >= 2 {
+            if let Some((can_follow, _)) = system().lookup_order_chain(before_paren.clone(), "c") {
+                if !can_follow {
+                    // Invalid keyword chain - might not be a function call
+                    self.confidence = 0.5;
+                }
+            }
+        }
 
         // Must have matching )
         let close_paren = token_strs.iter().rposition(|t| t == ")");
@@ -156,7 +175,9 @@ impl Processor for CallHandler {
             }
         }
 
-        self.confidence = 0.7;
+        if self.confidence == 0.0 {
+            self.confidence = 0.7;
+        }
         true
     }
 
@@ -310,7 +331,61 @@ impl CallHandler {
             .map(|t| system().lookup_identifier(t).unwrap_or_else(|| t.clone()))
             .collect();
 
-        converted.join(" ").replace("& ", "&").replace("* ", "*")
+        let joined = converted.join(" ").replace("& ", "&").replace("* ", "*");
+        
+        // Convert C arrow operator: ptr -> field -> (*ptr).field
+        Self::convert_arrow_operator(&joined)
+    }
+
+    /// Convert C arrow operator (ptr->field or ptr -> field) to Rust (*ptr).field
+    fn convert_arrow_operator(expr: &str) -> String {
+        let mut result = expr.to_string();
+        
+        // Handle spaced arrow: "ptr -> field" -> "(*ptr).field"
+        while let Some(arrow_pos) = result.find(" -> ") {
+            let before = &result[..arrow_pos];
+            let after = &result[arrow_pos + 4..];
+            
+            // Find the identifier before the arrow (last word)
+            let ptr_name = before.split_whitespace().last().unwrap_or("");
+            let prefix = if before.len() > ptr_name.len() {
+                &before[..before.len() - ptr_name.len()]
+            } else {
+                ""
+            };
+            
+            // Find the field after the arrow (first word or until next operator)
+            let field_end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+            let field = &after[..field_end];
+            let suffix = &after[field_end..];
+            
+            result = format!("{}(*{}).{}{}", prefix, ptr_name, field, suffix);
+        }
+        
+        // Handle non-spaced arrow: "ptr->field" -> "(*ptr).field"
+        while let Some(arrow_pos) = result.find("->") {
+            // Skip if already converted (would have parentheses)
+            if arrow_pos > 0 && result.chars().nth(arrow_pos - 1) == Some(')') {
+                break;
+            }
+            
+            let before = &result[..arrow_pos];
+            let after = &result[arrow_pos + 2..];
+            
+            // Find the identifier before the arrow
+            let ptr_start = before.rfind(|c: char| !c.is_alphanumeric() && c != '_').map(|p| p + 1).unwrap_or(0);
+            let ptr_name = &before[ptr_start..];
+            let prefix = &before[..ptr_start];
+            
+            // Find the field after the arrow
+            let field_end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+            let field = &after[..field_end];
+            let suffix = &after[field_end..];
+            
+            result = format!("{}(*{}).{}{}", prefix, ptr_name, field, suffix);
+        }
+        
+        result
     }
 }
 

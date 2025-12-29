@@ -6,14 +6,12 @@
 //! - `const int CONSTANT = 42;` -> `const CONSTANT: i32 = 42;`
 //! - `static int counter = 0;` -> `static mut COUNTER: i32 = 0;`
 
-use crate::db::convert::TypeConverter;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
 use crate::handlers::process::{ProcessStage, Processor};
 use crate::handlers::validation::SequenceValidator;
 use crate::system;
-use std::ops::Range;
 
 // ============================================================================
 // Global Handler Implementation
@@ -47,27 +45,21 @@ pub struct GlobalData {
 /// Handler for C global variable declarations
 #[derive(Debug)]
 pub struct GlobalHandler {
-    name: String,
     stage: ProcessStage,
     confidence: f64,
     error: Option<String>,
     output: Option<String>,
     data: GlobalData,
-    range: Range<usize>,
-    input_tokens: Vec<String>,
 }
 
 impl GlobalHandler {
     pub fn new() -> Self {
         Self {
-            name: "global".to_string(),
             stage: ProcessStage::Pending,
             confidence: 0.0,
             error: None,
             output: None,
             data: GlobalData::default(),
-            range: 0..0,
-            input_tokens: Vec::new(),
         }
     }
 }
@@ -79,10 +71,6 @@ impl Default for GlobalHandler {
 }
 
 impl Processor for GlobalHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &["global", "global_const", "global_static", "global_extern"]
     }
@@ -358,13 +346,43 @@ impl Processor for GlobalHandler {
             return false;
         }
 
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
+        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+
+        // Reject forward declarations: "struct Name;" or "enum Name;" (only 3 tokens)
+        // These are type declarations, not global variables
+        if token_strs.len() == 3 {
+            let first = token_strs[0].as_str();
+            if matches!(first, "struct" | "enum" | "union") {
+                self.error = Some("Forward declaration - not a global variable".to_string());
+                return false;
+            }
+        }
+
+        // Reject if pattern is just "struct/enum/union Name ;" with no type or value
+        // Use lookup_order_chain to validate this is a variable declaration
+        let tokens_before_semi: Vec<&str> = token_strs.iter()
+            .filter(|s| *s != ";")
+            .map(|s| s.as_str())
+            .collect();
+        
+        if !tokens_before_semi.is_empty() {
+            let first = tokens_before_semi[0];
+            // If it starts with struct/enum/union and has no = or type after the name, reject
+            if matches!(first, "struct" | "enum" | "union") {
+                // Check if there's an = sign indicating initialization
+                let has_equals = token_strs.iter().any(|t| t == "=");
+                // Check if there's a type keyword before the struct/enum/union (like "static struct")
+                if !has_equals && tokens_before_semi.len() <= 2 {
+                    self.error = Some("Type declaration - not a global variable".to_string());
+                    return false;
+                }
+            }
+        }
 
         // Try matching against our patterns
         let mut best_confidence = 0.0;
         for (pattern, _) in self.patterns() {
-            if let Some(confidence) = pattern.matches_tokens(&self.input_tokens) {
+            if let Some(confidence) = pattern.matches_tokens(&token_strs) {
                 if confidence > best_confidence {
                     best_confidence = confidence;
                 }
@@ -372,13 +390,13 @@ impl Processor for GlobalHandler {
         }
 
         // Must end with semicolon
-        if self.input_tokens.last() != Some(&";".to_string()) {
+        if token_strs.last() != Some(&";".to_string()) {
             self.error = Some("Global declaration must end with semicolon".to_string());
             return false;
         }
 
         // Should not have ( ) which would indicate function
-        if self.input_tokens.iter().any(|t| t == "(") {
+        if token_strs.iter().any(|t| t == "(") {
             self.error = Some("Has parentheses - likely a function".to_string());
             return false;
         }

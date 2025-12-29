@@ -2350,6 +2350,23 @@ pub trait Build {
         0
     }
 
+    /// Register this object to the system database if auto-registration is enabled.
+    /// Returns true if the object was registered, false otherwise.
+    fn register(&self) -> bool {
+        let sys = crate::system::system();
+        if sys.is_build_registration_enabled() {
+            sys.db_mut().add_entry(self.to_entry());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Force registration to system database regardless of the auto-registration flag.
+    fn force_register(&self) {
+        crate::system::system().db_mut().add_entry(self.to_entry());
+    }
+
     /// Check if this object matches the given query specification.
     /// The query is an Entry that specifies match criteria:
     /// - Node with kind: matches objects of that kind

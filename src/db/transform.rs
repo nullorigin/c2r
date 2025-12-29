@@ -466,11 +466,11 @@ impl Build for Relationship {
         }
 
         let name = format!("{}->{}", self.from, self.to);
-        Entry::node_with_attrs("relationship", &name, attrs)
+        Entry::node_with_attrs("Relationship", &name, attrs)
     }
 
     fn kind(&self) -> &str {
-        "relationship"
+        "Relationship"
     }
 
     fn name(&self) -> Option<&str> {

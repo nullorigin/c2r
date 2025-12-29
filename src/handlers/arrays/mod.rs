@@ -61,150 +61,28 @@ pub struct ArrayData {
 /// Array handler state for processing
 #[derive(Debug, Clone)]
 pub struct ArrayHandler {
-    /// Handler name
-    name: String,
-    /// Current processing stage
     stage: ProcessStage,
-    /// Extracted array data
-    data: ArrayData,
-    /// Generated Rust output
-    output: Option<String>,
-    /// Error message if failed
-    error: Option<String>,
-    /// Confidence score
     confidence: f64,
-    /// Token range processed
-    range: Range<usize>,
-    /// Input tokens (stored for Build trait)
-    input_tokens: Vec<String>,
+    error: Option<String>,
+    output: Option<String>,
+    data: ArrayData,
 }
 
 impl ArrayHandler {
     pub fn new() -> Self {
         Self {
-            name: "array".to_string(),
             stage: ProcessStage::Pending,
-            data: ArrayData::default(),
-            output: None,
-            error: None,
             confidence: 0.0,
-            range: 0..0,
-            input_tokens: Vec::new(),
+            error: None,
+            output: None,
+            data: ArrayData::default(),
         }
     }
 
-    /// Convert array declaration from tokens (called from DefinitionHandler)
-    pub fn convert_from_tokens(tokens: &[&str]) -> String {
-        let mut handler = Self::new();
-        let token_strings: Vec<String> = tokens.iter().map(|s| s.to_string()).collect();
-
-        if handler.extract_from_tokens(&token_strings) {
-            handler
-                .convert()
-                .unwrap_or_else(|| format!("// array: {}", tokens.join(" ")))
-        } else {
-            format!("// array: {}", tokens.join(" "))
-        }
-    }
-
-    /// Extract array data from token strings
-    fn extract_from_tokens(&mut self, token_strings: &[String]) -> bool {
-        // Find bracket positions
-        let bracket_pos = token_strings.iter().position(|t| t == "[");
-        if bracket_pos.is_none() {
-            self.error = Some("No bracket found in array declaration".to_string());
-            return false;
-        }
-        let bracket_pos = bracket_pos.unwrap();
-
-        // Skip const/static if present
-        let mut type_start = 0;
-        if !token_strings.is_empty()
-            && (token_strings[0] == "const" || token_strings[0] == "static")
-        {
-            self.data.is_const = token_strings[0] == "const";
-            self.data.is_static = token_strings[0] == "static";
-            type_start = 1;
-            if token_strings.len() > 1 && token_strings[1] == "const" {
-                self.data.is_const = true;
-                type_start = 2;
-            }
-        }
-
-        // Type is everything before the name (which is right before the bracket)
-        if bracket_pos < type_start + 2 {
-            // Simple case: type name[size]
-            if bracket_pos >= 1 {
-                self.data.name = token_strings[bracket_pos - 1].clone();
-                if bracket_pos > type_start + 1 {
-                    self.data.element_type = token_strings[type_start..bracket_pos - 1].join(" ");
-                } else {
-                    self.data.element_type = token_strings[type_start].clone();
-                }
-            } else {
-                self.error = Some("Invalid array declaration format".to_string());
-                return false;
-            }
-        } else {
-            self.data.name = token_strings[bracket_pos - 1].clone();
-            self.data.element_type = token_strings[type_start..bracket_pos - 1].join(" ");
-        }
-
-        // Parse all dimensions (supports multidimensional arrays)
-        let mut i = bracket_pos;
-        while i < token_strings.len() {
-            if token_strings[i] == "[" {
-                let mut j = i + 1;
-                while j < token_strings.len() && token_strings[j] != "]" {
-                    j += 1;
-                }
-                if j < token_strings.len() {
-                    if j > i + 1 {
-                        let size_str = &token_strings[i + 1];
-                        if let Ok(size) = size_str.parse::<usize>() {
-                            self.data.dimensions.push(size);
-                        }
-                    }
-                    i = j + 1;
-                } else {
-                    break;
-                }
-            } else {
-                i += 1;
-            }
-        }
-
-        // Check for initializer
-        let equals_pos = token_strings.iter().position(|t| t == "=");
-        if equals_pos.is_some() {
-            let brace_start = token_strings.iter().position(|t| t == "{");
-            let brace_end = token_strings.iter().rposition(|t| t == "}");
-
-            if let (Some(start), Some(end)) = (brace_start, brace_end) {
-                if end > start + 1 {
-                    // Extract values between braces
-                    for idx in (start + 1)..end {
-                        let val = &token_strings[idx];
-                        if val != "," {
-                            self.data.init_values.push(val.clone());
-                        }
-                    }
-
-                    // If no explicit size, infer from initializer
-                    if self.data.dimensions.is_empty() && !self.data.init_values.is_empty() {
-                        self.data.dimensions.push(self.data.init_values.len());
-                        self.data.size_inferred = true;
-                    }
-                }
-            }
-        }
-
-        if self.data.name.is_empty() || self.data.element_type.is_empty() {
-            self.error = Some("Could not extract array name or type".to_string());
-            return false;
-        }
-
-        true
+    /// Set whether this array is at global scope (builder pattern)
+    pub fn with_global(mut self, is_global: bool) -> Self {
+        self.data.is_global = is_global;
+        self
     }
 
     /// Build nested array type string for multidimensional arrays
@@ -313,10 +191,6 @@ impl Default for ArrayHandler {
 }
 
 impl Processor for ArrayHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &[
             "validate_array_declaration",
@@ -468,18 +342,18 @@ impl Processor for ArrayHandler {
             return false;
         }
 
-        // Store tokens for later
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
+        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
-        // Try matching against our patterns
-        let mut best_confidence = 0.0;
-        for (pattern, _) in self.patterns() {
-            if let Some(confidence) = pattern.matches_tokens(&self.input_tokens) {
-                if confidence > best_confidence {
-                    best_confidence = confidence;
-                }
-            }
+        // Must have [ somewhere
+        if !token_strs.iter().any(|t| t == "[") {
+            self.error = Some("Not an array declaration (no '[')".to_string());
+            return false;
+        }
+
+        // Last token should be semicolon
+        if tokens[tokens.len() - 1].to_string() != ";" {
+            self.error = Some("Array declaration must end with semicolon".to_string());
+            return false;
         }
 
         // Check for const/static modifiers
@@ -493,25 +367,17 @@ impl Processor for ArrayHandler {
             }
         }
 
-        // Must have [ somewhere
-        let has_bracket = self.input_tokens.iter().any(|t| t == "[");
-        if !has_bracket {
-            self.error = Some("Not an array declaration (no '[')".to_string());
-            return false;
+        // Try pattern matching for confidence
+        let mut best_confidence = 0.0;
+        for (pattern, _) in self.patterns() {
+            if let Some(confidence) = pattern.matches_tokens(&token_strs) {
+                if confidence > best_confidence {
+                    best_confidence = confidence;
+                }
+            }
         }
 
-        // Last token should be semicolon
-        let last = tokens[tokens.len() - 1].to_string();
-        if last != ";" {
-            self.error = Some("Array declaration must end with semicolon".to_string());
-            return false;
-        }
-
-        self.confidence = if best_confidence > 0.0 {
-            best_confidence
-        } else {
-            0.7
-        };
+        self.confidence = if best_confidence > 0.0 { best_confidence } else { 0.7 };
         true
     }
 
@@ -667,13 +533,12 @@ impl Processor for ArrayHandler {
 
         let rust_code = if !self.data.init_values.is_empty() {
             // Array with initializer
-            // Check if element type is a struct that needs field names
             let values = self.convert_init_values(&rust_type);
-            // Global arrays use static, local arrays use let (but ArrayHandler is for globals)
-            let prefix = if self.data.is_const {
-                "static "  // const at file scope is static in Rust
+            // Global arrays use static, local arrays use let
+            let prefix = if self.data.is_global {
+                if self.data.is_const { "static " } else { "static " }
             } else {
-                "static "  // Global arrays default to static
+                if self.data.is_const { "let " } else { "let mut " }
             };
             if self.data.size_inferred || self.data.dimensions.is_empty() {
                 format!("{}{}: {} = [{}];", prefix, self.data.name, full_type, values)
@@ -685,10 +550,10 @@ impl Processor for ArrayHandler {
             }
         } else if !self.data.dimensions.is_empty() {
             // Array declaration without initializer - use default
-            let prefix = if self.data.is_const {
-                "static "
+            let prefix = if self.data.is_global {
+                if self.data.is_const { "static " } else { "static mut " }
             } else {
-                "static mut "
+                if self.data.is_const { "let " } else { "let mut " }
             };
             let default_val = default_value_for_type(&rust_type);
             let default_init = self.build_default_init(default_val);
@@ -697,11 +562,11 @@ impl Processor for ArrayHandler {
                 prefix, self.data.name, full_type, default_init
             )
         } else {
-            // Unknown size, use Vec (but still static at file scope)
-            let prefix = if self.data.is_const {
-                "static "
+            // Unknown size, use Vec
+            let prefix = if self.data.is_global {
+                if self.data.is_const { "static " } else { "static mut " }
             } else {
-                "static mut "
+                if self.data.is_const { "let " } else { "let mut " }
             };
             format!(
                 "{}{}: Vec<{}> = Vec::new();",
@@ -792,13 +657,7 @@ impl Build for ArrayHandler {
             attrs.insert("error".to_string(), Entry::string(error));
         }
 
-        let tokens: Vec<Entry> = self.input_tokens.iter().map(|t| Entry::string(t)).collect();
-        attrs.insert("input_tokens".to_string(), Entry::vec(tokens));
-
-        attrs.insert("range_start".to_string(), Entry::usize(self.range.start));
-        attrs.insert("range_end".to_string(), Entry::usize(self.range.end));
-
-        Entry::node_with_attrs("ArrayHandler", &self.data.name, attrs)
+        Entry::node_with_attrs("Handler", "ArrayHandler", attrs)
     }
 
     fn kind(&self) -> &str {

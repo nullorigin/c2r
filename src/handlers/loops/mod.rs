@@ -2,7 +2,7 @@
 //!
 //! Converts C loop constructs (for, while, do-while) to Rust equivalents.
 
-use crate::db::convert::{IdentifierConverter, TypeConverter};
+use crate::db::convert::{IdentifierConverter, TypeConverter, sanitize_rust_identifier};
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
@@ -67,10 +67,6 @@ impl Default for LoopHandler {
 }
 
 impl Processor for LoopHandler {
-    fn name(&self) -> &str {
-        "LoopHandler"
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &[
             "validate_for_loop",
@@ -242,9 +238,18 @@ impl Processor for LoopHandler {
             return false;
         }
 
+        // Determine loop type from first token
+        let first = tokens[0].to_string();
+        match first.as_str() {
+            "for" => self.data.loop_type = LoopType::For,
+            "while" => self.data.loop_type = LoopType::While,
+            "do" => self.data.loop_type = LoopType::DoWhile,
+            _ => return false,
+        }
+
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
-        // Try matching against our patterns
+        // Try pattern matching for confidence
         let mut best_confidence = 0.0;
         for (pattern, _) in self.patterns() {
             if let Some(confidence) = pattern.matches_tokens(&token_strs) {
@@ -254,43 +259,11 @@ impl Processor for LoopHandler {
             }
         }
 
-        if best_confidence > 0.0 {
-            self.confidence = best_confidence;
-        }
-
-        // Determine loop type from first token
-        let first = tokens[0].to_string();
-        let is_loop = match first.as_str() {
-            "for" => {
-                self.data.loop_type = LoopType::For;
-                true
-            }
-            "while" => {
-                self.data.loop_type = LoopType::While;
-                true
-            }
-            "do" => {
-                self.data.loop_type = LoopType::DoWhile;
-                true
-            }
-            _ => false,
-        };
-
-        if !is_loop {
-            return false;
-        }
-
-        // Use keyword validation to verify control flow sequence
+        // Use keyword validation to adjust confidence
         let validator = SequenceValidator::new();
         let validation_result = validator.validate_control_flow(tokens);
-
-        // Adjust confidence based on validation
-        let base_confidence = if best_confidence > 0.0 {
-            best_confidence
-        } else {
-            0.8
-        };
-        self.confidence = validation_result.adjust_confidence(base_confidence);
+        let base = if best_confidence > 0.0 { best_confidence } else { 0.8 };
+        self.confidence = validation_result.adjust_confidence(base);
 
         true
     }
@@ -770,13 +743,12 @@ impl LoopHandler {
             return format!("{}todo!()", indent);
         }
 
-        // Create routing decision for tracking
-        let _routing_id = crate::db::routing::create_routing(
-            "LoopHandler",
-            "function_definition",
-            0..self.data.body_tokens.len(),
-            self.data.body_tokens.clone(),
-            "loop body statements",
+        // Register route for tracking
+        use crate::db::routing::Route;
+        let _route_id = crate::system::system().register_route(
+            Route::new("LoopHandler", "FunctionHandler")
+                .with_reason("loop body statements")
+                .with_range(0, self.data.body_tokens.len())
         );
 
         // Split into statements and convert each
@@ -901,8 +873,56 @@ impl LoopHandler {
 
     /// Convert condition expression
     fn convert_condition(&mut self, cond: &str) -> String {
-        let converted = self.convert_identifiers_in_expr(cond);
+        // Convert arrow operators first
+        let converted = Self::convert_arrow_operator(cond);
+        let converted = self.convert_identifiers_in_expr(&converted);
         converted.replace("NULL", "std::ptr::null()")
+    }
+
+    /// Convert C arrow operator (ptr->field or ptr -> field) to Rust (*ptr).field
+    fn convert_arrow_operator(expr: &str) -> String {
+        let mut result = expr.to_string();
+        
+        // Handle spaced arrow: "ptr -> field" -> "(*ptr).field"
+        while let Some(arrow_pos) = result.find(" -> ") {
+            let before = &result[..arrow_pos];
+            let after = &result[arrow_pos + 4..];
+            
+            let ptr_name = before.split_whitespace().last().unwrap_or("");
+            let prefix = if before.len() > ptr_name.len() {
+                &before[..before.len() - ptr_name.len()]
+            } else {
+                ""
+            };
+            
+            let field_end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+            let field = &after[..field_end];
+            let suffix = &after[field_end..];
+            
+            result = format!("{}(*{}).{}{}", prefix, ptr_name, field, suffix);
+        }
+        
+        // Handle non-spaced arrow: "ptr->field" -> "(*ptr).field"
+        while let Some(arrow_pos) = result.find("->") {
+            if arrow_pos > 0 && result.chars().nth(arrow_pos - 1) == Some(')') {
+                break;
+            }
+            
+            let before = &result[..arrow_pos];
+            let after = &result[arrow_pos + 2..];
+            
+            let ptr_start = before.rfind(|c: char| !c.is_alphanumeric() && c != '_').map(|p| p + 1).unwrap_or(0);
+            let ptr_name = &before[ptr_start..];
+            let prefix = &before[..ptr_start];
+            
+            let field_end = after.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(after.len());
+            let field = &after[..field_end];
+            let suffix = &after[field_end..];
+            
+            result = format!("{}(*{}).{}{}", prefix, ptr_name, field, suffix);
+        }
+        
+        result
     }
 
     /// Convert update expression
@@ -928,15 +948,17 @@ impl LoopHandler {
         format!("{};", update)
     }
 
-    /// Convert identifiers in an expression using the id_converter
+    /// Convert identifiers in an expression using the id_converter and sanitize Rust keywords
     fn convert_identifiers_in_expr(&mut self, expr: &str) -> String {
         let tokens: Vec<&str> = expr.split_whitespace().collect();
         let converted: Vec<String> = tokens
             .iter()
             .map(|t| {
                 // Try to convert known identifiers
-                system().lookup_identifier(t)
-                    .unwrap_or_else(|| t.to_string())
+                let converted = system().lookup_identifier(t)
+                    .unwrap_or_else(|| t.to_string());
+                // Sanitize Rust keywords (str -> r#str)
+                sanitize_rust_identifier(&converted)
             })
             .collect();
         converted.join(" ")

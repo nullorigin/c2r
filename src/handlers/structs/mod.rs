@@ -29,6 +29,10 @@ pub struct StructField {
     pub is_pointer: bool,
     /// Array dimensions if any
     pub array_dims: Vec<usize>,
+    /// Bitfield width (if this is a bitfield)
+    pub bitfield_width: Option<u8>,
+    /// Default value for constructor (if any)
+    pub default_value: Option<String>,
 }
 
 /// A struct definition (possibly extracted from nesting)
@@ -90,124 +94,82 @@ pub struct StructData {
     pub nested_structs: Vec<StructDef>,
     /// Typedef alias if any
     pub typedef_alias: Option<String>,
+    /// Is this a forward declaration (struct Name;)
+    pub is_forward_declaration: bool,
 }
 
 /// Handler for C struct definitions
 #[derive(Debug)]
 pub struct StructHandler {
-    name: String,
     stage: ProcessStage,
     confidence: f64,
     error: Option<String>,
     output: Option<String>,
     data: StructData,
-    range: Range<usize>,
-    input_tokens: Vec<String>,
 }
 
 impl StructHandler {
     pub fn new() -> Self {
         Self {
-            name: "struct".to_string(),
             stage: ProcessStage::Pending,
             confidence: 0.0,
             error: None,
             output: None,
             data: StructData::default(),
-            range: 0..0,
-            input_tokens: Vec::new(),
         }
     }
-
     /// Convert struct initialization from tokens (called from DefinitionHandler)
     /// Converts C-style { val1, val2 } to Rust StructName { field1: val1, field2: val2 }
     pub fn convert_init_from_tokens(struct_name: &str, tokens: &[&str]) -> String {
-        Self::convert_struct_init_recursive(struct_name, tokens)
-    }
-
-    /// Recursive struct initialization conversion
-    fn convert_struct_init_recursive(struct_name: &str, tokens: &[&str]) -> String {
-        // Extract values between braces, keeping track of nested braces
-        let mut values: Vec<(String, bool)> = Vec::new(); // (value, is_nested_struct)
+        // Extract values between braces
+        let mut values: Vec<String> = Vec::new();
         let mut depth = 0;
         let mut current: Vec<String> = Vec::new();
-        let mut current_is_nested = false;
 
         for token in tokens {
             match *token {
                 "{" => {
-                    if depth > 0 {
-                        current.push(token.to_string());
-                        current_is_nested = true;
-                    }
                     depth += 1;
+                    if depth > 1 {
+                        current.push(token.to_string());
+                    }
                 }
                 "}" => {
                     depth -= 1;
                     if depth > 0 {
                         current.push(token.to_string());
-                    } else if depth == 0 && !current.is_empty() {
-                        values.push((current.join(" "), current_is_nested));
+                    } else if !current.is_empty() {
+                        values.push(current.join(" "));
                         current.clear();
-                        current_is_nested = false;
                     }
                 }
-                "," => {
-                    if depth == 1 {
-                        if !current.is_empty() {
-                            values.push((current.join(" "), current_is_nested));
-                            current.clear();
-                            current_is_nested = false;
-                        }
-                    } else {
-                        current.push(token.to_string());
+                "," if depth == 1 => {
+                    if !current.is_empty() {
+                        values.push(current.join(" "));
+                        current.clear();
                     }
                 }
-                _ => {
-                    current.push(Self::convert_literal(token));
-                }
+                _ => current.push(Self::convert_literal(token)),
             }
         }
 
-        // Look up struct fields and types from registered struct constructors
-        let field_names = crate::system::system()
-            .lookup_struct_fields(struct_name)
+        let sys = crate::system::system();
+        let field_names = sys.lookup_struct_fields(struct_name)
             .unwrap_or_else(|| (0..values.len()).map(|i| format!("field{}", i)).collect());
+        let field_types = sys.lookup_struct_field_types(struct_name)
+            .unwrap_or_else(|| vec![String::new(); values.len()]);
 
-        let field_types = crate::system::system()
-            .lookup_struct_field_types(struct_name)
-            .unwrap_or_else(|| (0..values.len()).map(|_| String::new()).collect());
-
-        // Build Rust struct initialization with field names
-        let fields: Vec<String> = values
-            .iter()
+        let fields: Vec<String> = values.iter()
             .zip(field_names.iter())
             .zip(field_types.iter())
-            .map(|(((v, is_nested), f), t)| {
-                let value = v.trim();
-                if *is_nested && !t.is_empty() {
-                    // This is a nested struct initialization - recursively convert
-                    // The value already contains the braces, so just split and convert
-                    let nested_tokens_owned: Vec<String> =
-                        value.split_whitespace().map(|s| s.to_string()).collect();
-
-                    // If it doesn't start with brace, wrap it
-                    let wrapped: Vec<String>;
-                    let nested_refs: Vec<&str> =
-                        if nested_tokens_owned.first().map(|s| s.as_str()) == Some("{") {
-                            nested_tokens_owned.iter().map(|s| s.as_str()).collect()
-                        } else {
-                            wrapped = std::iter::once("{".to_string())
-                                .chain(nested_tokens_owned.iter().cloned())
-                                .chain(std::iter::once("}".to_string()))
-                                .collect();
-                            wrapped.iter().map(|s| s.as_str()).collect()
-                        };
-
-                    let nested_init = Self::convert_struct_init_recursive(t, &nested_refs);
-                    format!("{}: {}", f, nested_init)
+            .map(|((value, field), field_type)| {
+                let trimmed = value.trim();
+                if trimmed.starts_with('{') && field_type.contains(struct_name) {
+                    let nested_tokens: Vec<&str> = trimmed.split_whitespace().collect();
+                    let refs: Vec<&str> = nested_tokens.iter().map(|s| s.clone()).collect();
+                    format!("{}: {}", field, Self::convert_init_from_tokens(field_type, &refs))
                 } else {
-                    format!("{}: {}", f, value)
+                    format!("{}: {}", field, trimmed)
                 }
             })
             .collect();
@@ -218,16 +180,26 @@ impl StructHandler {
     /// Convert C literals to Rust literals (e.g., float suffixes)
     fn convert_literal(token: &str) -> String {
         let token = token.trim();
-        // Check if it's a float literal (contains . but not already suffixed)
-        if token.contains('.') && !token.ends_with("f32") && !token.ends_with("f64") {
-            // Check if it looks like a number
-            let is_float = token
-                .chars()
-                .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c == '+');
-            if is_float {
-                return format!("{}f64", token);
+        
+        // Handle C float suffix (e.g., 1.0f -> 1.0_f32)
+        if let Some(stripped) = token.strip_suffix('f').or_else(|| token.strip_suffix('F')) {
+            if stripped.parse::<f64>().is_ok() {
+                return format!("{}_f32", stripped);
             }
         }
+        
+        // Check if it's an unsuffixed float literal
+        if token.contains('.') && !token.ends_with("f32") && !token.ends_with("f64") {
+            if token.parse::<f64>().is_ok() {
+                return format!("{}_f64", token);
+            }
+        }
+        
+        // Handle NULL -> std::ptr::null() or std::ptr::null_mut()
+        if token == "NULL" {
+            return "std::ptr::null_mut()".to_string();
+        }
+        
         token.to_string()
     }
 }
@@ -239,16 +211,47 @@ impl Default for StructHandler {
 }
 
 impl Processor for StructHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
-        &["struct_definition", "struct_declaration", "typedef_struct"]
+        &["struct_forward_declaration", "struct_definition", "struct_declaration", "typedef_struct"]
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
         vec![
+            // Forward declaration pattern: struct Name; (high priority, exactly 3 tokens)
+            (
+                Pattern::definition(
+                    399,
+                    "struct_forward_declaration",
+                    vec![
+                        PatternRule::exact("struct"),
+                        PatternRule::identifier(),
+                        PatternRule::exact(";"),
+                    ],
+                )
+                .with_category("struct")
+                .with_priority(150)  // Higher than variable handler (85)
+                .with_min_tokens(3)
+                .with_description("C struct forward declaration"),
+                Pattern::definition(
+                    399,
+                    "extract_struct_forward_declaration",
+                    vec![
+                        PatternRule::exact("struct"),
+                        PatternRule::identifier().with_extract(|rule, ctx| {
+                            let token = ctx.current_token.clone();
+                            if ctx.did_match {
+                                ctx.set_value("tag_name", &token);
+                            }
+                            rule.clone()
+                        }),
+                        PatternRule::exact(";"),
+                    ],
+                )
+                .with_category("struct")
+                .with_priority(150)
+                .with_min_tokens(3)
+                .with_description("C struct forward declaration"),
+            ),
             (
                 Pattern::definition(
                     400,
@@ -388,40 +391,38 @@ impl Processor for StructHandler {
     }
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
-        if tokens.len() < 4 {
-            self.error = Some("Too few tokens for struct".to_string());
-            return false;
+        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+
+        // Check for forward declaration: "struct Name ;" (3 tokens, no body)
+        if token_strs.len() == 3 && token_strs[0] == "struct" && token_strs[2] == ";" {
+            // This is a forward declaration - mark it and register the type
+            self.data.is_forward_declaration = true;
+            self.data.main_struct.name = token_strs[1].clone();
+            self.confidence = 0.9;
+            return true;
         }
 
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
-
-        // Try matching against our patterns
+        // Pattern matching handles min_tokens and "struct" keyword
         let mut best_confidence = 0.0;
         for (pattern, _) in self.patterns() {
-            if let Some(confidence) = pattern.matches_tokens(&self.input_tokens) {
+            if let Some(confidence) = pattern.matches_tokens(&token_strs) {
                 if confidence > best_confidence {
                     best_confidence = confidence;
                 }
             }
         }
 
-        // Check for struct keyword
-        let first = tokens[0].to_string();
-        let has_struct = first == "struct"
-            || (first == "typedef" && tokens.len() > 1 && tokens[1].to_string() == "struct");
-
-        if !has_struct {
+        if best_confidence == 0.0 {
             self.error = Some("Not a struct definition".to_string());
             return false;
         }
 
-        // Must have braces for definition (not just for initialization)
-        let brace_pos = self.input_tokens.iter().position(|t| t == "{");
-        let paren_pos = self.input_tokens.iter().position(|t| t == "(");
-        let equals_pos = self.input_tokens.iter().position(|t| t == "=");
+        // Additional checks: reject function returns and variable inits
+        let brace_pos = token_strs.iter().position(|t| t == "{");
+        let paren_pos = token_strs.iter().position(|t| t == "(");
+        let equals_pos = token_strs.iter().position(|t| t == "=");
 
-        // If there's a ( before {, this is a function returning a struct, not a struct definition
+        // If ( before {, this is a function returning struct
         if let (Some(pp), Some(br)) = (paren_pos, brace_pos) {
             if pp < br {
                 self.error = Some("Function returning struct, not struct definition".to_string());
@@ -429,7 +430,7 @@ impl Processor for StructHandler {
             }
         }
 
-        // If there's an = before {, this is a variable initialization, not a struct definition
+        // If = before {, this is variable initialization
         if let (Some(eq), Some(br)) = (equals_pos, brace_pos) {
             if eq < br {
                 self.error = Some("Struct variable initialization, not definition".to_string());
@@ -437,22 +438,10 @@ impl Processor for StructHandler {
             }
         }
 
-        if brace_pos.is_none() {
-            self.error = Some("Struct must have body".to_string());
-            return false;
-        }
-
-        // Use keyword validation to check sequence
+        // Use keyword validation to adjust confidence
         let validator = SequenceValidator::new();
         let validation_result = validator.validate_type_declaration(tokens);
-
-        // Adjust confidence based on both pattern matching and keyword validation
-        let base_confidence = if best_confidence > 0.0 {
-            best_confidence
-        } else {
-            0.7
-        };
-        self.confidence = validation_result.adjust_confidence(base_confidence);
+        self.confidence = validation_result.adjust_confidence(best_confidence);
 
         true
     }
@@ -490,7 +479,7 @@ impl Processor for StructHandler {
 
                 // If still no name, generate one
                 if self.data.main_struct.name.is_empty() {
-                    self.data.main_struct.name = format!("AnonymousStruct{}", self.range.start);
+                    self.data.main_struct.name = "AnonymousStruct".to_string();
                     self.data.main_struct.is_anonymous = true;
                 }
 
@@ -554,7 +543,7 @@ impl Processor for StructHandler {
 
         // If still no name, generate one
         if self.data.main_struct.name.is_empty() {
-            self.data.main_struct.name = format!("AnonymousStruct{}", self.range.start);
+            self.data.main_struct.name = "AnonymousStruct".to_string();
             self.data.main_struct.is_anonymous = true;
         }
 
@@ -562,6 +551,17 @@ impl Processor for StructHandler {
     }
 
     fn convert(&mut self) -> Option<String> {
+        // Handle forward declarations: register type but don't output anything
+        // The type registration allows pointer types like *mut Node to work before struct is defined
+        if self.data.is_forward_declaration {
+            let name = &self.data.main_struct.name;
+            // Register the struct type so it can be used in pointer types
+            crate::system::system().register_struct(name, name);
+            // Return empty string - forward declarations don't need output in Rust
+            self.output = Some(String::new());
+            return self.output.clone();
+        }
+
         let mut output = String::new();
 
         // Register nested structs first
@@ -732,6 +732,8 @@ impl StructHandler {
                             rust_type: nested_name,
                             is_pointer: false,
                             array_dims: Vec::new(),
+                            bitfield_width: None,
+                            default_value: None,
                         };
                         self.data.main_struct.fields.push(field);
                         i += 1;
@@ -776,20 +778,52 @@ impl StructHandler {
             return Some((func_ptr, semi_pos + 1));
         }
 
+        // Check for initialization value: type name = value
+        let equals_pos = field_tokens.iter().position(|t| t == "=");
+        let mut default_value: Option<String> = None;
+        let init_end = if let Some(eq) = equals_pos {
+            // Capture everything after = as the initial value
+            if eq + 1 < field_tokens.len() {
+                let value_tokens: Vec<&str> = field_tokens[eq + 1..]
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                default_value = Some(value_tokens.join(" "));
+            }
+            eq // Field declaration ends at equals sign
+        } else {
+            field_tokens.len()
+        };
+
+        // Check for bitfield: type name : width (within the non-init portion)
+        let colon_pos = field_tokens[..init_end].iter().position(|t| t == ":");
+        let mut bitfield_width: Option<u8> = None;
+        let effective_end = if let Some(cp) = colon_pos {
+            // Parse bitfield width
+            if cp + 1 < init_end {
+                if let Ok(width) = field_tokens[cp + 1].parse::<u8>() {
+                    bitfield_width = Some(width);
+                }
+            }
+            cp // Field name is before the colon
+        } else {
+            init_end
+        };
+
         // Check for pointer
-        let is_pointer = field_tokens.iter().any(|t| t == "*");
+        let is_pointer = field_tokens[..effective_end].iter().any(|t| t == "*");
 
         // Check for array
-        let bracket_pos = field_tokens.iter().position(|t| t == "[");
+        let bracket_pos = field_tokens[..effective_end].iter().position(|t| t == "[");
         let mut array_dims = Vec::new();
 
         if let Some(bp) = bracket_pos {
             // Parse array dimensions
             let mut j = bp;
-            while j < field_tokens.len() {
+            while j < effective_end {
                 if field_tokens[j] == "[" {
                     j += 1;
-                    if j < field_tokens.len() && field_tokens[j] != "]" {
+                    if j < effective_end && field_tokens[j] != "]" {
                         if let Ok(dim) = field_tokens[j].parse::<usize>() {
                             array_dims.push(dim);
                         }
@@ -801,8 +835,8 @@ impl StructHandler {
             }
         }
 
-        // Name is before [ or at end
-        let name_pos = bracket_pos.unwrap_or(field_tokens.len()) - 1;
+        // Name is before [ or : or at end
+        let name_pos = bracket_pos.unwrap_or(effective_end) - 1;
         if name_pos == 0 {
             return None;
         }
@@ -826,6 +860,8 @@ impl StructHandler {
                 rust_type,
                 is_pointer,
                 array_dims,
+                bitfield_width,
+                default_value,
             },
             semi_pos + 1,
         ))
@@ -914,6 +950,8 @@ impl StructHandler {
             rust_type,
             is_pointer: false,
             array_dims: Vec::new(),
+            bitfield_width: None,
+            default_value: None,
         })
     }
 
@@ -964,6 +1002,9 @@ impl StructHandler {
     fn convert_struct_def(&self, def: &StructDef) -> String {
         let mut output = String::new();
 
+        // Check if struct has bitfields
+        let has_bitfields = def.fields.iter().any(|f| f.bitfield_width.is_some());
+
         output.push_str("#[repr(C)]\n");
         output.push_str("#[derive(Debug, Clone)]\n");
         output.push_str(&format!("pub struct {} {{\n", def.name));
@@ -989,11 +1030,114 @@ impl StructHandler {
                 field.rust_type.clone()
             };
 
+            // Add bitfield comment if applicable
+            if let Some(width) = field.bitfield_width {
+                output.push_str(&format!("    /// Bitfield: {} bits\n", width));
+            }
             output.push_str(&format!("    pub {}: {},\n", field.name, rust_type));
         }
 
-        output.push_str("}");
+        output.push_str("}\n");
+
+        // Generate new() constructor if struct has bitfields (need default initialization)
+        if has_bitfields {
+            output.push_str(&self.generate_constructor(def));
+        }
+
         output
+    }
+
+    /// Generate constructors for the struct (new() with defaults and new_with() with parameters)
+    fn generate_constructor(&self, def: &StructDef) -> String {
+        let mut output = String::new();
+        
+        output.push_str(&format!("\nimpl {} {{\n", def.name));
+        
+        // Generate new() with default values
+        output.push_str("    /// Create a new instance with default values\n");
+        output.push_str("    pub fn new() -> Self {\n");
+        output.push_str("        Self {\n");
+
+        for field in &def.fields {
+            let default_val = if let Some(ref val) = field.default_value {
+                val.clone()
+            } else if field.is_pointer {
+                "std::ptr::null_mut()".to_string()
+            } else if !field.array_dims.is_empty() {
+                // Check if char array
+                let is_char_array = field.c_type == "char" || field.c_type == "signed char" 
+                    || field.c_type == "unsigned char";
+                if is_char_array {
+                    "\"\"".to_string()
+                } else {
+                    // Default array
+                    let inner_default = self.get_default_for_type(&field.rust_type);
+                    format!("[{}; {}]", inner_default, field.array_dims.first().unwrap_or(&0))
+                }
+            } else if field.bitfield_width.is_some() {
+                // Bitfields default to 0
+                "0".to_string()
+            } else {
+                self.get_default_for_type(&field.rust_type)
+            };
+            output.push_str(&format!("            {}: {},\n", field.name, default_val));
+        }
+
+        output.push_str("        }\n");
+        output.push_str("    }\n\n");
+
+        // Generate new_with() that takes parameters for all fields
+        output.push_str("    /// Create a new instance with specified values\n");
+        let params: Vec<String> = def.fields.iter().map(|f| {
+            let rust_type = self.get_field_rust_type(f);
+            format!("{}: {}", f.name, rust_type)
+        }).collect();
+        output.push_str(&format!("    pub fn new_with({}) -> Self {{\n", params.join(", ")));
+        output.push_str("        Self {\n");
+        for field in &def.fields {
+            output.push_str(&format!("            {},\n", field.name));
+        }
+        output.push_str("        }\n");
+        output.push_str("    }\n");
+        
+        output.push_str("}\n");
+
+        output
+    }
+
+    /// Get the Rust type for a field (for constructor parameter)
+    fn get_field_rust_type(&self, field: &StructField) -> String {
+        if field.is_pointer {
+            format!("*mut {}", field.rust_type)
+        } else if !field.array_dims.is_empty() {
+            let is_char_array = field.c_type == "char" || field.c_type == "signed char" 
+                || field.c_type == "unsigned char";
+            if is_char_array {
+                "&'static str".to_string()
+            } else {
+                let mut arr_type = field.rust_type.clone();
+                for dim in field.array_dims.iter().rev() {
+                    arr_type = format!("[{}; {}]", arr_type, dim);
+                }
+                arr_type
+            }
+        } else {
+            field.rust_type.clone()
+        }
+    }
+
+    /// Get default value for a Rust type
+    fn get_default_for_type(&self, rust_type: &str) -> String {
+        match rust_type {
+            "i8" | "i16" | "i32" | "i64" | "i128" | "isize" => "0".to_string(),
+            "u8" | "u16" | "u32" | "u64" | "u128" | "usize" => "0".to_string(),
+            "f32" | "f64" => "0.0".to_string(),
+            "bool" => "false".to_string(),
+            "char" => "'\\0'".to_string(),
+            t if t.starts_with("*") => "std::ptr::null_mut()".to_string(),
+            t if t.starts_with("Option<") => "None".to_string(),
+            _ => format!("{}::new()", rust_type), // Assume struct with new()
+        }
     }
 }
 

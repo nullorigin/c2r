@@ -10,6 +10,7 @@
 //! - `TokenRange`: Range/window for token processing
 //! - `Tokenizer`: The core tokenization engine for C code
 
+use crate::db::keyword::is_c_type_keyword;
 use crate::db::web::{Build, Entry};
 use std::collections::HashMap;
 use std::fmt::{self, Display};
@@ -82,14 +83,22 @@ impl Build for TokenRange {
             attrs.insert("line_end".to_string(), Entry::usize(line));
         }
         Entry::node_with_attrs(
-            "token_range",
+            "TokenRange",
             &format!("{}..{}", self.start, self.end),
             attrs,
         )
     }
 
     fn kind(&self) -> &str {
-        "token_range"
+        "TokenRange"
+    }
+
+    fn name(&self) -> Option<&str> {
+        None
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("token")
     }
 }
 
@@ -144,14 +153,19 @@ impl TokenType {
     pub fn from_entry(entry: &Entry) -> Self {
         match entry {
             Entry::String(s, _) => {
-                if is_c_keyword(s) {
+                if is_c_type_keyword(s) || crate::system::system().lookup_type(s).is_some() {
+                    TokenType::Type
+                } else if is_c_keyword(s) {
                     TokenType::Keyword
                 } else {
                     TokenType::Identifier
                 }
             }
             Entry::Char(c, _) => {
-                if is_c_keyword(&c.to_string()) {
+                let cs = c.to_string();
+                if is_c_type_keyword(&cs) || crate::system::system().lookup_type(&cs).is_some() {
+                    TokenType::Type
+                } else if is_c_keyword(&cs) {
                     TokenType::Keyword
                 } else if c.is_ascii_punctuation() {
                     TokenType::Punctuation
@@ -319,7 +333,9 @@ impl Token {
     /// Create a token from a string, auto-detecting type
     pub fn from_string(value: impl Into<String>) -> Self {
         let s = value.into();
-        let token_type = if is_c_keyword(&s) {
+        let token_type = if is_c_type_keyword(&s) || crate::system::system().lookup_type(&s).is_some() {
+            TokenType::Type
+        } else if is_c_keyword(&s) {
             TokenType::Keyword
         } else {
             TokenType::Identifier
@@ -414,6 +430,15 @@ impl Token {
         matches!(self.token_type, TokenType::Keyword)
     }
 
+    pub fn is_type(&self) -> bool {
+        matches!(self.token_type, TokenType::Type)
+    }
+
+    /// Check if token is a keyword or type (for type-related checks)
+    pub fn is_keyword_or_type(&self) -> bool {
+        matches!(self.token_type, TokenType::Keyword | TokenType::Type)
+    }
+
     pub fn is_consumed(&self) -> bool {
         matches!(self.token_type, TokenType::Consumed)
     }
@@ -437,7 +462,7 @@ impl Token {
     pub fn is_string_like(&self) -> bool {
         matches!(
             self.token_type,
-            TokenType::Identifier | TokenType::Literal | TokenType::Keyword
+            TokenType::Identifier | TokenType::Literal | TokenType::Keyword | TokenType::Type
         )
     }
 
@@ -1300,17 +1325,44 @@ impl Tokenizer {
             }
         }
 
+        // Handle C integer suffixes: u, U, l, L, ul, UL, ll, LL, ull, ULL, etc.
+        // Also handle float suffixes: f, F, l, L
+        if self.position < self.content.len() {
+            let suffix_start = self.position;
+            let mut has_suffix = false;
+            
+            // Check for integer/float suffixes
+            while self.position < self.content.len() {
+                let b = self.content[self.position];
+                if matches!(b, b'u' | b'U' | b'l' | b'L' | b'f' | b'F') {
+                    has_suffix = true;
+                    self.position += 1;
+                } else {
+                    break;
+                }
+            }
+            
+            // If suffix is followed by alphanumeric, it's not a suffix - revert
+            if has_suffix && self.position < self.content.len() {
+                let next = self.content[self.position];
+                if next.is_ascii_alphanumeric() || next == b'_' {
+                    self.position = suffix_start;
+                }
+            }
+        }
+
         let num_str = String::from_utf8_lossy(&self.content[start..self.position]).to_string();
 
         if is_float {
-            if let Ok(f) = num_str.parse::<f64>() {
+            if let Ok(f) = num_str.trim_end_matches(|c| matches!(c, 'f' | 'F' | 'l' | 'L')).parse::<f64>() {
                 Some(token_float(f))
             } else {
                 Some(token(num_str))
             }
-        } else if let Ok(i) = num_str.parse::<i128>() {
-            Some(token_number(i))
         } else {
+            // Strip suffixes for parsing validation, but return token with suffix
+            let clean_num = num_str.trim_end_matches(|c| matches!(c, 'u' | 'U' | 'l' | 'L'));
+            let _ = clean_num.parse::<i128>(); // Validate it's a valid number
             Some(token(num_str))
         }
     }
@@ -1518,9 +1570,9 @@ mod tests {
         let tokens = tokenizer.get_slot(slot_id).unwrap();
         assert!(!tokens.is_empty());
 
-        // Check first token is "int" keyword
+        // Check first token is "int" type
         assert_eq!(tokens[0].name(), Some("int"));
-        assert_eq!(*tokens[0].token_type(), TokenType::Keyword);
+        assert_eq!(*tokens[0].token_type(), TokenType::Type);
     }
 
     #[test]

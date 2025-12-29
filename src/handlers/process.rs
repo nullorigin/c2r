@@ -95,8 +95,6 @@ pub enum ProcessDecision {
 /// Trait defining the handler processing pipeline.
 /// Each handler must implement this trait to participate in the conversion process.
 pub trait Processor: Build {
-    /// Get the handler name
-    fn name(&self) -> &str;
 
     /// Get supported pattern names for this handler
     fn supported_patterns(&self) -> &[&str];
@@ -138,7 +136,7 @@ pub trait Processor: Build {
                         token_idx += 1;
 
                         // Handle repeating rules
-                        if rule.can_repeat != REPEAT_NONE {
+                        if rule.repeatable != REPEAT_NONE {
                             while token_idx < token_strs.len()
                                 && Self::rule_matches(rule, &token_strs[token_idx])
                             {
@@ -222,7 +220,7 @@ pub trait Processor: Build {
                         token_idx += 1;
 
                         // Handle repeating rules
-                        if rule.can_repeat != REPEAT_NONE {
+                        if rule.repeatable != REPEAT_NONE {
                             while token_idx < token_strs.len() {
                                 let next_token = &token_strs[token_idx];
                                 if Self::rule_matches(rule, next_token) {
@@ -364,192 +362,200 @@ pub trait Processor: Build {
 
     /// Determine if this should be routed to another handler.
     /// Returns Some(handler_name) if routing is needed, None otherwise.
-    fn route(&self) -> Option<String> {
-        None // Default: no routing
-    }
-
-    /// Route a statement to the appropriate handler based on its first token.
-    /// This is used by handlers that process bodies (functions, loops, conditionals).
-    /// Returns the converted Rust code for the statement.
-    fn route_statement(&self, tokens: &[Token], source_handler: &str) -> String {
-        use crate::db::routing::{create_routing, set_routing_result};
+    fn route(&self, tokens: &[Token], source: &str) -> Option<String> {
+        use crate::db::routing::Route;
+        use crate::system::system;
 
         if tokens.is_empty() {
-            return String::new();
+            return None;
         }
 
         let first = tokens[0].to_string();
 
-        // Break/continue statements
-        if first == "break" || first == "continue" {
-            return format!("{};", first);
-        }
+        match first.as_str() {
+            "break" => Some("break;".to_string()),
+            "continue" => Some("continue;".to_string()),
+            "return" => {
+                let expr_tokens: Vec<Token> = tokens[1..]
+                    .iter()
+                    .filter(|t| t.to_string() != ";")
+                    .cloned()
+                    .collect();
 
-        // Return statement
-        if first == "return" {
-            let expr_tokens: Vec<Token> = tokens[1..]
-                .iter()
-                .filter(|t| t.to_string() != ";")
-                .cloned()
-                .collect();
-
-            if expr_tokens.is_empty() {
-                return "return;".to_string();
-            }
-
-            use crate::handlers::expressions::ExpressionHandler;
-            let routing_id = create_routing(
-                source_handler,
-                "expression",
-                0..expr_tokens.len(),
-                expr_tokens.clone(),
-                "return expression",
-            );
-
-            let mut handler = ExpressionHandler::new();
-            if handler.validate(&expr_tokens) && handler.extract(&expr_tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "ExpressionHandler");
-                    return format!("return {};", code);
+                if expr_tokens.is_empty() {
+                    return Some("return;".to_string());
                 }
-            }
 
-            let expr: Vec<String> = expr_tokens.iter().map(|t| t.to_string()).collect();
-            return format!("return {};", expr.join(" "));
-        }
+                use crate::handlers::expressions::ExpressionHandler;
+                let route = Route::new(source, "ExpressionHandler").with_reason("return expression").with_range(0, expr_tokens.len());
+                let _id = system().register_route(route);
 
-        // Switch statement
-        if first == "switch" {
-            use crate::handlers::conditionals::SwitchCaseHandler;
-            let routing_id = create_routing(source_handler, "switch", 0..tokens.len(), tokens.to_vec(), "switch statement");
-            let mut handler = SwitchCaseHandler::new();
-            if handler.validate(tokens) && handler.extract(tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "SwitchCaseHandler");
-                    return code;
+                let mut handler = ExpressionHandler::new();
+                if handler.validate(&expr_tokens) && handler.extract(&expr_tokens) {
+                    if let Some(code) = handler.convert() {
+                        return Some(format!("return {};", code));
+                    }
                 }
-            }
-        }
 
-        // If statement
-        if first == "if" {
-            use crate::handlers::conditionals::IfElseHandler;
-            let routing_id = create_routing(source_handler, "if", 0..tokens.len(), tokens.to_vec(), "if statement");
-            let mut handler = IfElseHandler::new();
-            if handler.validate(tokens) && handler.extract(tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "IfElseHandler");
-                    return code;
+                let expr: Vec<String> = expr_tokens.iter().map(|t| t.to_string()).collect();
+                Some(format!("return {};", expr.join(" ")))
+            }
+            "switch" => {
+                use crate::handlers::conditionals::SwitchCaseHandler;
+                let route = Route::new(source, "SwitchCaseHandler").with_reason("switch statement").with_range(0, tokens.len());
+                let _id = system().register_route(route);
+                let mut handler = SwitchCaseHandler::new();
+                if handler.validate(tokens) && handler.extract(tokens) {
+                    if let Some(code) = handler.convert() { return Some(code); }
                 }
+                None
             }
-        }
-
-        // Loop statements
-        if matches!(first.as_str(), "for" | "while" | "do") {
-            use crate::handlers::loops::LoopHandler;
-            let routing_id = create_routing(source_handler, "loop", 0..tokens.len(), tokens.to_vec(), "loop statement");
-            let mut handler = LoopHandler::new();
-            if handler.validate(tokens) && handler.extract(tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "LoopHandler");
-                    return code;
+            "if" => {
+                use crate::handlers::conditionals::IfElseHandler;
+                let route = Route::new(source, "IfElseHandler").with_reason("if statement").with_range(0, tokens.len());
+                let _id = system().register_route(route);
+                let mut handler = IfElseHandler::new();
+                if handler.validate(tokens) && handler.extract(tokens) {
+                    if let Some(code) = handler.convert() { return Some(code); }
                 }
+                None
             }
-        }
-
-        // Printf-style functions
-        if matches!(first.as_str(), "printf" | "fprintf" | "sprintf" | "snprintf" | "puts") {
-            use crate::handlers::expressions::StringFormatHandler;
-            let routing_id = create_routing(source_handler, "string_format", 0..tokens.len(), tokens.to_vec(), "printf-style call");
-            let mut handler = StringFormatHandler::new();
-            if handler.validate(tokens) && handler.extract(tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "StringFormatHandler");
-                    return format!("{};", code);
+            "for" | "while" | "do" => {
+                use crate::handlers::loops::LoopHandler;
+                let route = Route::new(source, "LoopHandler").with_reason("loop statement").with_range(0, tokens.len());
+                let _id = system().register_route(route);
+                let mut handler = LoopHandler::new();
+                if handler.validate(tokens) && handler.extract(tokens) {
+                    if let Some(code) = handler.convert() { return Some(code); }
                 }
+                None
             }
-        }
-
-        // Check for compound assignment early - these should go to ExpressionHandler, not Array/Variable
-        let has_compound_assign = tokens.iter().any(|t| {
-            let s = t.to_string();
-            matches!(s.as_str(), "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
-        });
-
-        // Variable declaration with array (but NOT compound assignments like sum += values[i])
-        if tokens.iter().any(|t| t.to_string() == "[") && !has_compound_assign {
-            use crate::handlers::arrays::ArrayHandler;
-            let routing_id = create_routing(source_handler, "array", 0..tokens.len(), tokens.to_vec(), "array declaration");
-            let mut handler = ArrayHandler::new();
-            if handler.validate(tokens) && handler.extract(tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "ArrayHandler");
-                    return code;
+            "printf" | "fprintf" | "sprintf" | "snprintf" | "puts" => {
+                use crate::handlers::expressions::StringFormatHandler;
+                let route = Route::new(source, "StringFormatHandler").with_reason("printf-style call").with_range(0, tokens.len());
+                let _id = system().register_route(route);
+                let mut handler = StringFormatHandler::new();
+                if handler.validate(tokens) && handler.extract(tokens) {
+                    if let Some(code) = handler.convert() { return Some(format!("{};", code)); }
                 }
+                None
             }
-        }
-
-        // Variable declaration (has standalone = but NOT compound assignment like +=, -=, etc.)
-        let has_simple_assign = tokens.iter().any(|t| {
-            let s = t.to_string();
-            s == "=" // Only match standalone =, not +=, -=, *=, /=, etc.
-        });
-        if (has_simple_assign && !has_compound_assign) || self.is_type_keyword(&first) {
-            use crate::handlers::variables::VariableHandler;
-            let routing_id = create_routing(source_handler, "variable", 0..tokens.len(), tokens.to_vec(), "variable declaration");
-            let mut handler = VariableHandler::new();
-            if handler.validate(tokens) && handler.extract(tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "VariableHandler");
-                    return code;
-                }
-            }
-        }
-
-        // Function call (identifier followed by parentheses) - checked AFTER variable declarations
-        if tokens.len() >= 3 {
-            if let Some(paren_pos) = tokens.iter().position(|t| t.to_string() == "(") {
-                if paren_pos > 0 {
-                    use crate::handlers::functions::CallHandler;
-                    let routing_id = create_routing(source_handler, "call", 0..tokens.len(), tokens.to_vec(), "function call");
-                    let mut handler = CallHandler::new();
-                    if handler.validate(tokens) && handler.extract(tokens) {
-                        if let Some(code) = handler.convert() {
-                            set_routing_result(routing_id, code.clone(), handler.confidence(), "CallHandler");
-                            return format!("{};", code);
+            _ => {
+                // Check for increment/decrement operators - route to expression handler
+                let has_increment = tokens.iter().any(|t| {
+                    let s = t.to_string();
+                    matches!(s.as_str(), "++" | "--")
+                });
+                
+                if has_increment {
+                    let expr_tokens: Vec<Token> = tokens.iter().filter(|t| t.to_string() != ";").cloned().collect();
+                    if !expr_tokens.is_empty() {
+                        use crate::handlers::expressions::ExpressionHandler;
+                        let route = Route::new(source, "ExpressionHandler").with_reason("increment/decrement").with_range(0, expr_tokens.len());
+                        let _id = system().register_route(route);
+                        let mut handler = ExpressionHandler::new();
+                        if handler.validate(&expr_tokens) && handler.extract(&expr_tokens) {
+                            if let Some(code) = handler.convert() { return Some(format!("{};", code)); }
                         }
                     }
                 }
-            }
-        }
 
-        // Fallback: expression
-        let expr_tokens: Vec<Token> = tokens.iter().filter(|t| t.to_string() != ";").cloned().collect();
-        if !expr_tokens.is_empty() {
-            use crate::handlers::expressions::ExpressionHandler;
-            let routing_id = create_routing(source_handler, "expression", 0..expr_tokens.len(), expr_tokens.clone(), "expression");
-            let mut handler = ExpressionHandler::new();
-            if handler.validate(&expr_tokens) && handler.extract(&expr_tokens) {
-                if let Some(code) = handler.convert() {
-                    set_routing_result(routing_id, code.clone(), handler.confidence(), "ExpressionHandler");
-                    return format!("{};", code);
+                // Check for compound assignment early
+                let has_compound_assign = tokens.iter().any(|t| {
+                    let s = t.to_string();
+                    matches!(s.as_str(), "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=")
+                });
+
+                // Check positions of [ and = to distinguish array declarations from array access
+                let bracket_pos = tokens.iter().position(|t| t.to_string() == "[");
+                let eq_pos = tokens.iter().position(|t| t.to_string() == "=");
+                let arrow_pos = tokens.iter().position(|t| t.to_string() == "->");
+                let spaced_arrow = tokens.windows(2).position(|w| w[0].to_string() == "-" && w[1].to_string() == ">");
+                
+                // Array declaration: [ must appear before = (or no =) - this is type name[size]
+                // If [ appears after =, it's an array access in an initializer (e.g., x = arr[i])
+                // If -> appears before [, it's a member array access (e.g., ptr->field[i] = val)
+                let has_arrow_before_bracket = match (arrow_pos.or(spaced_arrow), bracket_pos) {
+                    (Some(a), Some(b)) => a < b,
+                    _ => false,
+                };
+                let is_array_decl = match (bracket_pos, eq_pos) {
+                    (Some(b), Some(e)) => b < e && !has_arrow_before_bracket,  // [ before = means array declaration, unless -> before [
+                    (Some(_), None) => !has_arrow_before_bracket,               // [ with no = is also array declaration, unless -> before [
+                    _ => false,
+                };
+
+                // Variable declaration with array (but NOT compound assignments, NOT array access)
+                if is_array_decl && !has_compound_assign {
+                    use crate::handlers::arrays::ArrayHandler;
+                    let route = Route::new(source, "ArrayHandler").with_reason("array declaration").with_range(0, tokens.len());
+                    let _id = system().register_route(route);
+                    let mut handler = ArrayHandler::new();
+                    if handler.validate(tokens) && handler.extract(tokens) {
+                        if let Some(code) = handler.convert() { return Some(code); }
+                    }
                 }
+
+                // Variable declaration
+                let has_simple_assign = tokens.iter().any(|t| t.to_string() == "=");
+                if (has_simple_assign && !has_compound_assign) || self.is_type_keyword(&first) {
+                    use crate::handlers::variables::VariableHandler;
+                    let route = Route::new(source, "VariableHandler").with_reason("variable declaration").with_range(0, tokens.len());
+                    let _id = system().register_route(route);
+                    let mut handler = VariableHandler::new();
+                    if handler.validate(tokens) && handler.extract(tokens) {
+                        if let Some(code) = handler.convert() { return Some(code); }
+                    }
+                }
+
+                // Function call
+                if tokens.len() >= 3 {
+                    if let Some(paren_pos) = tokens.iter().position(|t| t.to_string() == "(") {
+                        if paren_pos > 0 {
+                            use crate::handlers::functions::CallHandler;
+                            let route = Route::new(source, "CallHandler").with_reason("function call").with_range(0, tokens.len());
+                            let _id = system().register_route(route);
+                            let mut handler = CallHandler::new();
+                            if handler.validate(tokens) && handler.extract(tokens) {
+                                if let Some(code) = handler.convert() { return Some(format!("{};", code)); }
+                            }
+                        }
+                    }
+                }
+
+                // Fallback: expression
+                let expr_tokens: Vec<Token> = tokens.iter().filter(|t| t.to_string() != ";").cloned().collect();
+                if !expr_tokens.is_empty() {
+                    use crate::handlers::expressions::ExpressionHandler;
+                    let route = Route::new(source, "ExpressionHandler").with_reason("expression").with_range(0, expr_tokens.len());
+                    let _id = system().register_route(route);
+                    let mut handler = ExpressionHandler::new();
+                    if handler.validate(&expr_tokens) && handler.extract(&expr_tokens) {
+                        if let Some(code) = handler.convert() { return Some(format!("{};", code)); }
+                    }
+                }
+
+                // Ultimate fallback
+                let strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+                Some(format!("// {}", strs.join(" ")))
             }
         }
-
-        // Ultimate fallback
-        let strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        format!("// {}", strs.join(" "))
     }
 
     /// Check if a token is a C type keyword
     fn is_type_keyword(&self, token: &str) -> bool {
-        matches!(
-            token,
-            "int" | "char" | "short" | "long" | "float" | "double" | "unsigned" | "signed" 
-            | "void" | "size_t" | "ssize_t" | "uint8_t" | "uint16_t" | "uint32_t" | "uint64_t"
-            | "int8_t" | "int16_t" | "int32_t" | "int64_t" | "bool" | "struct" | "enum" | "union"
-        ) || crate::system::system().lookup_type(token).is_some()
+        crate::db::keyword::is_c_type_keyword(token)
+            || matches!(token, "struct" | "enum" | "union")
+            || crate::system::system().lookup_type(token).is_some()
+    }
+
+    /// Route a statement to the appropriate handler.
+    /// Wrapper around route() that returns String instead of Option<String>.
+    fn route_statement(&self, tokens: &[Token], source: &str) -> String {
+        self.route(tokens, source).unwrap_or_else(|| {
+            let strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
+            format!("// {}", strs.join(" "))
+        })
     }
 
     /// Main processing function called iteratively from the processing loop.
@@ -576,15 +582,7 @@ pub trait Processor: Build {
                 }
             }
             ProcessStage::Validated => {
-                // Check routing before extraction
-                if let Some(target) = self.route() {
-                    self.set_stage(ProcessStage::Routed);
-                    return ProcessDecision::Route {
-                        target_handler: target,
-                        reason: "Routing to more specific handler".to_string(),
-                    };
-                }
-
+                // Proceed directly to extraction (routing is handled by route_statement for sub-constructs)
                 if self.extract(tokens) {
                     self.set_stage(ProcessStage::Extracted);
                     ProcessDecision::Continue {
@@ -617,6 +615,8 @@ pub trait Processor: Build {
             }
             ProcessStage::Converted => {
                 self.set_stage(ProcessStage::Complete);
+                // Register this handler to the database if auto-registration is enabled
+                self.register();
                 ProcessDecision::Complete {
                     rust_code: self.output().unwrap_or_default(),
                     confidence: self.confidence(),
@@ -627,7 +627,7 @@ pub trait Processor: Build {
                 confidence: self.confidence(),
             },
             ProcessStage::Routed => ProcessDecision::Route {
-                target_handler: self.route().unwrap_or_default(),
+                target_handler: self.route(tokens, self.name().unwrap_or("unknown")).unwrap_or_default(),
                 reason: "Already routed".to_string(),
             },
             ProcessStage::Failed => ProcessDecision::Fail {

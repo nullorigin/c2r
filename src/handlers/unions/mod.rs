@@ -90,27 +90,21 @@ pub struct UnionData {
 /// Handler for C union definitions
 #[derive(Debug)]
 pub struct UnionHandler {
-    name: String,
     stage: ProcessStage,
     confidence: f64,
     error: Option<String>,
     output: Option<String>,
     data: UnionData,
-    range: Range<usize>,
-    input_tokens: Vec<String>,
 }
 
 impl UnionHandler {
     pub fn new() -> Self {
         Self {
-            name: "union".to_string(),
             stage: ProcessStage::Pending,
             confidence: 0.0,
             error: None,
             output: None,
             data: UnionData::default(),
-            range: 0..0,
-            input_tokens: Vec::new(),
         }
     }
 }
@@ -122,10 +116,6 @@ impl Default for UnionHandler {
 }
 
 impl Processor for UnionHandler {
-    fn name(&self) -> &str {
-        &self.name
-    }
-
     fn supported_patterns(&self) -> &[&str] {
         &[
             "validate_union_definition",
@@ -281,13 +271,12 @@ impl Processor for UnionHandler {
             return false;
         }
 
-        self.input_tokens = tokens.iter().map(|t| t.to_string()).collect();
-        self.range = 0..tokens.len();
+        let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
         // Try matching against our patterns
         let mut best_confidence = 0.0;
         for (pattern, _) in self.patterns() {
-            if let Some(confidence) = pattern.matches_tokens(&self.input_tokens) {
+            if let Some(confidence) = pattern.matches_tokens(&token_strs) {
                 if confidence > best_confidence {
                     best_confidence = confidence;
                 }
@@ -305,7 +294,7 @@ impl Processor for UnionHandler {
         }
 
         // Must have braces for definition
-        let has_brace = self.input_tokens.iter().any(|t| t == "{");
+        let has_brace = token_strs.iter().any(|t| t == "{");
         if !has_brace {
             self.error = Some("Union must have body".to_string());
             return false;
@@ -352,7 +341,7 @@ impl Processor for UnionHandler {
 
                 // If still no name, generate one
                 if self.data.main_union.name.is_empty() {
-                    self.data.main_union.name = format!("AnonymousUnion{}", self.range.start);
+                    self.data.main_union.name = "AnonymousUnion".to_string();
                     self.data.main_union.is_anonymous = true;
                 }
 
@@ -416,7 +405,7 @@ impl Processor for UnionHandler {
 
         // If still no name, generate one
         if self.data.main_union.name.is_empty() {
-            self.data.main_union.name = format!("AnonymousUnion{}", self.range.start);
+            self.data.main_union.name = "AnonymousUnion".to_string();
             self.data.main_union.is_anonymous = true;
         }
 
