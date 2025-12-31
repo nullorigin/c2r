@@ -3,13 +3,11 @@
 //! Converts C union definitions to Rust unions.
 //! Handles nested unions by flattening them (Rust doesn't support nested union definitions).
 
-use crate::db::convert::TypeConverter;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
-use crate::system;
-use std::ops::Range;
+use crate::handlers::process::{ProcessorStage, Processor, ProcessorState, ProcessorStats};
+use crate::system::system;
 
 // ============================================================================
 // Union Handler Implementation
@@ -87,25 +85,41 @@ pub struct UnionData {
     pub typedef_alias: Option<String>,
 }
 
+impl Build for UnionData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("UnionData", &self.main_union.name);
+        entry.set_attr("union_name", Entry::string(&self.main_union.name));
+        entry.set_attr("field_count", Entry::usize(self.main_union.fields.len()));
+        entry.set_attr("nested_count", Entry::usize(self.nested_types.len()));
+        if let Some(ref alias) = self.typedef_alias {
+            entry.set_attr("typedef_alias", Entry::string(alias));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "UnionData"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.main_union.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("union")
+    }
+}
+
 /// Handler for C union definitions
 #[derive(Debug)]
 pub struct UnionHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: UnionData,
+    /// Generic processor state
+    state: ProcessorState<UnionData>,
 }
 
 impl UnionHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: UnionData::default(),
-        }
+        Self { state: ProcessorState::new("UnionHandler") }
     }
 }
 
@@ -123,6 +137,11 @@ impl Processor for UnionHandler {
             "validate_typedef_union",
             "extract_typedef_union",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -267,7 +286,7 @@ impl Processor for UnionHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.len() < 4 {
-            self.error = Some("Too few tokens for union".to_string());
+            self.state.set_error("Too few tokens for union".to_string());
             return false;
         }
 
@@ -289,22 +308,22 @@ impl Processor for UnionHandler {
             || (first == "typedef" && tokens.len() > 1 && tokens[1].to_string() == "union");
 
         if !has_union {
-            self.error = Some("Not a union definition".to_string());
+            self.state.set_error("Not a union definition".to_string());
             return false;
         }
 
         // Must have braces for definition
         let has_brace = token_strs.iter().any(|t| t == "{");
         if !has_brace {
-            self.error = Some("Union must have body".to_string());
+            self.state.set_error("Union must have body".to_string());
             return false;
         }
 
-        self.confidence = if best_confidence > 0.0 {
+        self.state.set_confidence(if best_confidence > 0.0 {
             best_confidence
         } else {
             0.7
-        };
+        });
         true
     }
 
@@ -316,21 +335,21 @@ impl Processor for UnionHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get tag name from pattern extraction
                 if let Some(tag_name) = ctx.value("tag_name") {
-                    self.data.main_union.name = tag_name.to_string();
+                    self.state.data.main_union.name = tag_name.to_string();
                 }
 
                 // Get type_name (typedef alias) from pattern extraction
                 if let Some(type_name) = ctx.value("type_name") {
-                    self.data.typedef_alias = Some(type_name.to_string());
-                    if self.data.main_union.name.is_empty() {
-                        self.data.main_union.name = type_name.to_string();
+                    self.state.data.typedef_alias = Some(type_name.to_string());
+                    if self.state.data.main_union.name.is_empty() {
+                        self.state.data.main_union.name = type_name.to_string();
                     }
                 }
 
                 // Get var_name (variable instance) from pattern extraction
                 if let Some(var_name) = ctx.value("var_name") {
-                    if self.data.main_union.name.is_empty() {
-                        self.data.main_union.name = var_name.to_string();
+                    if self.state.data.main_union.name.is_empty() {
+                        self.state.data.main_union.name = var_name.to_string();
                     }
                 }
 
@@ -340,9 +359,9 @@ impl Processor for UnionHandler {
                 }
 
                 // If still no name, generate one
-                if self.data.main_union.name.is_empty() {
-                    self.data.main_union.name = "AnonymousUnion".to_string();
-                    self.data.main_union.is_anonymous = true;
+                if self.state.data.main_union.name.is_empty() {
+                    self.state.data.main_union.name = "AnonymousUnion".to_string();
+                    self.state.data.main_union.is_anonymous = true;
                 }
 
                 return true;
@@ -359,7 +378,7 @@ impl Processor for UnionHandler {
 
         // Skip "union"
         if token_strs.get(idx) != Some(&"union".to_string()) {
-            self.error = Some("Expected 'union' keyword".to_string());
+            self.state.set_error("Expected 'union' keyword".to_string());
             return false;
         }
         idx += 1;
@@ -368,20 +387,20 @@ impl Processor for UnionHandler {
         let brace_pos = match token_strs.iter().position(|t| t == "{") {
             Some(p) => p,
             None => {
-                self.error = Some("No opening brace found".to_string());
+                self.state.set_error("No opening brace found".to_string());
                 return false;
             }
         };
 
         // Name is between union and {
         if idx < brace_pos {
-            self.data.main_union.name = token_strs[idx].clone();
+            self.state.data.main_union.name = token_strs[idx].clone();
         }
 
         // Find matching close brace
         let close_brace = self.find_matching_brace(&token_strs, brace_pos);
         if close_brace.is_none() {
-            self.error = Some("No matching close brace".to_string());
+            self.state.set_error("No matching close brace".to_string());
             return false;
         }
         let close_brace = close_brace.unwrap();
@@ -396,17 +415,17 @@ impl Processor for UnionHandler {
         if is_typedef && close_brace + 1 < token_strs.len() {
             let alias = &token_strs[close_brace + 1];
             if alias != ";" {
-                self.data.typedef_alias = Some(alias.clone());
-                if self.data.main_union.name.is_empty() {
-                    self.data.main_union.name = alias.clone();
+                self.state.data.typedef_alias = Some(alias.clone());
+                if self.state.data.main_union.name.is_empty() {
+                    self.state.data.main_union.name = alias.clone();
                 }
             }
         }
 
         // If still no name, generate one
-        if self.data.main_union.name.is_empty() {
-            self.data.main_union.name = "AnonymousUnion".to_string();
-            self.data.main_union.is_anonymous = true;
+        if self.state.data.main_union.name.is_empty() {
+            self.state.data.main_union.name = "AnonymousUnion".to_string();
+            self.state.data.main_union.is_anonymous = true;
         }
 
         true
@@ -416,71 +435,71 @@ impl Processor for UnionHandler {
         let mut output = String::new();
 
         // Register nested types first
-        for nested in &self.data.nested_types {
+        for nested in &self.state.data.nested_types {
             crate::system::system().register_union(&nested.name, &nested.name);
         }
 
         // Register the main union
         crate::system::system()
-            .register_union(&self.data.main_union.name, &self.data.main_union.name);
+            .register_union(&self.state.data.main_union.name, &self.state.data.main_union.name);
 
         // Register typedef alias if present
-        if let Some(ref alias) = self.data.typedef_alias {
-            if alias != &self.data.main_union.name {
+        if let Some(ref alias) = self.state.data.typedef_alias {
+            if alias != &self.state.data.main_union.name {
                 crate::system::system().register_typedef(
                     alias,
                     alias,
-                    &self.data.main_union.name,
+                    &self.state.data.main_union.name,
                 );
             }
         }
 
         // First, output any nested types
-        for nested in &self.data.nested_types {
+        for nested in &self.state.data.nested_types {
             output.push_str(&self.convert_union_def(nested));
             output.push_str("\n\n");
         }
 
         // Then output the main union
-        output.push_str(&self.convert_union_def(&self.data.main_union));
+        output.push_str(&self.convert_union_def(&self.state.data.main_union));
 
         // Add type alias if typedef was used with a different name
-        if let Some(ref alias) = self.data.typedef_alias {
-            if alias != &self.data.main_union.name {
+        if let Some(ref alias) = self.state.data.typedef_alias {
+            if alias != &self.state.data.main_union.name {
                 output.push_str(&format!(
                     "\npub type {} = {};",
-                    alias, self.data.main_union.name
+                    alias, self.state.data.main_union.name
                 ));
             }
         }
 
-        self.output = Some(output.clone());
+        self.state.set_output(output.clone());
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -525,7 +544,7 @@ impl UnionHandler {
                         format!(
                             "Nested{}_{}",
                             nested_kind.to_uppercase(),
-                            self.data.nested_types.len()
+                            self.state.data.nested_types.len()
                         )
                     };
 
@@ -550,7 +569,7 @@ impl UnionHandler {
                         is_anonymous: false,
                     };
 
-                    self.data.nested_types.push(nested_def);
+                    self.state.data.nested_types.push(nested_def);
 
                     i = brace_end + 1;
 
@@ -564,7 +583,7 @@ impl UnionHandler {
                             is_pointer: false,
                             array_dims: Vec::new(),
                         };
-                        self.data.main_union.fields.push(field);
+                        self.state.data.main_union.fields.push(field);
                         i += 1;
                     }
 
@@ -578,7 +597,7 @@ impl UnionHandler {
             // Regular field
             let field = self.parse_field(&tokens[i..]);
             if let Some((f, consumed)) = field {
-                self.data.main_union.fields.push(f);
+                self.state.data.main_union.fields.push(f);
                 i += consumed;
             } else {
                 i += 1;
@@ -680,14 +699,14 @@ impl UnionHandler {
 impl Build for UnionHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "UnionHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("union_name", Entry::string(&self.data.main_union.name));
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("union_name", Entry::string(&self.state.data.main_union.name));
         entry.set_attr(
             "field_count",
-            Entry::i64(self.data.main_union.fields.len() as i64),
+            Entry::i64(self.state.data.main_union.fields.len() as i64),
         );
-        if let Some(ref output) = self.output {
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry

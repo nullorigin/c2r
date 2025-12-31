@@ -7,13 +7,11 @@
 //! - `int arr[3] = {1, 2, 3};` -> `let arr: [i32; 3] = [1, 2, 3];`
 
 use std::collections::HashMap;
-use std::ops::Range;
 
-use crate::db::convert::TypeConverter;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessDecision, ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, ProcessorDecision, Processor, ProcessorState, ProcessorStats};
 use crate::system;
 
 // ============================================================================
@@ -58,41 +56,60 @@ pub struct ArrayData {
     pub is_global: bool,
 }
 
+impl Build for ArrayData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("ArrayData", &self.name);
+        entry.set_attr("name", Entry::string(&self.name));
+        entry.set_attr("element_type", Entry::string(&self.element_type));
+        entry.set_attr("is_const", Entry::bool(self.is_const));
+        entry.set_attr("is_static", Entry::bool(self.is_static));
+        entry.set_attr("is_global", Entry::bool(self.is_global));
+        if !self.dimensions.is_empty() {
+            let dims: Vec<Entry> = self.dimensions.iter().map(|d| Entry::usize(*d)).collect();
+            entry.set_attr("dimensions", Entry::vec(dims));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "ArrayData"
+    }
+
+    fn name(&self) -> Option<&str> {
+        if self.name.is_empty() { None } else { Some(&self.name) }
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("array")
+    }
+}
+
 /// Array handler state for processing
 #[derive(Debug, Clone)]
 pub struct ArrayHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: ArrayData,
+    /// Generic processor state
+    state: ProcessorState<ArrayData>,
 }
 
 impl ArrayHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: ArrayData::default(),
-        }
+        Self { state: ProcessorState::new("ArrayHandler") }
     }
 
     /// Set whether this array is at global scope (builder pattern)
     pub fn with_global(mut self, is_global: bool) -> Self {
-        self.data.is_global = is_global;
+        self.state.data.is_global = is_global;
         self
     }
 
     /// Build nested array type string for multidimensional arrays
     fn build_nested_array_type(&self, base_type: &str) -> String {
-        if self.data.dimensions.is_empty() {
+        if self.state.data.dimensions.is_empty() {
             return base_type.to_string();
         }
 
         let mut result = base_type.to_string();
-        for dim in self.data.dimensions.iter().rev() {
+        for dim in self.state.data.dimensions.iter().rev() {
             result = format!("[{}; {}]", result, dim);
         }
         result
@@ -100,12 +117,12 @@ impl ArrayHandler {
 
     /// Build default initialization for array
     fn build_default_init(&self, default_val: &str) -> String {
-        if self.data.dimensions.is_empty() {
+        if self.state.data.dimensions.is_empty() {
             return default_val.to_string();
         }
 
         let mut result = default_val.to_string();
-        for dim in self.data.dimensions.iter().rev() {
+        for dim in self.state.data.dimensions.iter().rev() {
             result = format!("[{}; {}]", result, dim);
         }
         result
@@ -119,7 +136,7 @@ impl ArrayHandler {
             self.convert_struct_array_init(rust_type, &fields)
         } else if self.is_string_array_type() {
             // String array - add quotes to string literals
-            self.data.init_values.iter()
+            self.state.data.init_values.iter()
                 .map(|v| {
                     if v == "NULL" || v == "std::ptr::null()" {
                         "None".to_string()  // Use Option<&str> None for NULL
@@ -133,13 +150,13 @@ impl ArrayHandler {
                 .join(", ")
         } else {
             // Simple array - just join values
-            self.data.init_values.join(", ")
+            self.state.data.init_values.join(", ")
         }
     }
 
     /// Check if element type is a string/char* type
     fn is_string_array_type(&self) -> bool {
-        let elem = self.data.element_type.to_lowercase();
+        let elem = self.state.data.element_type.to_lowercase();
         elem.contains("char") && (elem.contains("*") || elem.contains("[]"))
             || elem == "string"
     }
@@ -150,7 +167,7 @@ impl ArrayHandler {
         let mut current_values: Vec<String> = Vec::new();
         let mut brace_depth = 0;
 
-        for val in &self.data.init_values {
+        for val in &self.state.data.init_values {
             match val.as_str() {
                 "{" => {
                     brace_depth += 1;
@@ -198,6 +215,11 @@ impl Processor for ArrayHandler {
             "validate_array_init",
             "extract_array_init",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -338,7 +360,7 @@ impl Processor for ArrayHandler {
     fn validate(&mut self, tokens: &[Token]) -> bool {
         // Need at least: type name [ ] ;
         if tokens.len() < 5 {
-            self.error = Some("Too few tokens for array".to_string());
+            self.state.set_error("Too few tokens for array".to_string());
             return false;
         }
 
@@ -346,24 +368,24 @@ impl Processor for ArrayHandler {
 
         // Must have [ somewhere
         if !token_strs.iter().any(|t| t == "[") {
-            self.error = Some("Not an array declaration (no '[')".to_string());
+            self.state.set_error("Not an array declaration (no '[')".to_string());
             return false;
         }
 
         // Last token should be semicolon
         if tokens[tokens.len() - 1].to_string() != ";" {
-            self.error = Some("Array declaration must end with semicolon".to_string());
+            self.state.set_error("Array declaration must end with semicolon".to_string());
             return false;
         }
 
         // Check for const/static modifiers
         let first = tokens[0].to_string();
         if first == "const" {
-            self.data.is_const = true;
+            self.state.data.is_const = true;
         } else if first == "static" {
-            self.data.is_static = true;
+            self.state.data.is_static = true;
             if tokens.len() > 1 && tokens[1].to_string() == "const" {
-                self.data.is_const = true;
+                self.state.data.is_const = true;
             }
         }
 
@@ -377,7 +399,7 @@ impl Processor for ArrayHandler {
             }
         }
 
-        self.confidence = if best_confidence > 0.0 { best_confidence } else { 0.7 };
+        self.state.set_confidence(if best_confidence > 0.0 { best_confidence } else { 0.7 });
         true
     }
 
@@ -389,18 +411,18 @@ impl Processor for ArrayHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strings) {
                 // Get element type from pattern extraction
                 if let Some(element_type) = ctx.value("element_type") {
-                    self.data.element_type = element_type.to_string();
+                    self.state.data.element_type = element_type.to_string();
                 }
 
                 // Get array name from pattern extraction
                 if let Some(name) = ctx.value("name") {
-                    self.data.name = name.to_string();
+                    self.state.data.name = name.to_string();
                 }
 
                 // Get array size from pattern extraction
                 if let Some(size) = ctx.value("size") {
                     if let Ok(s) = size.parse::<usize>() {
-                        self.data.dimensions.push(s);
+                        self.state.data.dimensions.push(s);
                     }
                 }
 
@@ -408,26 +430,26 @@ impl Processor for ArrayHandler {
                 if let Some(values) = ctx.list("init_values") {
                     for val in values {
                         if val != "," {
-                            self.data.init_values.push(val.clone());
+                            self.state.data.init_values.push(val.clone());
                         }
                     }
                     // If no explicit size, infer from initializer
-                    if self.data.dimensions.is_empty() && !self.data.init_values.is_empty() {
-                        self.data.dimensions.push(self.data.init_values.len());
-                        self.data.size_inferred = true;
+                    if self.state.data.dimensions.is_empty() && !self.state.data.init_values.is_empty() {
+                        self.state.data.dimensions.push(self.state.data.init_values.len());
+                        self.state.data.size_inferred = true;
                     }
                 }
 
                 // Check for modifiers
                 if ctx.has_modifier("const") {
-                    self.data.is_const = true;
+                    self.state.data.is_const = true;
                 }
                 if ctx.has_modifier("static") {
-                    self.data.is_static = true;
+                    self.state.data.is_static = true;
                 }
 
-                if !self.data.name.is_empty() && !self.data.element_type.is_empty() {
-                    self.confidence = 0.85;
+                if !self.state.data.name.is_empty() && !self.state.data.element_type.is_empty() {
+                    self.state.set_confidence(0.85);
                     return true;
                 }
             }
@@ -436,7 +458,7 @@ impl Processor for ArrayHandler {
         // Fallback to manual extraction
         let bracket_pos = token_strings.iter().position(|t| t == "[");
         if bracket_pos.is_none() {
-            self.error = Some("Could not find '[' in array declaration".to_string());
+            self.state.set_error("Could not find '[' in array declaration".to_string());
             return false;
         }
         let bracket_pos = bracket_pos.unwrap();
@@ -452,15 +474,15 @@ impl Processor for ArrayHandler {
 
         // Type is everything before the name (which is right before the bracket)
         if bracket_pos < type_start + 2 {
-            self.error = Some("Invalid array declaration format".to_string());
+            self.state.set_error("Invalid array declaration format".to_string());
             return false;
         }
 
         // Name is the token right before [
-        self.data.name = token_strings[bracket_pos - 1].clone();
+        self.state.data.name = token_strings[bracket_pos - 1].clone();
 
         // Type is everything from type_start to name position
-        self.data.element_type = token_strings[type_start..bracket_pos - 1].join(" ");
+        self.state.data.element_type = token_strings[type_start..bracket_pos - 1].join(" ");
 
         // Parse all dimensions (supports multidimensional arrays like arr[3][4][5])
         let mut i = bracket_pos;
@@ -476,7 +498,7 @@ impl Processor for ArrayHandler {
                     if j > i + 1 {
                         let size_str = &token_strings[i + 1];
                         if let Ok(size) = size_str.parse::<usize>() {
-                            self.data.dimensions.push(size);
+                            self.state.data.dimensions.push(size);
                         }
                     }
                     i = j + 1;
@@ -500,114 +522,126 @@ impl Processor for ArrayHandler {
                     for i in (start + 1)..end {
                         let val = &token_strings[i];
                         if val != "," {
-                            self.data.init_values.push(val.clone());
+                            self.state.data.init_values.push(val.clone());
                         }
                     }
 
                     // If no explicit size, infer from initializer
-                    if self.data.dimensions.is_empty() && !self.data.init_values.is_empty() {
-                        self.data.dimensions.push(self.data.init_values.len());
-                        self.data.size_inferred = true;
+                    if self.state.data.dimensions.is_empty() && !self.state.data.init_values.is_empty() {
+                        self.state.data.dimensions.push(self.state.data.init_values.len());
+                        self.state.data.size_inferred = true;
                     }
                 }
             }
         }
 
-        if self.data.name.is_empty() || self.data.element_type.is_empty() {
-            self.error = Some("Could not extract array name or type".to_string());
+        if self.state.data.name.is_empty() || self.state.data.element_type.is_empty() {
+            self.state.set_error("Could not extract array name or type".to_string());
             return false;
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         true
     }
 
     fn convert(&mut self) -> Option<String> {
         // Convert C type to Rust type
-        let rust_type = system().lookup_type(&self.data.element_type)
-            .unwrap_or_else(|| self.data.element_type.clone());
+        let mut rust_type = system().lookup_type(&self.state.data.element_type)
+            .unwrap_or_else(|| self.state.data.element_type.clone());
+        
+        // For char* arrays with string literal initializers, use &str instead of String
+        if self.is_string_array_type() && !self.state.data.init_values.is_empty() 
+            && self.state.data.init_values.iter().any(|v| v.starts_with('"')) {
+            rust_type = "&str".to_string();
+        }
 
         // Build nested array type for multidimensional arrays
         // C: int arr[3][4] -> Rust: [[i32; 4]; 3]
         let full_type = self.build_nested_array_type(&rust_type);
 
-        let rust_code = if !self.data.init_values.is_empty() {
+        let rust_code = if !self.state.data.init_values.is_empty() {
             // Array with initializer
             let values = self.convert_init_values(&rust_type);
             // Global arrays use static, local arrays use let
-            let prefix = if self.data.is_global {
-                if self.data.is_const { "static " } else { "static " }
+            let prefix = if self.state.data.is_global {
+                if self.state.data.is_const { "static " } else { "static " }
             } else {
-                if self.data.is_const { "let " } else { "let mut " }
+                if self.state.data.is_const { "let " } else { "let mut " }
             };
-            if self.data.size_inferred || self.data.dimensions.is_empty() {
-                format!("{}{}: {} = [{}];", prefix, self.data.name, full_type, values)
+            
+            // Check for single-value initialization like {0} with known dimension
+            // In C, {0} initializes entire array to 0, use Rust's [0; N] syntax
+            let init_expr = if self.state.data.init_values.len() == 1 
+                && !self.state.data.dimensions.is_empty() 
+                && self.state.data.init_values[0].parse::<i64>().is_ok() {
+                // Single numeric value with known size - use repeat syntax
+                let dim = self.state.data.dimensions[0];
+                format!("[{}; {}]", values, dim)
             } else {
-                format!(
-                    "{}{}: {} = [{}];",
-                    prefix, self.data.name, full_type, values
-                )
-            }
-        } else if !self.data.dimensions.is_empty() {
+                format!("[{}]", values)
+            };
+            
+            format!("{}{}: {} = {};", prefix, self.state.data.name, full_type, init_expr)
+        } else if !self.state.data.dimensions.is_empty() {
             // Array declaration without initializer - use default
-            let prefix = if self.data.is_global {
-                if self.data.is_const { "static " } else { "static mut " }
+            let prefix = if self.state.data.is_global {
+                if self.state.data.is_const { "static " } else { "static mut " }
             } else {
-                if self.data.is_const { "let " } else { "let mut " }
+                if self.state.data.is_const { "let " } else { "let mut " }
             };
             let default_val = default_value_for_type(&rust_type);
             let default_init = self.build_default_init(default_val);
             format!(
                 "{}{}: {} = {};",
-                prefix, self.data.name, full_type, default_init
+                prefix, self.state.data.name, full_type, default_init
             )
         } else {
             // Unknown size, use Vec
-            let prefix = if self.data.is_global {
-                if self.data.is_const { "static " } else { "static mut " }
+            let prefix = if self.state.data.is_global {
+                if self.state.data.is_const { "static " } else { "static mut " }
             } else {
-                if self.data.is_const { "let " } else { "let mut " }
+                if self.state.data.is_const { "let " } else { "let mut " }
             };
             format!(
                 "{}{}: Vec<{}> = Vec::new();",
-                prefix, self.data.name, rust_type
+                prefix, self.state.data.name, rust_type
             )
         };
 
-        self.confidence = 0.95;
+        self.state.set_confidence(0.95);
         Some(rust_code)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
 
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
 
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
 
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
 
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
 
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
 
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
 
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -617,47 +651,36 @@ impl Processor for ArrayHandler {
 
 impl Build for ArrayHandler {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
+        let mut entry = Entry::node("Handler", "ArrayHandler");
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("name", Entry::string(&self.state.data.name));
+        entry.set_attr("element_type",Entry::string(&self.state.data.element_type));
+        entry.set_attr("is_const", Entry::bool(self.state.data.is_const));
+        entry.set_attr("is_static", Entry::bool(self.state.data.is_static));
 
-        attrs.insert("stage".to_string(), Entry::string(self.stage.as_str()));
-        attrs.insert("confidence".to_string(), Entry::f64(self.confidence));
-        attrs.insert("name".to_string(), Entry::string(&self.data.name));
-        attrs.insert(
-            "element_type".to_string(),
-            Entry::string(&self.data.element_type),
-        );
-        attrs.insert("is_const".to_string(), Entry::bool(self.data.is_const));
-        attrs.insert("is_static".to_string(), Entry::bool(self.data.is_static));
-
-        if !self.data.dimensions.is_empty() {
+        if !self.state.data.dimensions.is_empty() {
             let dims: Vec<Entry> = self
-                .data
+                .state.data
                 .dimensions
                 .iter()
                 .map(|d| Entry::usize(*d))
                 .collect();
-            attrs.insert("dimensions".to_string(), Entry::vec(dims));
+            entry.set_attr("dimensions", Entry::vec(dims));
         }
 
-        if !self.data.init_values.is_empty() {
+        if !self.state.data.init_values.is_empty() {
             let values: Vec<Entry> = self
-                .data
+                .state.data
                 .init_values
                 .iter()
                 .map(|v| Entry::string(v))
                 .collect();
-            attrs.insert("init_values".to_string(), Entry::vec(values));
+            entry.set_attr("init_values", Entry::vec(values));
         }
-
-        if let Some(ref output) = self.output {
-            attrs.insert("rust_code".to_string(), Entry::string(output));
-        }
-
-        if let Some(ref error) = self.error {
-            attrs.insert("error".to_string(), Entry::string(error));
-        }
-
-        Entry::node_with_attrs("Handler", "ArrayHandler", attrs)
+        entry.set_attr_opt("rust_code", self.state.output.as_ref());
+        entry.set_attr_opt("error", self.state.error.as_ref());
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -665,10 +688,10 @@ impl Build for ArrayHandler {
     }
 
     fn name(&self) -> Option<&str> {
-        if self.data.name.is_empty() {
+        if self.state.data.name.is_empty() {
             None
         } else {
-            Some(&self.data.name)
+            Some(&self.state.data.name)
         }
     }
 
@@ -683,6 +706,7 @@ impl Build for ArrayHandler {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn make_tokens(strings: &[&str]) -> Vec<Token> {
@@ -697,9 +721,9 @@ mod tests {
         // Process through all stages
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         let output = handler.output().unwrap();
@@ -716,9 +740,9 @@ mod tests {
 
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         let output = handler.output().unwrap();
@@ -732,9 +756,9 @@ mod tests {
 
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         let output = handler.output().unwrap();
@@ -746,8 +770,8 @@ mod tests {
         let mut handler = ArrayHandler::new();
         let tokens = make_tokens(&["int", "x", ";"]);
 
-        let decision = handler.process(&tokens);
-        assert!(matches!(decision, ProcessDecision::Fail { .. }));
+        let decision = handler.process(&tokens, None);
+        assert!(matches!(decision, ProcessorDecision::Fail { .. }));
     }
 
     #[test]
@@ -757,9 +781,9 @@ mod tests {
 
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         let entry = handler.to_entry();

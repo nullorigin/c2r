@@ -1,5 +1,6 @@
 pub mod arrays;
 pub mod comments;
+pub mod common;
 pub mod conditionals;
 pub mod enums;
 pub mod expressions;
@@ -13,9 +14,10 @@ pub mod typedefs;
 pub mod unions;
 pub mod validation;
 pub mod variables;
+pub mod data;
 
 // Re-export process types for convenience
-pub use process::{ProcessDecision, ProcessStage, Processor};
+pub use crate::handlers::process::{ProcessorDecision, ProcessorStage, ProcessorState, Processor};
 
 // Re-export handler types from db module for convenience
 pub use crate::db::handler::{

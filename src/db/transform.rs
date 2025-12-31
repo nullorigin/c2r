@@ -443,14 +443,12 @@ impl Relationship {
 
 impl Build for Relationship {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert("from".to_string(), Entry::string(&self.from));
-        attrs.insert("to".to_string(), Entry::string(&self.to));
-        attrs.insert(
-            "rel_type".to_string(),
-            Entry::string(self.rel_type.as_str()),
-        );
-        attrs.insert("confidence".to_string(), Entry::f64(self.confidence));
+        let name = format!("{}->{}", self.from, self.to);
+        let mut entry = Entry::node("Relationship", &name);
+        entry.set_attr("from", Entry::string(&self.from));
+        entry.set_attr("to", Entry::string(&self.to));
+        entry.set_attr("rel_type", Entry::string(self.rel_type.as_str()));
+        entry.set_attr("confidence", Entry::f64(self.confidence));
 
         if !self.metadata.is_empty() {
             let meta: Vec<Entry> = self
@@ -462,11 +460,10 @@ impl Build for Relationship {
                     m
                 })
                 .collect();
-            attrs.insert("metadata".to_string(), Entry::vec(meta));
+            entry.set_attr("metadata", Entry::vec(meta));
         }
 
-        let name = format!("{}->{}", self.from, self.to);
-        Entry::node_with_attrs("Relationship", &name, attrs)
+        entry
     }
 
     fn kind(&self) -> &str {

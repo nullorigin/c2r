@@ -4,13 +4,11 @@
 //! Example: `typedef int MyInt;` -> `type MyInt = i32;`
 
 use std::collections::HashMap;
-use std::ops::Range;
 
-use crate::db::convert::TypeConverter;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessDecision, ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, ProcessorDecision, Processor, ProcessorState, ProcessorStats};
 use crate::system;
 
 // ============================================================================
@@ -57,22 +55,13 @@ impl Build for TypedefData {
 /// Typedef handler state for processing
 #[derive(Debug, Clone)]
 pub struct TypedefHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: TypedefData,
+    /// Generic processor state
+    state: ProcessorState<TypedefData>,
 }
 
 impl TypedefHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: TypedefData::default(),
-        }
+        Self { state: ProcessorState::new("TypedefHandler") }
     }
 }
 
@@ -90,6 +79,11 @@ impl Processor for TypedefHandler {
             "validate_typedef_alias",
             "extract_typedef_alias",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -212,7 +206,7 @@ impl Processor for TypedefHandler {
     fn validate(&mut self, tokens: &[Token]) -> bool {
         // Need at least: typedef <type> <name> ;
         if tokens.len() < 4 {
-            self.error = Some("Too few tokens for typedef".to_string());
+            self.state.set_error("Too few tokens for typedef".to_string());
             return false;
         }
 
@@ -221,14 +215,14 @@ impl Processor for TypedefHandler {
         // First token should be "typedef"
         let first = tokens[0].to_string();
         if first != "typedef" {
-            self.error = Some(format!("Expected 'typedef', got '{}'", first));
+            self.state.set_error(format!("Expected 'typedef', got '{}'", first));
             return false;
         }
 
         // Last token should be semicolon
         let last = tokens[tokens.len() - 1].to_string();
         if last != ";" {
-            self.error = Some("Typedef must end with semicolon".to_string());
+            self.state.set_error("Typedef must end with semicolon".to_string());
             return false;
         }
 
@@ -237,7 +231,7 @@ impl Processor for TypedefHandler {
         if matches!(second.as_str(), "struct" | "enum" | "union") {
             // If there's a { in the tokens, this is a definition with body - reject
             if token_strs.iter().any(|t| t == "{") {
-                self.error = Some(format!("typedef {} with body should be handled by {}Handler", second, second));
+                self.state.set_error(format!("typedef {} with body should be handled by {}Handler", second, second));
                 return false;
             }
         }
@@ -252,11 +246,11 @@ impl Processor for TypedefHandler {
             }
         }
 
-        self.confidence = if best_confidence > 0.0 {
+        self.state.set_confidence(if best_confidence > 0.0 {
             best_confidence
         } else {
             0.7
-        };
+        });
         true
     }
 
@@ -268,28 +262,28 @@ impl Processor for TypedefHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get base type from pattern extraction
                 if let Some(base_type) = ctx.value("base_type") {
-                    self.data.original_type = base_type.to_string();
+                    self.state.data.original_type = base_type.to_string();
                 }
 
                 // Get alias name from pattern extraction
                 if let Some(alias) = ctx.value("alias_name") {
-                    self.data.alias_name = alias.to_string();
+                    self.state.data.alias_name = alias.to_string();
                 }
 
                 // Get type_name for typedef struct/enum
                 if let Some(type_name) = ctx.value("type_name") {
-                    self.data.alias_name = type_name.to_string();
+                    self.state.data.alias_name = type_name.to_string();
                 }
 
                 // Get tag_name for typedef struct/enum
                 if let Some(tag_name) = ctx.value("tag_name") {
-                    if self.data.original_type.is_empty() {
-                        self.data.original_type = tag_name.to_string();
+                    if self.state.data.original_type.is_empty() {
+                        self.state.data.original_type = tag_name.to_string();
                     }
                 }
 
-                if !self.data.alias_name.is_empty() && !self.data.original_type.is_empty() {
-                    self.confidence = 0.85;
+                if !self.state.data.alias_name.is_empty() && !self.state.data.original_type.is_empty() {
+                    self.state.set_confidence(0.85);
                     return true;
                 }
             }
@@ -302,98 +296,98 @@ impl Processor for TypedefHandler {
             .collect();
 
         if inner_tokens.is_empty() {
-            self.error = Some("No type information in typedef".to_string());
+            self.state.set_error("No type information in typedef".to_string());
             return false;
         }
 
         if inner_tokens.len() < 2 {
-            self.error = Some("Typedef needs at least type and name".to_string());
+            self.state.set_error("Typedef needs at least type and name".to_string());
             return false;
         }
 
         // Check for function pointer typedef: typedef return_type (*name)(params)
         if let Some((alias, original)) = self.parse_function_pointer_typedef(&inner_tokens) {
-            self.data.alias_name = alias;
-            self.data.original_type = original;
-            self.data.is_func_ptr = true;
-            self.confidence = 0.85;
+            self.state.data.alias_name = alias;
+            self.state.data.original_type = original;
+            self.state.data.is_func_ptr = true;
+            self.state.set_confidence(0.85);
             return true;
         }
 
-        self.data.alias_name = inner_tokens.last().unwrap().clone();
+        self.state.data.alias_name = inner_tokens.last().unwrap().clone();
 
         let mut type_parts: Vec<&str> = Vec::new();
         for token in inner_tokens.iter().take(inner_tokens.len() - 1) {
             if *token == "*" {
-                self.data.is_pointer = true;
+                self.state.data.is_pointer = true;
             } else {
                 type_parts.push(token);
             }
         }
 
-        self.data.original_type = type_parts.join(" ");
+        self.state.data.original_type = type_parts.join(" ");
 
-        if self.data.alias_name.is_empty() || self.data.original_type.is_empty() {
-            self.error = Some("Could not extract typedef name or type".to_string());
+        if self.state.data.alias_name.is_empty() || self.state.data.original_type.is_empty() {
+            self.state.set_error("Could not extract typedef name or type".to_string());
             return false;
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         true
     }
 
     fn convert(&mut self) -> Option<String> {
         // Use TypeConverter for C to Rust type mapping
-        let rust_type = system().lookup_type(&self.data.original_type)
-            .unwrap_or_else(|| self.data.original_type.clone());
+        let rust_type = system().lookup_type(&self.state.data.original_type)
+            .unwrap_or_else(|| self.state.data.original_type.clone());
 
         // Register the typedef
         crate::system::system().register_typedef(
-            &self.data.alias_name,
-            &self.data.alias_name,
-            &self.data.original_type,
+            &self.state.data.alias_name,
+            &self.state.data.alias_name,
+            &self.state.data.original_type,
         );
 
-        let rust_code = if self.data.is_pointer {
-            format!("type {} = *mut {};", self.data.alias_name, rust_type)
+        let rust_code = if self.state.data.is_pointer {
+            format!("type {} = *mut {};", self.state.data.alias_name, rust_type)
         } else {
-            format!("type {} = {};", self.data.alias_name, rust_type)
+            format!("type {} = {};", self.state.data.alias_name, rust_type)
         };
 
-        self.confidence = 0.95;
+        self.state.set_confidence(0.95);
         Some(rust_code)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
 
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
 
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
 
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
 
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
 
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
 
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
 
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -484,36 +478,31 @@ impl TypedefHandler {
 
 impl Build for TypedefHandler {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
+        let mut entry = Entry::node("Handler", "TypedefHandler");
 
         // Store stage
-        attrs.insert("stage".to_string(), Entry::string(self.stage.as_str()));
+        entry.set_attr("stage", self.state.stage().to_entry());
 
         // Store confidence
-        attrs.insert("confidence".to_string(), Entry::f64(self.confidence));
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
 
         // Store extracted data
-        attrs.insert(
-            "alias_name".to_string(),
-            Entry::string(&self.data.alias_name),
-        );
-        attrs.insert(
-            "original_type".to_string(),
-            Entry::string(&self.data.original_type),
-        );
-        attrs.insert("is_pointer".to_string(), Entry::bool(self.data.is_pointer));
+        entry.set_attr("alias_name", Entry::string(&self.state.data.alias_name));
+        entry.set_attr("original_type", Entry::string(&self.state.data.original_type));
+        entry.set_attr("is_pointer", Entry::bool(self.state.data.is_pointer));
+        entry.set_attr("is_func_ptr", Entry::bool(self.state.data.is_func_ptr));
 
         // Store output if available
-        if let Some(ref output) = self.output {
-            attrs.insert("rust_code".to_string(), Entry::string(output));
+        if let Some(ref output) = self.state.output {
+            entry.set_attr("rust_code", Entry::string(output));
         }
 
         // Store error if any
-        if let Some(ref error) = self.error {
-            attrs.insert("error".to_string(), Entry::string(error));
+        if let Some(ref error) = self.state.error {
+            entry.set_attr("error", Entry::string(error));
         }
 
-        Entry::node_with_attrs("Handler", "TypedefHandler", attrs)
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -521,10 +510,10 @@ impl Build for TypedefHandler {
     }
 
     fn name(&self) -> Option<&str> {
-        if self.data.alias_name.is_empty() {
+        if self.state.data.alias_name.is_empty() {
             None
         } else {
-            Some(&self.data.alias_name)
+            Some(&self.state.data.alias_name)
         }
     }
 
@@ -551,35 +540,35 @@ mod tests {
         let tokens = make_tokens(&["typedef", "int", "MyInt", ";"]);
 
         // Process through all stages
-        let decision = handler.process(&tokens);
+        let decision = handler.process(&tokens, None);
         assert!(matches!(
             decision,
-            ProcessDecision::Continue {
-                stage: ProcessStage::Validated,
+            ProcessorDecision::Continue {
+                stage: ProcessorStage::Validated,
                 ..
             }
         ));
 
-        let decision = handler.process(&tokens);
+        let decision = handler.process(&tokens, None);
         assert!(matches!(
             decision,
-            ProcessDecision::Continue {
-                stage: ProcessStage::Extracted,
+            ProcessorDecision::Continue {
+                stage: ProcessorStage::Extracted,
                 ..
             }
         ));
 
-        let decision = handler.process(&tokens);
+        let decision = handler.process(&tokens, None);
         assert!(matches!(
             decision,
-            ProcessDecision::Continue {
-                stage: ProcessStage::Converted,
+            ProcessorDecision::Continue {
+                stage: ProcessorStage::Converted,
                 ..
             }
         ));
 
-        let decision = handler.process(&tokens);
-        if let ProcessDecision::Complete {
+        let decision = handler.process(&tokens, None);
+        if let ProcessorDecision::Complete {
             rust_code,
             confidence,
         } = decision
@@ -599,9 +588,9 @@ mod tests {
         // Run through all stages
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         assert_eq!(
@@ -615,8 +604,8 @@ mod tests {
         let mut handler = TypedefHandler::new();
         let tokens = make_tokens(&["int", "x", ";"]);
 
-        let decision = handler.process(&tokens);
-        assert!(matches!(decision, ProcessDecision::Fail { .. }));
+        let decision = handler.process(&tokens, None);
+        assert!(matches!(decision, ProcessorDecision::Fail { .. }));
     }
 
     #[test]
@@ -627,9 +616,9 @@ mod tests {
         // Process to completion
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         let entry = handler.to_entry();

@@ -41,7 +41,6 @@
 //! ```
 
 // Core tree structure
-pub mod export;
 pub mod format;
 pub mod node;
 pub mod query;
@@ -66,8 +65,7 @@ pub mod transform;
 pub mod validate;
 pub mod web;
 
-// Re-export TreeBuilder as alias for backwards compatibility
-pub use export::{to_json, to_rust};
+
 // Re-export core types
 pub use node::*;
 pub use node::{

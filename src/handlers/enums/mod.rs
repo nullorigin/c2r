@@ -6,8 +6,8 @@
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
-use std::ops::Range;
+use crate::handlers::process::{ProcessorStage, Processor, ProcessorState, ProcessorStats};
+use crate::system::system;
 
 // ============================================================================
 // Enum Handler Implementation
@@ -79,25 +79,40 @@ pub struct EnumData {
     pub typedef_alias: Option<String>,
 }
 
+impl Build for EnumData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("EnumData", &self.main_enum.name);
+        entry.set_attr("enum_name", Entry::string(&self.main_enum.name));
+        entry.set_attr("variant_count", Entry::usize(self.main_enum.variants.len()));
+        if let Some(ref alias) = self.typedef_alias {
+            entry.set_attr("typedef_alias", Entry::string(alias));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "EnumData"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.main_enum.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("enum")
+    }
+}
+
 /// Handler for C enum definitions
 #[derive(Debug)]
 pub struct EnumHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: EnumData,
+    /// Generic processor state
+    state: ProcessorState<EnumData>,
 }
 
 impl EnumHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: EnumData::default(),
-        }
+        Self { state: ProcessorState::new("EnumHandler") }
     }
 }
 
@@ -115,6 +130,11 @@ impl Processor for EnumHandler {
             "validate_typedef_enum",
             "extract_typedef_enum",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -271,11 +291,11 @@ impl Processor for EnumHandler {
         }
 
         if best_confidence == 0.0 {
-            self.error = Some("Not an enum definition".to_string());
+            self.state.set_error("Not an enum definition".to_string());
             return false;
         }
 
-        self.confidence = best_confidence;
+        self.state.set_confidence(best_confidence);
         true
     }
 
@@ -287,21 +307,21 @@ impl Processor for EnumHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get tag name from pattern extraction
                 if let Some(tag_name) = ctx.value("tag_name") {
-                    self.data.main_enum.name = tag_name.to_string();
+                    self.state.data.main_enum.name = tag_name.to_string();
                 }
 
                 // Get type_name (typedef alias) from pattern extraction
                 if let Some(type_name) = ctx.value("type_name") {
-                    self.data.typedef_alias = Some(type_name.to_string());
-                    if self.data.main_enum.name.is_empty() {
-                        self.data.main_enum.name = type_name.to_string();
+                    self.state.data.typedef_alias = Some(type_name.to_string());
+                    if self.state.data.main_enum.name.is_empty() {
+                        self.state.data.main_enum.name = type_name.to_string();
                     }
                 }
 
                 // Get var_name (variable instance) from pattern extraction
                 if let Some(var_name) = ctx.value("var_name") {
-                    if self.data.main_enum.name.is_empty() {
-                        self.data.main_enum.name = var_name.to_string();
+                    if self.state.data.main_enum.name.is_empty() {
+                        self.state.data.main_enum.name = var_name.to_string();
                     }
                 }
 
@@ -316,9 +336,9 @@ impl Processor for EnumHandler {
                 }
 
                 // If still no name, generate one
-                if self.data.main_enum.name.is_empty() {
-                    self.data.main_enum.name = "AnonymousEnum".to_string();
-                    self.data.main_enum.is_anonymous = true;
+                if self.state.data.main_enum.name.is_empty() {
+                    self.state.data.main_enum.name = "AnonymousEnum".to_string();
+                    self.state.data.main_enum.is_anonymous = true;
                 }
 
                 return true;
@@ -335,7 +355,7 @@ impl Processor for EnumHandler {
 
         // Skip "enum"
         if token_strs.get(idx) != Some(&"enum".to_string()) {
-            self.error = Some("Expected 'enum' keyword".to_string());
+            self.state.set_error("Expected 'enum' keyword".to_string());
             return false;
         }
         idx += 1;
@@ -344,20 +364,20 @@ impl Processor for EnumHandler {
         let brace_pos = match token_strs.iter().position(|t| t == "{") {
             Some(p) => p,
             None => {
-                self.error = Some("No opening brace found".to_string());
+                self.state.set_error("No opening brace found".to_string());
                 return false;
             }
         };
 
         // Name is between enum and {
         if idx < brace_pos {
-            self.data.main_enum.name = token_strs[idx].clone();
+            self.state.data.main_enum.name = token_strs[idx].clone();
         }
 
         // Find matching close brace
         let close_brace = self.find_matching_brace(&token_strs, brace_pos);
         if close_brace.is_none() {
-            self.error = Some("No matching close brace".to_string());
+            self.state.set_error("No matching close brace".to_string());
             return false;
         }
         let close_brace = close_brace.unwrap();
@@ -372,32 +392,32 @@ impl Processor for EnumHandler {
         if is_typedef && close_brace + 1 < token_strs.len() {
             let alias = &token_strs[close_brace + 1];
             if alias != ";" {
-                self.data.typedef_alias = Some(alias.clone());
-                if self.data.main_enum.name.is_empty() {
-                    self.data.main_enum.name = alias.clone();
+                self.state.data.typedef_alias = Some(alias.clone());
+                if self.state.data.main_enum.name.is_empty() {
+                    self.state.data.main_enum.name = alias.clone();
                 }
             }
         }
 
         // If still no name, generate one
-        if self.data.main_enum.name.is_empty() {
-            self.data.main_enum.name = "AnonymousEnum".to_string();
-            self.data.main_enum.is_anonymous = true;
+        if self.state.data.main_enum.name.is_empty() {
+            self.state.data.main_enum.name = "AnonymousEnum".to_string();
+            self.state.data.main_enum.is_anonymous = true;
         }
 
         true
     }
 
     fn convert(&mut self) -> Option<String> {
-        let enum_name = &self.data.main_enum.name;
-        let variants = &self.data.main_enum.variants;
+        let enum_name = &self.state.data.main_enum.name;
+        let variants = &self.state.data.main_enum.variants;
         
         // Register the enum type with its variants
         let variant_names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
         crate::system::system().register_enum_with_variants(enum_name, enum_name, &variant_names);
 
         // Register typedef alias if present
-        if let Some(ref alias) = self.data.typedef_alias {
+        if let Some(ref alias) = self.state.data.typedef_alias {
             if alias != enum_name {
                 crate::system::system().register_typedef(alias, alias, enum_name);
             }
@@ -433,7 +453,7 @@ impl Processor for EnumHandler {
         output.push('}');
 
         // Add type alias if typedef was used with a different name
-        if let Some(ref alias) = self.data.typedef_alias {
+        if let Some(ref alias) = self.state.data.typedef_alias {
             if alias != enum_name {
                 output.push_str("\npub type ");
                 output.push_str(alias);
@@ -443,33 +463,33 @@ impl Processor for EnumHandler {
             }
         }
 
-        self.output = Some(output.clone());
+        self.state.set_output(output.clone());
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -501,7 +521,7 @@ impl EnumHandler {
             if token == "," {
                 if !current_variant.is_empty() {
                     if let Some(variant) = self.parse_variant(&current_variant) {
-                        self.data.main_enum.variants.push(variant);
+                        self.state.data.main_enum.variants.push(variant);
                     }
                     current_variant.clear();
                 }
@@ -513,7 +533,7 @@ impl EnumHandler {
         // Handle last variant (no trailing comma)
         if !current_variant.is_empty() {
             if let Some(variant) = self.parse_variant(&current_variant) {
-                self.data.main_enum.variants.push(variant);
+                self.state.data.main_enum.variants.push(variant);
             }
         }
     }
@@ -558,14 +578,14 @@ impl EnumHandler {
 impl Build for EnumHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "EnumHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("enum_name", Entry::string(&self.data.main_enum.name));
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("enum_name", Entry::string(&self.state.data.main_enum.name));
         entry.set_attr(
             "variant_count",
-            Entry::i64(self.data.main_enum.variants.len() as i64),
+            Entry::i64(self.state.data.main_enum.variants.len() as i64),
         );
-        if let Some(ref output) = self.output {
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry

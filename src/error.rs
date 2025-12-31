@@ -1292,18 +1292,17 @@ use std::collections::HashMap as StdHashMap;
 
 impl Build for Error {
     fn to_entry(&self) -> Entry {
-        let mut attrs = StdHashMap::new();
-        attrs.insert("kind".to_string(), Entry::string(self.0.as_str()));
-        attrs.insert("reason".to_string(), Entry::string(self.1.as_str()));
+        let mut entry = Entry::node("Error", self.0.as_str());
+        entry.set_attr("kind", Entry::string(self.0.as_str()));
+        entry.set_attr("reason", Entry::string(self.1.as_str()));
         if let Some(ref msg) = self.2 {
-            attrs.insert("message".to_string(), Entry::string(msg.clone()));
+            entry.set_attr("message", Entry::string(msg));
         }
-        attrs.insert(
-            "timestamp".to_string(),
+        entry.set_attr(
+            "timestamp",
             Entry::string(format!("{:?}", std::time::Instant::now())),
         );
-
-        Entry::node_with_attrs("error", self.0.as_str(), attrs)
+        entry
     }
 
     fn kind(&self) -> &str {

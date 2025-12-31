@@ -3,14 +3,12 @@
 //! Converts C struct definitions to Rust structs.
 //! Handles nested structs by flattening them (Rust doesn't support nested struct definitions).
 
-use crate::db::convert::TypeConverter;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, Processor, ProcessorState, ProcessorStats};
 use crate::handlers::validation::SequenceValidator;
-use crate::{system};
-use std::ops::Range;
+use crate::system::system;
 
 // ============================================================================
 // Struct Handler Implementation
@@ -98,25 +96,42 @@ pub struct StructData {
     pub is_forward_declaration: bool,
 }
 
+impl Build for StructData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("StructData", &self.main_struct.name);
+        entry.set_attr("struct_name", Entry::string(&self.main_struct.name));
+        entry.set_attr("field_count", Entry::usize(self.main_struct.fields.len()));
+        entry.set_attr("nested_count", Entry::usize(self.nested_structs.len()));
+        entry.set_attr("is_forward_declaration", Entry::bool(self.is_forward_declaration));
+        if let Some(ref alias) = self.typedef_alias {
+            entry.set_attr("typedef_alias", Entry::string(alias));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "StructData"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.main_struct.name)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("struct")
+    }
+}
+
 /// Handler for C struct definitions
 #[derive(Debug)]
 pub struct StructHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: StructData,
+    /// Generic processor state
+    state: ProcessorState<StructData>,
 }
 
 impl StructHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: StructData::default(),
-        }
+        Self { state: ProcessorState::new("StructHandler") }
     }
     /// Convert struct initialization from tokens (called from DefinitionHandler)
     /// Converts C-style { val1, val2 } to Rust StructName { field1: val1, field2: val2 }
@@ -213,6 +228,11 @@ impl Default for StructHandler {
 impl Processor for StructHandler {
     fn supported_patterns(&self) -> &[&str] {
         &["struct_forward_declaration", "struct_definition", "struct_declaration", "typedef_struct"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -396,9 +416,9 @@ impl Processor for StructHandler {
         // Check for forward declaration: "struct Name ;" (3 tokens, no body)
         if token_strs.len() == 3 && token_strs[0] == "struct" && token_strs[2] == ";" {
             // This is a forward declaration - mark it and register the type
-            self.data.is_forward_declaration = true;
-            self.data.main_struct.name = token_strs[1].clone();
-            self.confidence = 0.9;
+            self.state.data.is_forward_declaration = true;
+            self.state.data.main_struct.name = token_strs[1].clone();
+            self.state.set_confidence(0.9);
             return true;
         }
 
@@ -413,7 +433,7 @@ impl Processor for StructHandler {
         }
 
         if best_confidence == 0.0 {
-            self.error = Some("Not a struct definition".to_string());
+            self.state.set_error("Not a struct definition".to_string());
             return false;
         }
 
@@ -425,7 +445,7 @@ impl Processor for StructHandler {
         // If ( before {, this is a function returning struct
         if let (Some(pp), Some(br)) = (paren_pos, brace_pos) {
             if pp < br {
-                self.error = Some("Function returning struct, not struct definition".to_string());
+                self.state.set_error("Function returning struct, not struct definition".to_string());
                 return false;
             }
         }
@@ -433,7 +453,7 @@ impl Processor for StructHandler {
         // If = before {, this is variable initialization
         if let (Some(eq), Some(br)) = (equals_pos, brace_pos) {
             if eq < br {
-                self.error = Some("Struct variable initialization, not definition".to_string());
+                self.state.set_error("Struct variable initialization, not definition".to_string());
                 return false;
             }
         }
@@ -441,7 +461,7 @@ impl Processor for StructHandler {
         // Use keyword validation to adjust confidence
         let validator = SequenceValidator::new();
         let validation_result = validator.validate_type_declaration(tokens);
-        self.confidence = validation_result.adjust_confidence(best_confidence);
+        self.state.set_confidence(validation_result.adjust_confidence(best_confidence));
 
         true
     }
@@ -454,21 +474,21 @@ impl Processor for StructHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get tag name from pattern extraction
                 if let Some(tag_name) = ctx.value("tag_name") {
-                    self.data.main_struct.name = tag_name.to_string();
+                    self.state.data.main_struct.name = tag_name.to_string();
                 }
 
                 // Get type_name (typedef alias) from pattern extraction
                 if let Some(type_name) = ctx.value("type_name") {
-                    self.data.typedef_alias = Some(type_name.to_string());
-                    if self.data.main_struct.name.is_empty() {
-                        self.data.main_struct.name = type_name.to_string();
+                    self.state.data.typedef_alias = Some(type_name.to_string());
+                    if self.state.data.main_struct.name.is_empty() {
+                        self.state.data.main_struct.name = type_name.to_string();
                     }
                 }
 
                 // Get var_name (variable instance) from pattern extraction
                 if let Some(var_name) = ctx.value("var_name") {
-                    if self.data.main_struct.name.is_empty() {
-                        self.data.main_struct.name = var_name.to_string();
+                    if self.state.data.main_struct.name.is_empty() {
+                        self.state.data.main_struct.name = var_name.to_string();
                     }
                 }
 
@@ -478,9 +498,9 @@ impl Processor for StructHandler {
                 }
 
                 // If still no name, generate one
-                if self.data.main_struct.name.is_empty() {
-                    self.data.main_struct.name = "AnonymousStruct".to_string();
-                    self.data.main_struct.is_anonymous = true;
+                if self.state.data.main_struct.name.is_empty() {
+                    self.state.data.main_struct.name = "AnonymousStruct".to_string();
+                    self.state.data.main_struct.is_anonymous = true;
                 }
 
                 return true;
@@ -497,7 +517,7 @@ impl Processor for StructHandler {
 
         // Skip "struct"
         if token_strs.get(idx) != Some(&"struct".to_string()) {
-            self.error = Some("Expected 'struct' keyword".to_string());
+            self.state.set_error("Expected 'struct' keyword".to_string());
             return false;
         }
         idx += 1;
@@ -506,20 +526,20 @@ impl Processor for StructHandler {
         let brace_pos = match token_strs.iter().position(|t| t == "{") {
             Some(p) => p,
             None => {
-                self.error = Some("No opening brace found".to_string());
+                self.state.set_error("No opening brace found".to_string());
                 return false;
             }
         };
 
         // Name is between struct and {
         if idx < brace_pos {
-            self.data.main_struct.name = token_strs[idx].clone();
+            self.state.data.main_struct.name = token_strs[idx].clone();
         }
 
         // Find matching close brace
         let close_brace = self.find_matching_brace(&token_strs, brace_pos);
         if close_brace.is_none() {
-            self.error = Some("No matching close brace".to_string());
+            self.state.set_error("No matching close brace".to_string());
             return false;
         }
         let close_brace = close_brace.unwrap();
@@ -534,17 +554,17 @@ impl Processor for StructHandler {
         if is_typedef && close_brace + 1 < token_strs.len() {
             let alias = &token_strs[close_brace + 1];
             if alias != ";" {
-                self.data.typedef_alias = Some(alias.clone());
-                if self.data.main_struct.name.is_empty() {
-                    self.data.main_struct.name = alias.clone();
+                self.state.data.typedef_alias = Some(alias.clone());
+                if self.state.data.main_struct.name.is_empty() {
+                    self.state.data.main_struct.name = alias.clone();
                 }
             }
         }
 
         // If still no name, generate one
-        if self.data.main_struct.name.is_empty() {
-            self.data.main_struct.name = "AnonymousStruct".to_string();
-            self.data.main_struct.is_anonymous = true;
+        if self.state.data.main_struct.name.is_empty() {
+            self.state.data.main_struct.name = "AnonymousStruct".to_string();
+            self.state.data.main_struct.is_anonymous = true;
         }
 
         true
@@ -553,19 +573,19 @@ impl Processor for StructHandler {
     fn convert(&mut self) -> Option<String> {
         // Handle forward declarations: register type but don't output anything
         // The type registration allows pointer types like *mut Node to work before struct is defined
-        if self.data.is_forward_declaration {
-            let name = &self.data.main_struct.name;
+        if self.state.data.is_forward_declaration {
+            let name = &self.state.data.main_struct.name;
             // Register the struct type so it can be used in pointer types
             crate::system::system().register_struct(name, name);
             // Return empty string - forward declarations don't need output in Rust
-            self.output = Some(String::new());
-            return self.output.clone();
+            self.state.set_output(String::new());
+            return self.state.output.clone();
         }
 
         let mut output = String::new();
 
         // Register nested structs first
-        for nested in &self.data.nested_structs {
+        for nested in &self.state.data.nested_structs {
             crate::system::system().register_struct(&nested.name, &nested.name);
             // Register struct constructor pattern for this struct
             self.register_struct_constructor(&nested.name, &nested.fields);
@@ -573,70 +593,70 @@ impl Processor for StructHandler {
 
         // Register the main struct
         crate::system::system()
-            .register_struct(&self.data.main_struct.name, &self.data.main_struct.name);
+            .register_struct(&self.state.data.main_struct.name, &self.state.data.main_struct.name);
         // Register struct constructor pattern for main struct
         self.register_struct_constructor(
-            &self.data.main_struct.name,
-            &self.data.main_struct.fields,
+            &self.state.data.main_struct.name,
+            &self.state.data.main_struct.fields,
         );
 
         // Register typedef alias if present
-        if let Some(ref alias) = self.data.typedef_alias {
-            if alias != &self.data.main_struct.name {
+        if let Some(ref alias) = self.state.data.typedef_alias {
+            if alias != &self.state.data.main_struct.name {
                 crate::system::system().register_typedef(
                     alias,
                     alias,
-                    &self.data.main_struct.name,
+                    &self.state.data.main_struct.name,
                 );
             }
         }
 
         // First, output any nested structs (they must be defined before use)
-        for nested in &self.data.nested_structs {
+        for nested in &self.state.data.nested_structs {
             output.push_str(&self.convert_struct_def(nested));
             output.push_str("\n\n");
         }
 
         // Then output the main struct
-        output.push_str(&self.convert_struct_def(&self.data.main_struct));
+        output.push_str(&self.convert_struct_def(&self.state.data.main_struct));
 
         // Add type alias if typedef was used with a different name
-        if let Some(ref alias) = self.data.typedef_alias {
-            if alias != &self.data.main_struct.name {
+        if let Some(ref alias) = self.state.data.typedef_alias {
+            if alias != &self.state.data.main_struct.name {
                 output.push_str(&format!(
                     "\npub type {} = {};",
-                    alias, self.data.main_struct.name
+                    alias, self.state.data.main_struct.name
                 ));
             }
         }
 
-        self.output = Some(output.clone());
+        self.state.set_output(output.clone());
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -682,7 +702,7 @@ impl StructHandler {
                         format!(
                             "Nested{}_{}",
                             nested_kind.to_uppercase(),
-                            self.data.nested_structs.len()
+                            self.state.data.nested_structs.len()
                         )
                     };
 
@@ -713,13 +733,13 @@ impl StructHandler {
                     let nested_body = &tokens[brace_start + 1..brace_end];
 
                     // Temporarily swap to parse into nested
-                    let main_struct = std::mem::take(&mut self.data.main_struct);
-                    self.data.main_struct = nested_def;
+                    let main_struct = std::mem::take(&mut self.state.data.main_struct);
+                    self.state.data.main_struct = nested_def;
                     self.parse_struct_body(&nested_body.to_vec(), nesting_depth + 1);
-                    nested_def = std::mem::take(&mut self.data.main_struct);
-                    self.data.main_struct = main_struct;
+                    nested_def = std::mem::take(&mut self.state.data.main_struct);
+                    self.state.data.main_struct = main_struct;
 
-                    self.data.nested_structs.push(nested_def);
+                    self.state.data.nested_structs.push(nested_def);
 
                     i = brace_end + 1;
 
@@ -735,7 +755,7 @@ impl StructHandler {
                             bitfield_width: None,
                             default_value: None,
                         };
-                        self.data.main_struct.fields.push(field);
+                        self.state.data.main_struct.fields.push(field);
                         i += 1;
                     }
 
@@ -750,7 +770,7 @@ impl StructHandler {
             // Regular field: type [*] name [array] ;
             let field = self.parse_field(&tokens[i..]);
             if let Some((f, consumed)) = field {
-                self.data.main_struct.fields.push(f);
+                self.state.data.main_struct.fields.push(f);
                 i += consumed;
             } else {
                 i += 1;
@@ -1144,18 +1164,18 @@ impl StructHandler {
 impl Build for StructHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "StructHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("struct_name", Entry::string(&self.data.main_struct.name));
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("struct_name", Entry::string(&self.state.data.main_struct.name));
         entry.set_attr(
             "field_count",
-            Entry::i64(self.data.main_struct.fields.len() as i64),
+            Entry::i64(self.state.data.main_struct.fields.len() as i64),
         );
         entry.set_attr(
             "nested_count",
-            Entry::i64(self.data.nested_structs.len() as i64),
+            Entry::i64(self.state.data.nested_structs.len() as i64),
         );
-        if let Some(ref output) = self.output {
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry

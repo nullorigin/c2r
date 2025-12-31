@@ -12,174 +12,238 @@ use std::ops::Range;
 // ============================================================================
 
 /// Top-level declarations
-pub mod kind {
-    pub const FUNCTION: &str = "Function";
-    pub const STRUCT: &str = "Struct";
-    pub const ENUM: &str = "Enum";
-    pub const TYPEDEF: &str = "Typedef";
-    pub const TYPE_ALIAS: &str = "TypeAlias";
-    pub const GLOBAL: &str = "Global";
-    pub const VARIABLE: &str = "Variable";
-    pub const ARRAY: &str = "Array";
-    pub const MACRO: &str = "Macro";
-    pub const INCLUDE: &str = "Include";
-    pub const COMMENT: &str = "Comment";
-    pub const LOOP: &str = "Loop";
-    pub const TYPE: &str = "Type";
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NodeKind {
+    // Top-level declarations
+    Function,
+    Struct,
+    Enum,
+    Typedef,
+    TypeAlias,
+    Global,
+    Variable,
+    Array,
+    Macro,
+    Include,
+    Comment,
+    Loop,
+    Type,
 
-    /// Function components
-    pub const PARAMETER: &str = "Parameter";
-    pub const RETURN_TYPE: &str = "ReturnType";
-    pub const FUNCTION_BODY: &str = "FunctionBody";
+    // Function components
+    Parameter,
+    ReturnType,
+    FunctionBody,
 
-    /// Struct components
-    pub const FIELD: &str = "Field";
+    // Struct components
+    Field,
 
-    /// Enum components
-    pub const VARIANT: &str = "Variant";
+    // Enum components
+    Variant,
 
-    /// Statements
-    pub const VAR_DECL: &str = "VariableDeclaration";
-    pub const ASSIGNMENT: &str = "Assignment";
-    pub const EXPRESSION: &str = "Expression";
-    pub const IF_STMT: &str = "IfStatement";
-    pub const WHILE_LOOP: &str = "WhileLoop";
-    pub const FOR_LOOP: &str = "ForLoop";
-    pub const DO_WHILE: &str = "DoWhile";
-    pub const SWITCH: &str = "Switch";
-    pub const CASE: &str = "Case";
-    pub const RETURN: &str = "Return";
-    pub const BREAK: &str = "Break";
-    pub const CONTINUE: &str = "Continue";
-    pub const FUNC_CALL: &str = "FunctionCall";
+    // Statements
+    VariableDeclaration,
+    Assignment,
+    Expression,
+    IfStatement,
+    WhileLoop,
+    ForLoop,
+    DoWhile,
+    Switch,
+    Case,
+    Return,
+    Break,
+    Continue,
+    FunctionCall,
 
-    /// Control flow keywords
-    pub const IF: &str = "If";
-    pub const ELSE: &str = "Else";
-    pub const WHILE: &str = "While";
-    pub const FOR: &str = "For";
-    pub const DO: &str = "Do";
-    pub const GOTO: &str = "Goto";
+    // Control flow keywords
+    If,
+    Else,
+    While,
+    For,
+    Do,
+    Goto,
 
-    /// Expressions
-    pub const BINARY_OP: &str = "BinaryOp";
-    pub const UNARY_OP: &str = "UnaryOp";
-    pub const LITERAL: &str = "Literal";
-    pub const IDENTIFIER: &str = "Identifier";
-    pub const CAST: &str = "Cast";
+    // Expressions
+    BinaryOp,
+    UnaryOp,
+    Literal,
+    Identifier,
+    Cast,
 
-    /// Composite
-    pub const BLOCK: &str = "Block";
-    pub const ANNOTATION: &str = "Annotation";
-    pub const SAMPLE: &str = "Sample";
-    pub const UNKNOWN: &str = "Unknown";
+    // Composite
+    Block,
+    Annotation,
+    Sample,
+    Unknown,
 }
 
+impl NodeKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            NodeKind::Function => "Function",
+            NodeKind::Struct => "Struct",
+            NodeKind::Enum => "Enum",
+            NodeKind::Typedef => "Typedef",
+            NodeKind::TypeAlias => "TypeAlias",
+            NodeKind::Global => "Global",
+            NodeKind::Variable => "Variable",
+            NodeKind::Array => "Array",
+            NodeKind::Macro => "Macro",
+            NodeKind::Include => "Include",
+            NodeKind::Comment => "Comment",
+            NodeKind::Loop => "Loop",
+            NodeKind::Type => "Type",
+            NodeKind::Parameter => "Parameter",
+            NodeKind::ReturnType => "ReturnType",
+            NodeKind::FunctionBody => "FunctionBody",
+            NodeKind::Field => "Field",
+            NodeKind::Variant => "Variant",
+            NodeKind::VariableDeclaration => "VariableDeclaration",
+            NodeKind::Assignment => "Assignment",
+            NodeKind::Expression => "Expression",
+            NodeKind::IfStatement => "IfStatement",
+            NodeKind::WhileLoop => "WhileLoop",
+            NodeKind::ForLoop => "ForLoop",
+            NodeKind::DoWhile => "DoWhile",
+            NodeKind::Switch => "Switch",
+            NodeKind::Case => "Case",
+            NodeKind::Return => "Return",
+            NodeKind::Break => "Break",
+            NodeKind::Continue => "Continue",
+            NodeKind::FunctionCall => "FunctionCall",
+            NodeKind::If => "If",
+            NodeKind::Else => "Else",
+            NodeKind::While => "While",
+            NodeKind::For => "For",
+            NodeKind::Do => "Do",
+            NodeKind::Goto => "Goto",
+            NodeKind::BinaryOp => "BinaryOp",
+            NodeKind::UnaryOp => "UnaryOp",
+            NodeKind::Literal => "Literal",
+            NodeKind::Identifier => "Identifier",
+            NodeKind::Cast => "Cast",
+            NodeKind::Block => "Block",
+            NodeKind::Annotation => "Annotation",
+            NodeKind::Sample => "Sample",
+            NodeKind::Unknown => "Unknown",
+        }
+    }
+}
+impl From<NodeKind> for &str {
+    fn from(kind: NodeKind) -> Self {
+        kind.as_str()
+    }
+}
+impl From<NodeKind> for String {
+    fn from(kind: NodeKind) -> Self {
+        kind.as_str().to_string()
+    }
+}
 // Re-export commonly used kinds at module level
-pub use kind::*;
+pub use NodeKind::*;
 
 // ============================================================================
 // Node Creation Functions
 // ============================================================================
 
 /// Create a basic node with kind and name.
-pub fn node(kind: &str, name: impl Into<String>) -> Entry {
-    Entry::node(kind, name)
+pub fn node(kind: impl Into<String>, name: impl Into<String>) -> Entry {
+    Entry::node(kind.into(), name.into())
 }
 
 /// Create a node with source range.
-pub fn node_with_range(kind: &str, name: impl Into<String>, range: Range<usize>) -> Entry {
-    let mut n = Entry::node(kind, name);
+pub fn node_with_range(kind: impl Into<String>, name: impl Into<String>, range: Range<usize>) -> Entry {
+    let mut n = Entry::node(kind.into(), name.into());
     n.set_attr("source_range", Entry::range(range));
     n
 }
 
 /// Create a node with attributes.
 pub fn node_with_attrs(
-    kind: &str,
+    kind: impl Into<String>,
     name: impl Into<String>,
     attrs: HashMap<String, Entry>,
 ) -> Entry {
-    Entry::node_with_attrs(kind, name, attrs)
+    Entry::node_with_attrs(kind.into(), name.into(), attrs)
 }
 
 /// Create a function node.
 pub fn function(name: impl Into<String>) -> Entry {
-    node(FUNCTION, name)
+    node(NodeKind::Function, name)
 }
 
 /// Create a function node with return type.
 pub fn function_with_return(name: impl Into<String>, return_type: impl Into<String>) -> Entry {
-    let mut f = node(FUNCTION, name);
+    let mut f = node(NodeKind::Function, name);
     f.set_attr("return_type", Entry::string(return_type.into()));
     f
 }
 
 /// Create a struct node.
 pub fn struct_node(name: impl Into<String>) -> Entry {
-    node(STRUCT, name)
+    node(NodeKind::Struct, name)
 }
 
 /// Create an enum node.
 pub fn enum_node(name: impl Into<String>) -> Entry {
-    node(ENUM, name)
+    node(NodeKind::Enum, name)
 }
 
 /// Create a parameter node.
 pub fn param(name: impl Into<String>, type_name: impl Into<String>) -> Entry {
-    let mut p = node(PARAMETER, name);
+    let mut p = node(NodeKind::Parameter, name);
     p.set_attr("type", Entry::string(type_name.into()));
     p
 }
 
 /// Create a field node.
 pub fn field(name: impl Into<String>, type_name: impl Into<String>) -> Entry {
-    let mut f = node(FIELD, name);
+    let mut f = node(NodeKind::Field, name);
     f.set_attr("type", Entry::string(type_name.into()));
     f
 }
 
 /// Create a variant node.
 pub fn variant(name: impl Into<String>) -> Entry {
-    node(VARIANT, name)
+    node(NodeKind::Variant, name)
 }
 
 /// Create a variant node with value.
 pub fn variant_with_value(name: impl Into<String>, value: i64) -> Entry {
-    let mut v = node(VARIANT, name);
+    let mut v = node(NodeKind::Variant, name);
     v.set_attr("value", Entry::i64(value));
     v
 }
 
 /// Create a global variable node.
 pub fn global(name: impl Into<String>, type_name: impl Into<String>) -> Entry {
-    let mut g = node(GLOBAL, name);
+    let mut g = node(NodeKind::Global, name);
     g.set_attr("type", Entry::string(type_name.into()));
     g
 }
 
 /// Create a typedef node.
 pub fn typedef(name: impl Into<String>, target_type: impl Into<String>) -> Entry {
-    let mut t = node(TYPEDEF, name);
+    let mut t = node(NodeKind::Typedef, name);
     t.set_attr("target_type", Entry::string(target_type.into()));
     t
 }
 
 /// Create a macro node.
 pub fn macro_node(name: impl Into<String>) -> Entry {
-    node(MACRO, name)
+    node(NodeKind::Macro, name)
 }
 
 /// Create an include node.
 pub fn include(path: impl Into<String>, is_system: bool) -> Entry {
-    let mut i = node(INCLUDE, path);
+    let mut i = node(NodeKind::Include, path);
     i.set_attr("is_system", Entry::bool(is_system));
     i
 }
 
 /// Create a comment node.
 pub fn comment(text: impl Into<String>) -> Entry {
-    let mut c = node(COMMENT, "");
+    let mut c = node(NodeKind::Comment, "");
     c.set_attr("text", Entry::string(text.into()));
     c
 }
@@ -404,7 +468,7 @@ impl Build for Function {
     }
 
     fn kind(&self) -> &str {
-        FUNCTION
+        NodeKind::Function.as_str()
     }
     fn name(&self) -> Option<&str> {
         Some(&self.name)
@@ -436,13 +500,13 @@ impl Field {
 
 impl Build for Field {
     fn to_entry(&self) -> Entry {
-        let mut entry = Entry::node("Field", &self.name);
+        let mut entry = Entry::node(NodeKind::Field.as_str(), &self.name);
         entry.set_attr("type", Entry::string(&self.type_name));
         entry
     }
 
     fn kind(&self) -> &str {
-        "Field"
+        NodeKind::Field.as_str()
     }
 
     fn name(&self) -> Option<&str> {
@@ -521,7 +585,7 @@ impl Build for Struct {
     }
 
     fn kind(&self) -> &str {
-        STRUCT
+        NodeKind::Struct.as_str()
     }
     fn name(&self) -> Option<&str> {
         Some(&self.name)
@@ -560,7 +624,7 @@ impl Variant {
 
 impl Build for Variant {
     fn to_entry(&self) -> Entry {
-        let mut entry = Entry::node("Variant", &self.name);
+        let mut entry = Entry::node(NodeKind::Variant.as_str(), &self.name);
         if let Some(v) = self.value {
             entry.set_attr("value", Entry::i64(v));
         }
@@ -568,7 +632,7 @@ impl Build for Variant {
     }
 
     fn kind(&self) -> &str {
-        "Variant"
+        NodeKind::Variant.as_str()
     }
 
     fn name(&self) -> Option<&str> {
@@ -647,7 +711,7 @@ impl Build for Enum {
     }
 
     fn kind(&self) -> &str {
-        ENUM
+        NodeKind::Enum.as_str()
     }
     fn name(&self) -> Option<&str> {
         Some(&self.name)
@@ -669,14 +733,14 @@ mod tests {
     use crate::db::web::Entry;
     #[test]
     fn test_node_creation() {
-        let n = node(FUNCTION, "main");
+        let n = node("Function", "main");
         assert_eq!(n.kind(), Some("Function"));
         assert_eq!(n.name(), Some("main"));
     }
 
     #[test]
     fn test_node_with_range() {
-        let n = node_with_range(STRUCT, "Point", 10..50);
+        let n = node_with_range("Struct", "Point", 10..50);
         assert_eq!(n.source_range(), Some(10..50));
     }
 

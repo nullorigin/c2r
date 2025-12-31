@@ -457,7 +457,7 @@ impl<'a> Query<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::node::kind;
+    use crate::db::node::NodeKind;
     use crate::db::tree::Tree;
 
     #[test]
@@ -521,8 +521,8 @@ mod tests {
             .with_struct("MyStruct", 101..150, |s| s);
 
         let query = Query::new(&tree);
-        assert_eq!(query.by_kind(kind::FUNCTION).len(), 2);
-        assert_eq!(query.by_kind(kind::STRUCT).len(), 1);
+        assert_eq!(query.by_kind(NodeKind::Function.into()).len(), 2);
+        assert_eq!(query.by_kind(NodeKind::Struct.into()).len(), 1);
     }
 
     #[test]
@@ -534,12 +534,12 @@ mod tests {
         let query = Query::new(&tree);
         assert!(
             query
-                .by_kind_and_name(kind::FUNCTION, "calculate")
+                .by_kind_and_name(NodeKind::Function.into(), "calculate")
                 .is_some()
         );
         assert!(
             query
-                .by_kind_and_name(kind::FUNCTION, "nonexistent")
+                .by_kind_and_name(NodeKind::Function.into(), "nonexistent")
                 .is_none()
         );
     }

@@ -2,11 +2,13 @@
 //!
 //! Converts C conditional constructs (if/else, switch/case) to Rust equivalents.
 
+use std::collections::HashMap;
+
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
 use crate::handlers::expressions::ComparisonConverter;
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, Processor, ProcessorState, ProcessorStats};
 use crate::system::system;
 
 // ============================================================================
@@ -40,6 +42,7 @@ fn split_statements(tokens: &[Token], filter_breaks: bool) -> Vec<Vec<Token>> {
     let mut statements = Vec::new();
     let mut current = Vec::new();
     let mut brace_depth = 0;
+    let mut paren_depth = 0;
     let mut in_control = false;
 
     for token in filtered {
@@ -52,12 +55,15 @@ fn split_statements(tokens: &[Token], filter_breaks: bool) -> Vec<Vec<Token>> {
         match s.as_str() {
             "{" => brace_depth += 1,
             "}" => brace_depth -= 1,
+            "(" => paren_depth += 1,
+            ")" => paren_depth -= 1,
             _ => {}
         }
 
         current.push(token);
 
-        if (s == ";" && brace_depth == 0) || (s == "}" && brace_depth == 0 && in_control) {
+        // Only treat semicolon as statement end when not inside parens (e.g., for loop header)
+        if (s == ";" && brace_depth == 0 && paren_depth == 0) || (s == "}" && brace_depth == 0 && in_control) {
             if !current.is_empty() {
                 statements.push(std::mem::take(&mut current));
             }
@@ -85,25 +91,27 @@ pub struct IfElseData {
     pub else_body: Option<Vec<Token>>,
 }
 
+impl Build for IfElseData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("IfElseData", "if_else");
+        entry.set_attr("condition", Entry::string(&self.condition));
+        entry
+    }
+    fn kind(&self) -> &str { "IfElseData" }
+    fn category(&self) -> Option<&str> { Some("conditional") }
+}
+
 /// Handler for C if/else statements
 #[derive(Debug)]
 pub struct IfElseHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: IfElseData,
+    state: ProcessorState<IfElseData>,
     cmp_converter: ComparisonConverter,
 }
 
 impl IfElseHandler {
     pub fn new() -> Self {
         Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: IfElseData::default(),
+            state: ProcessorState::new("IfElseHandler"),
             cmp_converter: ComparisonConverter::new(),
         }
     }
@@ -111,8 +119,54 @@ impl IfElseHandler {
     fn convert_condition(&mut self, cond: &str) -> String {
         // Convert arrow operators first
         let converted = Self::convert_arrow_operator(cond);
-        let tokens: Vec<&str> = converted.split_whitespace().collect();
-        self.cmp_converter.convert_logical(&tokens)
+        // Use smart split that preserves character literals like ' ' and '\0'
+        let tokens = Self::split_preserving_char_literals(&converted);
+        let token_refs: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
+        let logical = self.cmp_converter.convert_logical(&token_refs);
+        // Convert integer-as-boolean expressions to proper Rust boolean
+        crate::handlers::common::convert_int_to_bool(&logical)
+    }
+    
+    /// Split string by whitespace but preserve character literals like ' ', '\0', 'a'
+    fn split_preserving_char_literals(s: &str) -> Vec<String> {
+        let mut tokens = Vec::new();
+        let mut current = String::new();
+        let mut chars = s.chars().peekable();
+        
+        while let Some(c) = chars.next() {
+            if c == '\'' {
+                // Start of character literal - collect until closing quote
+                current.push(c);
+                while let Some(&next) = chars.peek() {
+                    current.push(chars.next().unwrap());
+                    if next == '\'' {
+                        break;
+                    }
+                    // Handle escape sequences like '\0', '\n'
+                    if next == '\\' {
+                        if let Some(&_escaped) = chars.peek() {
+                            current.push(chars.next().unwrap());
+                        }
+                    }
+                }
+                // Push the complete character literal as a token
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            } else if c.is_whitespace() {
+                if !current.is_empty() {
+                    tokens.push(std::mem::take(&mut current));
+                }
+            } else {
+                current.push(c);
+            }
+        }
+        
+        if !current.is_empty() {
+            tokens.push(current);
+        }
+        
+        tokens
     }
 
     /// Convert C arrow operator (ptr->field or ptr -> field) to Rust (*ptr).field
@@ -199,7 +253,7 @@ impl IfElseHandler {
                     if let Some(bp) = token_strs[cp..].iter().position(|t| t == "{") {
                         let bp = cp + bp;
                         if let Some(cb) = find_matching_close(token_strs, bp, "{", "}") {
-                            self.data.else_ifs.push((cond, tokens[bp + 1..cb].to_vec()));
+                            self.state.data.else_ifs.push((cond, tokens[bp + 1..cb].to_vec()));
                             if cb + 1 < token_strs.len() && token_strs[cb + 1] == "else" {
                                 self.extract_else(token_strs, tokens, cb + 1);
                             }
@@ -212,7 +266,7 @@ impl IfElseHandler {
             if let Some(bp) = token_strs[else_pos..].iter().position(|t| t == "{") {
                 let bp = else_pos + bp;
                 if let Some(cb) = find_matching_close(token_strs, bp, "{", "}") {
-                    self.data.else_body = Some(tokens[bp + 1..cb].to_vec());
+                    self.state.data.else_body = Some(tokens[bp + 1..cb].to_vec());
                 }
             }
         }
@@ -226,6 +280,11 @@ impl Default for IfElseHandler {
 impl Processor for IfElseHandler {
     fn supported_patterns(&self) -> &[&str] {
         &["validate_if_statement", "extract_if_statement", "validate_if_else_statement", "extract_if_else_statement"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -286,15 +345,29 @@ impl Processor for IfElseHandler {
     }
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
-        if tokens.len() < 5 { return false; }
+        if tokens.len() < 5 {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
+            return false;
+        }
         let first = tokens[0].to_string();
-        if first != "if" { return false; }
-        if !tokens.iter().any(|t| t.to_string() == "(") { return false; }
+        if first != "if" {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
+            return false;
+        }
+        if !tokens.iter().any(|t| t.to_string() == "(") {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
+            return false;
+        }
 
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        self.confidence = self.patterns().iter()
+        self.state.set_confidence(self.patterns().iter()
             .filter_map(|(p, _)| p.matches_tokens(&token_strs))
-            .fold(0.8, f64::max);
+            .fold(0.8, f64::max));
+        self.state.stats.record_success(self.state.confidence, tokens.len(), 0, Some("if_else"), "validated");
+        self.stats();
         true
     }
 
@@ -311,13 +384,13 @@ impl Processor for IfElseHandler {
             None => return false,
         };
 
-        self.data.condition = token_strs[paren_pos + 1..close_paren].join(" ");
+        self.state.data.condition = token_strs[paren_pos + 1..close_paren].join(" ");
 
         // Check if there's a brace after the condition
         if let Some(bp) = token_strs[close_paren..].iter().position(|t| t == "{") {
             let bp = close_paren + bp;
             if let Some(cb) = find_matching_close(&token_strs, bp, "{", "}") {
-                self.data.if_body = tokens[bp + 1..cb].to_vec();
+                self.state.data.if_body = tokens[bp + 1..cb].to_vec();
                 if cb + 1 < token_strs.len() && token_strs[cb + 1] == "else" {
                     self.extract_else(&token_strs, tokens, cb + 1);
                 }
@@ -346,53 +419,57 @@ impl Processor for IfElseHandler {
                     }
                     body_end = i + 1;
                 }
-                self.data.if_body = tokens[body_start..body_end].to_vec();
+                self.state.data.if_body = tokens[body_start..body_end].to_vec();
             }
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("if_else"), "extracted");
+        self.stats();
         true
     }
 
     fn convert(&mut self) -> Option<String> {
         let base_indent = system().indent_str();
-        let cond = self.convert_condition(&self.data.condition.clone());
-        let if_body = self.convert_body(&self.data.if_body.clone());
+        let cond = self.convert_condition(&self.state.data.condition.clone());
+        let if_body = self.convert_body(&self.state.data.if_body.clone());
 
         let mut result = format!("{}if {} {{\n{}\n{}}}", base_indent, cond, if_body, base_indent);
 
-        for (else_cond, else_body) in &self.data.else_ifs.clone() {
+        for (else_cond, else_body) in &self.state.data.else_ifs.clone() {
             let conv_cond = self.convert_condition(else_cond);
             let conv_body = self.convert_body(else_body);
             result.push_str(&format!(" else if {} {{\n{}\n{}}}", conv_cond, conv_body, base_indent));
         }
 
-        if let Some(ref else_body) = self.data.else_body.clone() {
+        if let Some(ref else_body) = self.state.data.else_body.clone() {
             let conv_body = self.convert_body(else_body);
             result.push_str(&format!(" else {{\n{}\n{}}}", conv_body, base_indent));
         }
 
-        self.confidence = 0.9;
+        self.state.set_confidence(0.9);
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("if_else"), "converted");
+        self.stats();
         Some(result)
     }
 
-    fn current_stage(&self) -> ProcessStage { self.stage }
-    fn set_stage(&mut self, stage: ProcessStage) { self.stage = stage; }
-    fn output(&self) -> Option<String> { self.output.clone() }
-    fn set_output(&mut self, output: String) { self.output = Some(output); }
-    fn error(&self) -> Option<String> { self.error.clone() }
-    fn set_error(&mut self, error: String) { self.error = Some(error); }
-    fn confidence(&self) -> f64 { self.confidence }
-    fn set_confidence(&mut self, confidence: f64) { self.confidence = confidence; }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for IfElseHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "IfElseHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("condition", Entry::string(&self.data.condition));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("condition", Entry::string(&self.state.data.condition));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry
@@ -422,25 +499,26 @@ pub struct SwitchData {
     pub default_body: Option<Vec<Token>>,
 }
 
+impl Build for SwitchData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("SwitchData", "switch");
+        entry.set_attr("expression", Entry::string(&self.expression));
+        entry.set_attr("case_count", Entry::usize(self.cases.len()));
+        entry
+    }
+    fn kind(&self) -> &str { "SwitchData" }
+    fn category(&self) -> Option<&str> { Some("conditional") }
+}
+
 /// Handler for C switch/case statements
 #[derive(Debug)]
 pub struct SwitchCaseHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: SwitchData,
+    state: ProcessorState<SwitchData>,
 }
 
 impl SwitchCaseHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: SwitchData::default(),
-        }
+        Self { state: ProcessorState::new("SwitchCaseHandler") }
     }
 
     fn extract_cases(&mut self, token_strs: &[String], tokens: &[Token]) {
@@ -490,9 +568,9 @@ impl SwitchCaseHandler {
             };
 
             if is_default {
-                self.data.default_body = Some(body);
+                self.state.data.default_body = Some(body);
             } else {
-                self.data.cases.push(CaseData { value, body, falls_through: !has_break });
+                self.state.data.cases.push(CaseData { value, body, falls_through: !has_break });
             }
 
             i = if has_break {
@@ -531,6 +609,11 @@ impl Processor for SwitchCaseHandler {
         &["validate_switch_statement", "extract_switch_statement", "validate_case", "extract_case"]
     }
 
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
+    }
+
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
         vec![(
             Pattern::definition(410, "validate_switch_statement", vec![
@@ -558,13 +641,23 @@ impl Processor for SwitchCaseHandler {
     }
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
-        if tokens.len() < 6 { return false; }
-        if tokens[0].to_string() != "switch" { return false; }
+        if tokens.len() < 6 {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
+            return false;
+        }
+        if tokens[0].to_string() != "switch" {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
+            return false;
+        }
 
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        self.confidence = self.patterns().iter()
+        self.state.set_confidence(self.patterns().iter()
             .filter_map(|(p, _)| p.matches_tokens(&token_strs))
-            .fold(0.8, f64::max);
+            .fold(0.8, f64::max));
+        self.state.stats.record_success(self.state.confidence, tokens.len(), 0, Some("switch"), "validated");
+        self.stats();
         true
     }
 
@@ -581,7 +674,7 @@ impl Processor for SwitchCaseHandler {
             None => return false,
         };
 
-        self.data.expression = token_strs[paren_pos + 1..close_paren].join(" ");
+        self.state.data.expression = token_strs[paren_pos + 1..close_paren].join(" ");
 
         if let Some(bp) = token_strs[close_paren..].iter().position(|t| t == "{") {
             let bp = close_paren + bp;
@@ -590,13 +683,15 @@ impl Processor for SwitchCaseHandler {
             }
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("switch"), "extracted");
+        self.stats();
         true
     }
 
     fn convert(&mut self) -> Option<String> {
-        let expr = system().lookup_identifier(&self.data.expression)
-            .unwrap_or_else(|| self.data.expression.clone());
+        let expr = system().lookup_identifier(&self.state.data.expression)
+            .unwrap_or_else(|| self.state.data.expression.clone());
 
         let base_indent = system().indent_str();
         let arm_indent = format!("{}    ", base_indent);
@@ -604,7 +699,7 @@ impl Processor for SwitchCaseHandler {
 
         let mut arms: Vec<String> = Vec::new();
 
-        for case in &self.data.cases.clone() {
+        for case in &self.state.data.cases.clone() {
             if let Some(ref value) = case.value {
                 let body = self.convert_case_body(&case.body.clone());
                 let indented = body.lines()
@@ -616,7 +711,7 @@ impl Processor for SwitchCaseHandler {
             }
         }
 
-        if let Some(ref default_body) = self.data.default_body.clone() {
+        if let Some(ref default_body) = self.state.data.default_body.clone() {
             let body = self.convert_case_body(default_body);
             let indented = body.lines()
                 .map(|l| if l.trim().is_empty() { String::new() } else { format!("{}{}", body_indent, l.trim()) })
@@ -627,28 +722,30 @@ impl Processor for SwitchCaseHandler {
             arms.push(format!("{}_ => {{}}", arm_indent));
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("switch"), "converted");
+        self.stats();
         Some(format!("{}match {} {{\n{}\n{}}}", base_indent, expr, arms.join(",\n"), base_indent))
     }
 
-    fn current_stage(&self) -> ProcessStage { self.stage }
-    fn set_stage(&mut self, stage: ProcessStage) { self.stage = stage; }
-    fn output(&self) -> Option<String> { self.output.clone() }
-    fn set_output(&mut self, output: String) { self.output = Some(output); }
-    fn error(&self) -> Option<String> { self.error.clone() }
-    fn set_error(&mut self, error: String) { self.error = Some(error); }
-    fn confidence(&self) -> f64 { self.confidence }
-    fn set_confidence(&mut self, confidence: f64) { self.confidence = confidence; }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for SwitchCaseHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "SwitchCaseHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("expression", Entry::string(&self.data.expression));
-        entry.set_attr("case_count", Entry::usize(self.data.cases.len()));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("expression", Entry::string(&self.state.data.expression));
+        entry.set_attr("case_count", Entry::usize(self.state.data.cases.len()));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry
@@ -676,7 +773,7 @@ mod tests {
         let mut handler = IfElseHandler::new();
         assert!(handler.validate(&tokens));
         assert!(handler.extract(&tokens));
-        assert_eq!(handler.data.condition, "x > 0");
+        assert_eq!(handler.state.data.condition, "x > 0");
     }
 
     #[test]
@@ -687,7 +784,7 @@ mod tests {
         let mut handler = IfElseHandler::new();
         assert!(handler.validate(&tokens));
         assert!(handler.extract(&tokens));
-        assert!(handler.data.else_body.is_some());
+        assert!(handler.state.data.else_body.is_some());
     }
 
     #[test]
@@ -699,8 +796,8 @@ mod tests {
         let mut handler = SwitchCaseHandler::new();
         assert!(handler.validate(&tokens));
         assert!(handler.extract(&tokens));
-        assert_eq!(handler.data.expression, "x");
-        assert_eq!(handler.data.cases.len(), 2);
+        assert_eq!(handler.state.data.expression, "x");
+        assert_eq!(handler.state.data.cases.len(), 2);
     }
 
     #[test]

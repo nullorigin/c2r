@@ -7,7 +7,7 @@ use crate::db::convert::IdentifierConverter;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, Processor, ProcessorState, ProcessorStats};
 use crate::system::system;
 
 // ============================================================================
@@ -251,24 +251,24 @@ pub struct ExpressionData {
     pub right: Option<String>,
 }
 
+impl Build for ExpressionData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("ExpressionData", "expression");
+        if let Some(ref op) = self.operator { entry.set_attr("operator", Entry::string(op)); }
+        entry
+    }
+    fn kind(&self) -> &str { "ExpressionData" }
+    fn category(&self) -> Option<&str> { Some("expression") }
+}
+
 #[derive(Debug)]
 pub struct ExpressionHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: ExpressionData,
+    state: ProcessorState<ExpressionData>,
 }
 
 impl ExpressionHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: ExpressionData::default(),
-        }
+        Self { state: ProcessorState::new("ExpressionHandler") }
     }
 
     fn is_operator(token: &str) -> bool {
@@ -400,7 +400,17 @@ impl Default for ExpressionHandler {
 
 impl Processor for ExpressionHandler {
     fn supported_patterns(&self) -> &[&str] {
-        &["validate_binary_expression", "extract_binary_expression"]
+        &[
+            "validate_expression",
+            "extract_expression",
+            "validate_assignment",
+            "extract_assignment",
+        ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -482,7 +492,7 @@ impl Processor for ExpressionHandler {
             for t in tokens {
                 let s = t.to_string();
                 if s == "++" || s == "--" {
-                    self.confidence = 0.7;
+                    self.state.set_confidence(0.7);
                     return true;
                 }
             }
@@ -496,7 +506,7 @@ impl Processor for ExpressionHandler {
         // Must contain an operator
         for t in tokens {
             if Self::is_operator(&t.to_string()) {
-                self.confidence = 0.6;
+                self.state.set_confidence(0.6);
                 return true;
             }
         }
@@ -506,17 +516,17 @@ impl Processor for ExpressionHandler {
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        self.data.tokens = token_strs.clone();
+        self.state.data.tokens = token_strs.clone();
 
         // Try extraction patterns first
         for (_, extract_pattern) in self.patterns() {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
-                self.data.left = ctx.value("left").map(String::from);
-                self.data.operator = ctx.value("operator").map(String::from);
-                self.data.right = ctx.value("right").map(String::from);
+                self.state.data.left = ctx.value("left").map(String::from);
+                self.state.data.operator = ctx.value("operator").map(String::from);
+                self.state.data.right = ctx.value("right").map(String::from);
 
-                if self.data.operator.is_some() {
-                    self.confidence = 0.7;
+                if self.state.data.operator.is_some() {
+                    self.state.set_confidence(0.7);
                     return true;
                 }
             }
@@ -524,17 +534,17 @@ impl Processor for ExpressionHandler {
 
         // Fallback to manual extraction
         if let Some((i, op)) = token_strs.iter().enumerate().find(|(_, t)| Self::is_operator(t)) {
-            self.data.operator = Some(op.clone());
-            self.data.left = (i > 0).then(|| token_strs[..i].join(" "));
-            self.data.right = (i + 1 < token_strs.len()).then(|| token_strs[i + 1..].join(" "));
+            self.state.data.operator = Some(op.clone());
+            self.state.data.left = (i > 0).then(|| token_strs[..i].join(" "));
+            self.state.data.right = (i + 1 < token_strs.len()).then(|| token_strs[i + 1..].join(" "));
         }
 
-        self.confidence = 0.7;
+        self.state.set_confidence(0.7);
         true
     }
 
     fn convert(&mut self) -> Option<String> {
-        let tokens = &self.data.tokens;
+        let tokens = &self.state.data.tokens;
         if tokens.is_empty() {
             return None;
         }
@@ -547,7 +557,7 @@ impl Processor for ExpressionHandler {
                     let ptr_name = tokens[1..eq_pos].join("");
                     let value_tokens = &tokens[eq_pos + 1..];
                     let value = value_tokens.join(" ");
-                    self.confidence = 0.85;
+                    self.state.set_confidence(0.85);
                     return Some(format!("*{} = {}", ptr_name, value));
                 }
             }
@@ -555,7 +565,7 @@ impl Processor for ExpressionHandler {
 
         // Check for ternary operator and convert first
         if let Some(ternary_result) = self.convert_ternary(tokens) {
-            self.confidence = 0.85;
+            self.state.set_confidence(0.85);
             return Some(ternary_result);
         }
 
@@ -630,6 +640,10 @@ impl Processor for ExpressionHandler {
                     }
                     result.push(token.clone());
                 }
+                // C bitwise NOT ~ becomes Rust !
+                "~" => {
+                    result.push("!".to_string());
+                }
                 "++" | "--" => {
                     let op = if token == "++" { "+=" } else { "-=" };
                     if let Some(prev) = result.last_mut() {
@@ -687,59 +701,36 @@ impl Processor for ExpressionHandler {
             i += 1;
         }
 
-        self.confidence = 0.8;
+        self.state.set_confidence(0.8);
         Some(result.join(" "))
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
-    }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
-    }
-    fn output(&self) -> Option<String> {
-        self.output.clone()
-    }
-    fn set_output(&mut self, output: String) {
-        self.output = Some(output);
-    }
-    fn error(&self) -> Option<String> {
-        self.error.clone()
-    }
-    fn set_error(&mut self, error: String) {
-        self.error = Some(error);
-    }
-    fn confidence(&self) -> f64 {
-        self.confidence
-    }
-    fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
-    }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for ExpressionHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "ExpressionHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
-        if let Some(ref op) = self.data.operator {
+        if let Some(ref op) = self.state.data.operator {
             entry.set_attr("operator", Entry::string(op));
         }
         entry
     }
-
-    fn kind(&self) -> &str {
-        "Handler"
-    }
-    fn name(&self) -> Option<&str> {
-        Some("ExpressionHandler")
-    }
-    fn category(&self) -> Option<&str> {
-        Some("expression")
-    }
+    fn kind(&self) -> &str { "Handler" }
+    fn name(&self) -> Option<&str> { Some("ExpressionHandler") }
+    fn category(&self) -> Option<&str> { Some("expression") }
 }
 
 // ============================================================================
@@ -753,37 +744,34 @@ pub struct StringFormatData {
     pub arguments: Vec<String>,
 }
 
+impl Build for StringFormatData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("StringFormatData", "string_format");
+        entry.set_attr("function_name", Entry::string(&self.function_name));
+        entry
+    }
+    fn kind(&self) -> &str { "StringFormatData" }
+    fn category(&self) -> Option<&str> { Some("expression") }
+}
+
 #[derive(Debug)]
 pub struct StringFormatHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: StringFormatData,
+    state: ProcessorState<StringFormatData>,
 }
 
 impl StringFormatHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: StringFormatData::default(),
-        }
+        Self { state: ProcessorState::new("StringFormatHandler") }
     }
 
-    fn convert_arrow_operator(arg: &str) -> String {
-        if arg.contains(" -> ") {
-            let parts: Vec<&str> = arg.split(" -> ").collect();
-            if parts.len() == 2 { return format!("(*{}).{}", parts[0].trim(), parts[1].trim()); }
-        }
-        if arg.contains("->") && !arg.contains(" -> ") {
-            let parts: Vec<&str> = arg.split("->").collect();
-            if parts.len() == 2 { return format!("(*{}).{}", parts[0].trim(), parts[1].trim()); }
-        }
-        arg.to_string()
+    fn convert_argument(arg: &str) -> String {
+        use crate::handlers::common::{convert_arrow_operator, convert_c_style_cast};
+        
+        // First convert arrow operators, then C-style casts
+        let result = convert_arrow_operator(arg);
+        convert_c_style_cast(&result)
     }
+
 
     fn convert_format_string(&self, format: &str) -> String {
         let mut result = String::new();
@@ -820,7 +808,7 @@ impl StringFormatHandler {
     }
 
     fn get_rust_macro(&self) -> &str {
-        match self.data.function_name.as_str() {
+        match self.state.data.function_name.as_str() {
             "printf" => "print!",
             "puts" | "println" => "println!",
             "fprintf" => "write!",
@@ -831,7 +819,7 @@ impl StringFormatHandler {
     }
 
     fn is_println_style(&self) -> bool {
-        self.data.format_string.ends_with("\\n") || self.data.format_string.ends_with('\n')
+        self.state.data.format_string.ends_with("\\n") || self.state.data.format_string.ends_with('\n')
     }
 }
 
@@ -842,6 +830,11 @@ impl Default for StringFormatHandler {
 impl Processor for StringFormatHandler {
     fn supported_patterns(&self) -> &[&str] {
         &["validate_printf_call", "extract_printf_call"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -874,13 +867,13 @@ impl Processor for StringFormatHandler {
             else if s == ")" { has_close = true; break; }
         }
         if !has_open || !has_close { return false; }
-        self.confidence = 0.9;
+        self.state.set_confidence(0.9);
         true
     }
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        self.data.function_name = token_strs[0].clone();
+        self.state.data.function_name = token_strs[0].clone();
 
         let open_paren = match token_strs.iter().position(|t| t == "(") { Some(p) => p, None => return false };
         let close_paren = match token_strs.iter().rposition(|t| t == ")") { Some(p) => p, None => return false };
@@ -889,7 +882,7 @@ impl Processor for StringFormatHandler {
         let args = &token_strs[open_paren + 1..close_paren];
         if args.is_empty() { return false; }
 
-        let format_start = if matches!(self.data.function_name.as_str(), "fprintf" | "snprintf") {
+        let format_start = if matches!(self.state.data.function_name.as_str(), "fprintf" | "snprintf") {
             args.iter().position(|t| t == ",").map(|p| p + 1).unwrap_or(0)
         } else { 0 };
 
@@ -914,7 +907,7 @@ impl Processor for StringFormatHandler {
                 (format, end_idx)
             } else { (first.clone(), 0) }
         };
-        self.data.format_string = format_str;
+        self.state.data.format_string = format_str;
 
         let arg_start = format_start + format_end + 1;
         if arg_start < args.len() {
@@ -924,28 +917,47 @@ impl Processor for StringFormatHandler {
 
             for token in arg_tokens {
                 match token.as_str() {
-                    "(" => { paren_depth += 1; if !current_arg.is_empty() { current_arg.push(' '); } current_arg.push_str(token); }
-                    ")" => { paren_depth -= 1; if !current_arg.is_empty() { current_arg.push(' '); } current_arg.push_str(token); }
+                    "(" => { 
+                        paren_depth += 1; 
+                        // No space before '('
+                        current_arg.push_str(token); 
+                    }
+                    ")" => { 
+                        paren_depth -= 1; 
+                        // No space before ')'
+                        current_arg.push_str(token); 
+                    }
                     "," if paren_depth == 0 => {
                         let trimmed = current_arg.trim().to_string();
-                        if !trimmed.is_empty() { self.data.arguments.push(trimmed); }
+                        if !trimmed.is_empty() { self.state.data.arguments.push(trimmed); }
                         current_arg.clear();
                     }
-                    _ => { if !current_arg.is_empty() { current_arg.push(' '); } current_arg.push_str(token); }
+                    "*" | "&" => {
+                        // No space before/after pointer/reference operators when adjacent to parens
+                        current_arg.push_str(token);
+                    }
+                    _ => { 
+                        // Add space only if not after '(' or before special chars
+                        let last_char = current_arg.chars().last();
+                        if !current_arg.is_empty() && last_char != Some('(') && last_char != Some('*') && last_char != Some('&') {
+                            current_arg.push(' '); 
+                        }
+                        current_arg.push_str(token); 
+                    }
                 }
             }
             let trimmed = current_arg.trim().to_string();
-            if !trimmed.is_empty() { self.data.arguments.push(trimmed); }
+            if !trimmed.is_empty() { self.state.data.arguments.push(trimmed); }
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         true
     }
 
     fn convert(&mut self) -> Option<String> {
-        let format_string = self.data.format_string.clone();
-        let function_name = self.data.function_name.clone();
-        let arguments = self.data.arguments.clone();
+        let format_string = self.state.data.format_string.clone();
+        let function_name = self.state.data.function_name.clone();
+        let arguments = self.state.data.arguments.clone();
         
         let rust_format = self.convert_format_string(&format_string);
         let is_println = format_string.ends_with("\\n") || format_string.ends_with('\n');
@@ -963,29 +975,29 @@ impl Processor for StringFormatHandler {
             rust_format[..rust_format.len() - 1].to_string() 
         } else { rust_format };
 
-        let converted_args: Vec<String> = arguments.iter().map(|arg| Self::convert_arrow_operator(arg)).collect();
+        let converted_args: Vec<String> = arguments.iter().map(|arg| Self::convert_argument(arg)).collect();
         let args = if converted_args.is_empty() { String::new() } else { format!(", {}", converted_args.join(", ")) };
 
-        self.confidence = 0.9;
+        self.state.set_confidence(0.9);
         Some(format!("{}(\"{}\"{})", macro_name, format_str, args))
     }
 
-    fn current_stage(&self) -> ProcessStage { self.stage }
-    fn set_stage(&mut self, stage: ProcessStage) { self.stage = stage; }
-    fn output(&self) -> Option<String> { self.output.clone() }
-    fn set_output(&mut self, output: String) { self.output = Some(output); }
-    fn error(&self) -> Option<String> { self.error.clone() }
-    fn set_error(&mut self, error: String) { self.error = Some(error); }
-    fn confidence(&self) -> f64 { self.confidence }
-    fn set_confidence(&mut self, confidence: f64) { self.confidence = confidence; }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for StringFormatHandler {
     fn to_entry(&self) -> Entry {
-        let mut entry = Entry::node("StringFormatHandler", "string_format_handler");
-        entry.set_attr("stage", Entry::string(&format!("{:?}", self.stage)));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        if let Some(ref output) = self.output { entry.set_attr("output", Entry::string(output)); }
+        let mut entry = Entry::node("Handler", "StringFormatHandler");
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        if let Some(ref output) = self.state.output { entry.set_attr("output", Entry::string(output)); }
         entry
     }
     fn kind(&self) -> &str { "Handler" }

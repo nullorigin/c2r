@@ -391,7 +391,7 @@ fn format_entry_compact(entry: &Entry) -> String {
 
 fn format_entry_markdown(entry: &Entry, level: usize) -> String {
     let mut out = String::new();
-    let heading = "#".repeat(level.min(6).max(1));
+    let heading = "#".repeat(level.max(1).min(6));
 
     match entry {
         Entry::Node {
@@ -433,7 +433,7 @@ fn format_entry_csv(entry: &Entry) -> String {
             writeln!(out, "{}", headers.join(",")).unwrap();
 
             // Data row
-            let mut values: Vec<String> = vec![kind.clone(), name.clone()];
+            let mut values: Vec<String> = vec![csv_escape(kind), csv_escape(name)];
             for key in &keys {
                 values.push(csv_escape(&entry_value_string(attrs.get(*key).unwrap())));
             }
@@ -446,7 +446,7 @@ fn format_entry_csv(entry: &Entry) -> String {
                     out,
                     "{},{},{}",
                     i,
-                    item.type_name(),
+                    csv_escape(item.type_name()),
                     csv_escape(&entry_value_string(item))
                 )
                 .unwrap();
@@ -457,7 +457,7 @@ fn format_entry_csv(entry: &Entry) -> String {
             writeln!(
                 out,
                 "{},{}",
-                entry.type_name(),
+                csv_escape(entry.type_name()),
                 csv_escape(&entry.to_string())
             )
             .unwrap();
@@ -472,15 +472,23 @@ fn format_entry_custom(entry: &Entry, template: &str) -> String {
     result = result.replace("{type}", entry.type_name());
     result = result.replace("{value}", &entry.to_string());
 
-    if let Entry::Node {
-        kind, name, attrs, ..
-    } = entry
-    {
-        result = result.replace("{kind}", kind);
-        result = result.replace("{name}", name);
-        for (key, value) in attrs {
-            result = result.replace(&format!("{{attr:{}}}", key), &entry_value_string(value));
+    match entry {
+        Entry::Node {
+            kind, name, attrs, ..
+        } => {
+            result = result.replace("{kind}", kind);
+            result = result.replace("{name}", name);
+            for (key, value) in attrs {
+                result = result.replace(&format!("{{attr:{}}}", key), &entry_value_string(value));
+            }
         }
+        Entry::Vec(items, _) => {
+            result = result.replace("{len}", &items.len().to_string());
+        }
+        Entry::HashMap(map, _) => {
+            result = result.replace("{len}", &map.len().to_string());
+        }
+        _ => {}
     }
 
     result

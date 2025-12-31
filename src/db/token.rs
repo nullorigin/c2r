@@ -70,23 +70,19 @@ impl TokenRange {
 
 impl Build for TokenRange {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert("start".to_string(), Entry::usize(self.start));
-        attrs.insert("end".to_string(), Entry::usize(self.end));
+        let mut entry = Entry::node("TokenRange", &format!("{}..{}", self.start, self.end));
+        entry.set_attr("start", Entry::usize(self.start));
+        entry.set_attr("end", Entry::usize(self.end));
         if !self.source_file.is_empty() {
-            attrs.insert("source_file".to_string(), Entry::string(&self.source_file));
+            entry.set_attr("source_file", Entry::string(&self.source_file));
         }
         if let Some(line) = self.line_start {
-            attrs.insert("line_start".to_string(), Entry::usize(line));
+            entry.set_attr("line_start", Entry::usize(line));
         }
         if let Some(line) = self.line_end {
-            attrs.insert("line_end".to_string(), Entry::usize(line));
+            entry.set_attr("line_end", Entry::usize(line));
         }
-        Entry::node_with_attrs(
-            "TokenRange",
-            &format!("{}..{}", self.start, self.end),
-            attrs,
-        )
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -562,7 +558,15 @@ impl Token {
 
 impl Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.value.to_string_repr())
+        // Add quotes for string literals
+        if self.is_string {
+            write!(f, "\"{}\"", self.value.to_string_repr())
+        } else if self.is_literal && self.token_type == TokenType::Literal {
+            // Character literals get single quotes
+            write!(f, "'{}'", self.value.to_string_repr())
+        } else {
+            write!(f, "{}", self.value.to_string_repr())
+        }
     }
 }
 
@@ -1440,18 +1444,24 @@ impl Tokenizer {
             return None;
         }
 
-        let mut c = self.content[self.position] as char;
+        let start = self.position;
+        let c = self.content[self.position] as char;
 
+        // Handle escape sequences like \0, \n, \t, etc.
         if c == '\\' && self.position + 1 < self.content.len() {
+            self.position += 2; // Skip backslash and escaped char
+        } else {
             self.position += 1;
-            c = self.content[self.position] as char;
         }
 
-        self.position += 1;
-
         if self.position < self.content.len() && self.content[self.position] == b'\'' {
+            // Extract the full literal content (including escape sequences)
+            let literal_content = String::from_utf8_lossy(&self.content[start..self.position]).to_string();
             self.position += 1;
-            return Some(Token::char(c));
+            // Create a string-based token with is_literal flag for proper quoting
+            let mut token = Token::new(&literal_content, TokenType::Literal);
+            token.is_literal = true;
+            return Some(token);
         }
 
         None

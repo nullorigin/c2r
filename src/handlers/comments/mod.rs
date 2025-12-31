@@ -10,7 +10,8 @@ use std::ops::Range;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessDecision, ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, ProcessorDecision, Processor, ProcessorState, ProcessorStats};
+use crate::system::system;
 
 // ============================================================================
 // Comment Handler Implementation
@@ -33,6 +34,23 @@ impl Default for CommentKind {
     }
 }
 
+impl CommentKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Line => "line",
+            Self::Block => "block",
+            Self::Doc => "doc",
+        }
+    }
+}
+
+impl Build for CommentKind {
+    fn to_entry(&self) -> Entry { Entry::string(self.as_str()) }
+    fn kind(&self) -> &str { "CommentKind" }
+    fn name(&self) -> Option<&str> { Some(self.as_str()) }
+    fn category(&self) -> Option<&str> { Some("comment") }
+}
+
 /// Extracted comment information
 #[derive(Debug, Clone, Default)]
 pub struct CommentData {
@@ -44,21 +62,33 @@ pub struct CommentData {
     pub is_doc: bool,
 }
 
+impl Build for CommentData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("CommentData", &self.text);
+        entry.set_attr("text", Entry::string(&self.text));
+        entry.set_attr("kind", self.kind.to_entry());
+        entry.set_attr("is_doc", Entry::bool(self.is_doc));
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "CommentData"
+    }
+
+    fn name(&self) -> Option<&str> {
+        Some(&self.text)
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("comment")
+    }
+}
+
 /// Comment handler state for processing
 #[derive(Debug, Clone)]
 pub struct CommentHandler {
-    /// Handler name
-    name: String,
-    /// Current processing stage
-    stage: ProcessStage,
-    /// Extracted comment data
-    data: CommentData,
-    /// Generated Rust output
-    output: Option<String>,
-    /// Error message if failed
-    error: Option<String>,
-    /// Confidence score
-    confidence: f64,
+    /// Generic processor state (stage, confidence, error, output, data)
+    state: ProcessorState<CommentData>,
     /// Token range processed
     range: Range<usize>,
     /// Input tokens (stored for Build trait)
@@ -68,12 +98,7 @@ pub struct CommentHandler {
 impl CommentHandler {
     pub fn new() -> Self {
         Self {
-            name: "comment".to_string(),
-            stage: ProcessStage::Pending,
-            data: CommentData::default(),
-            output: None,
-            error: None,
-            confidence: 0.0,
+            state: ProcessorState::new("CommentHandler"),
             range: 0..0,
             input_tokens: Vec::new(),
         }
@@ -94,6 +119,11 @@ impl Processor for CommentHandler {
             "validate_block_comment",
             "extract_block_comment",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -165,7 +195,7 @@ impl Processor for CommentHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.is_empty() {
-            self.error = Some("No tokens to process".to_string());
+            self.state.set_error("No tokens to process");
             return false;
         }
 
@@ -187,40 +217,40 @@ impl Processor for CommentHandler {
         let first = tokens[0].to_string();
 
         if first.starts_with("//") {
-            self.data.kind = if first.starts_with("///") {
-                self.data.is_doc = true;
+            self.state.data.kind = if first.starts_with("///") {
+                self.state.data.is_doc = true;
                 CommentKind::Doc
             } else {
                 CommentKind::Line
             };
-            self.confidence = if best_confidence > 0.0 {
+            self.state.set_confidence(if best_confidence > 0.0 {
                 best_confidence
             } else {
                 1.0
-            };
+            });
             true
         } else if first.starts_with("/*") {
-            self.data.kind = if first.starts_with("/**") {
-                self.data.is_doc = true;
+            self.state.data.kind = if first.starts_with("/**") {
+                self.state.data.is_doc = true;
                 CommentKind::Doc
             } else {
                 CommentKind::Block
             };
-            self.confidence = if best_confidence > 0.0 {
+            self.state.set_confidence(if best_confidence > 0.0 {
                 best_confidence
             } else {
                 1.0
-            };
+            });
             true
         } else {
-            self.error = Some(format!("Not a comment: '{}'", first));
+            self.state.set_error(format!("Not a comment: '{}'", first));
             false
         }
     }
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
         if tokens.is_empty() {
-            self.error = Some("No tokens to extract".to_string());
+            self.state.set_error("No tokens to extract");
             return false;
         }
 
@@ -232,11 +262,11 @@ impl Processor for CommentHandler {
                 // Get comment type from pattern extraction
                 if let Some(comment_type) = ctx.value("comment_type") {
                     match comment_type {
-                        "line" => self.data.kind = CommentKind::Line,
-                        "block" => self.data.kind = CommentKind::Block,
+                        "line" => self.state.data.kind = CommentKind::Line,
+                        "block" => self.state.data.kind = CommentKind::Block,
                         "doc" => {
-                            self.data.kind = CommentKind::Doc;
-                            self.data.is_doc = true;
+                            self.state.data.kind = CommentKind::Doc;
+                            self.state.data.is_doc = true;
                         }
                         _ => {}
                     }
@@ -244,14 +274,14 @@ impl Processor for CommentHandler {
 
                 // Get content from pattern extraction - strip the comment prefix
                 if let Some(content) = ctx.value("content") {
-                    let prefix_len = if self.data.is_doc { 3 } else { 2 };
-                    self.data.text = content
+                    let prefix_len = if self.state.data.is_doc { 3 } else { 2 };
+                    self.state.data.text = content
                         .chars()
                         .skip(prefix_len)
                         .collect::<String>()
                         .trim()
                         .to_string();
-                    self.confidence = 1.0;
+                    self.state.set_confidence(1.0);
                     return true;
                 }
             }
@@ -260,10 +290,10 @@ impl Processor for CommentHandler {
         // Fallback to manual extraction
         let full_comment = tokens[0].to_string();
 
-        match self.data.kind {
+        match self.state.data.kind {
             CommentKind::Line | CommentKind::Doc => {
-                let prefix_len = if self.data.is_doc { 3 } else { 2 };
-                self.data.text = full_comment
+                let prefix_len = if self.state.data.is_doc { 3 } else { 2 };
+                self.state.data.text = full_comment
                     .chars()
                     .skip(prefix_len)
                     .collect::<String>()
@@ -271,13 +301,13 @@ impl Processor for CommentHandler {
                     .to_string();
             }
             CommentKind::Block => {
-                let start = if self.data.is_doc { 3 } else { 2 };
+                let start = if self.state.data.is_doc { 3 } else { 2 };
                 let text = &full_comment[start..];
-                self.data.text = text.strip_suffix("*/").unwrap_or(text).trim().to_string();
+                self.state.data.text = text.strip_suffix("*/").unwrap_or(text).trim().to_string();
             }
         }
 
-        self.confidence = 1.0;
+        self.state.set_confidence(1.0);
         true
     }
 
@@ -287,19 +317,19 @@ impl Processor for CommentHandler {
         // Block comments: /* ... */ -> /* ... */ (Rust supports these)
         // Doc comments: /// ... -> /// ... (or /** ... */ -> /// ...)
 
-        let rust_code = match self.data.kind {
+        let rust_code = match self.state.data.kind {
             CommentKind::Line => {
-                format!("// {}", self.data.text)
+                format!("// {}", self.state.data.text)
             }
             CommentKind::Doc => {
-                format!("/// {}", self.data.text)
+                format!("/// {}", self.state.data.text)
             }
             CommentKind::Block => {
                 // Convert block comments to line comments for cleaner Rust style
                 // Multi-line block comments become multiple line comments
-                let lines: Vec<&str> = self.data.text.lines().collect();
+                let lines: Vec<&str> = self.state.data.text.lines().collect();
                 if lines.len() == 1 {
-                    format!("// {}", self.data.text)
+                    format!("// {}", self.state.data.text)
                 } else {
                     lines
                         .iter()
@@ -310,40 +340,40 @@ impl Processor for CommentHandler {
             }
         };
 
-        self.confidence = 1.0;
+        self.state.set_confidence(1.0);
         Some(rust_code)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
 
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
 
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
 
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
 
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
 
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
 
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
 
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -353,36 +383,29 @@ impl Processor for CommentHandler {
 
 impl Build for CommentHandler {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
+        let mut entry = Entry::node("Handler", "CommentHandler");
+        
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("text", Entry::string(&self.state.data.text));
+        entry.set_attr("kind", self.state.data.kind.to_entry());
+        entry.set_attr("is_doc", Entry::bool(self.state.data.is_doc));
 
-        attrs.insert("stage".to_string(), Entry::string(self.stage.as_str()));
-        attrs.insert("confidence".to_string(), Entry::f64(self.confidence));
-        attrs.insert("text".to_string(), Entry::string(&self.data.text));
-        attrs.insert(
-            "kind".to_string(),
-            Entry::string(match self.data.kind {
-                CommentKind::Line => "line",
-                CommentKind::Block => "block",
-                CommentKind::Doc => "doc",
-            }),
-        );
-        attrs.insert("is_doc".to_string(), Entry::bool(self.data.is_doc));
-
-        if let Some(ref output) = self.output {
-            attrs.insert("rust_code".to_string(), Entry::string(output));
+        if let Some(ref output) = self.state.output {
+            entry.set_attr("rust_code", Entry::string(output));
         }
 
-        if let Some(ref error) = self.error {
-            attrs.insert("error".to_string(), Entry::string(error));
+        if let Some(ref error) = self.state.error {
+            entry.set_attr("error", Entry::string(error));
         }
 
         let tokens: Vec<Entry> = self.input_tokens.iter().map(|t| Entry::string(t)).collect();
-        attrs.insert("input_tokens".to_string(), Entry::vec(tokens));
+        entry.set_attr("input_tokens", Entry::vec(tokens));
 
-        attrs.insert("range_start".to_string(), Entry::usize(self.range.start));
-        attrs.insert("range_end".to_string(), Entry::usize(self.range.end));
+        entry.set_attr("range_start", Entry::usize(self.range.start));
+        entry.set_attr("range_end", Entry::usize(self.range.end));
 
-        Entry::node_with_attrs("CommentHandler", "comment", attrs)
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -418,9 +441,9 @@ mod tests {
         // Process through all stages
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         assert_eq!(handler.output(), Some("// This is a comment".to_string()));
@@ -434,9 +457,9 @@ mod tests {
 
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         assert_eq!(handler.output(), Some("// Block comment".to_string()));
@@ -449,9 +472,9 @@ mod tests {
 
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         assert_eq!(
@@ -465,8 +488,8 @@ mod tests {
         let mut handler = CommentHandler::new();
         let tokens = make_tokens(&["int", "x", ";"]);
 
-        let decision = handler.process(&tokens);
-        assert!(matches!(decision, ProcessDecision::Fail { .. }));
+        let decision = handler.process(&tokens, None);
+        assert!(matches!(decision, ProcessorDecision::Fail { .. }));
     }
 
     #[test]
@@ -476,9 +499,9 @@ mod tests {
 
         while !matches!(
             handler.current_stage(),
-            ProcessStage::Complete | ProcessStage::Failed
+            ProcessorStage::Complete | ProcessorStage::Failed
         ) {
-            handler.process(&tokens);
+            handler.process(&tokens, None);
         }
 
         let entry = handler.to_entry();

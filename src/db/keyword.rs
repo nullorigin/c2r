@@ -197,12 +197,9 @@ impl Keyword {
 
 impl Build for Keyword {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "category".to_string(),
-            Entry::string(self.category.as_str()),
-        );
-        attrs.insert("priority".to_string(), Entry::i16(self.priority));
+        let mut entry = Entry::node("Keyword", &self.text);
+        entry.set_attr("category", Entry::string(self.category.as_str()));
+        entry.set_attr("priority", Entry::i16(self.priority));
 
         // Convert relations to nested structure
         if !self.relations.is_empty() {
@@ -216,10 +213,10 @@ impl Build for Keyword {
                     )
                 })
                 .collect();
-            attrs.insert("relations".to_string(), Entry::hashmap(relations_map));
+            entry.set_attr("relations", Entry::hashmap(relations_map));
         }
 
-        Entry::node_with_attrs("Keyword", &self.text, attrs)
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -411,14 +408,15 @@ impl Order {
 
 impl Build for Order {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
+        let order_name = format!("{}_keyword_ordering", self.language);
+        let mut entry = Entry::node("Order", &order_name);
 
         // Add language identifier
-        attrs.insert("language".to_string(), Entry::string(&self.language));
+        entry.set_attr("language", Entry::string(&self.language));
 
         // Add statistics
-        attrs.insert("keyword_count".to_string(), Entry::usize(self.keywords.len()));
-        attrs.insert("transition_count".to_string(), Entry::usize(self.node_transitions.len()));
+        entry.set_attr("keyword_count", Entry::usize(self.keywords.len()));
+        entry.set_attr("transition_count", Entry::usize(self.node_transitions.len()));
 
         // Convert keywords to Entry::HashMap with full details
         let keywords_map: HashMap<String, Entry> = self
@@ -426,7 +424,7 @@ impl Build for Order {
             .iter()
             .map(|(k, v)| (k.clone(), v.to_entry()))
             .collect();
-        attrs.insert("keywords".to_string(), Entry::hashmap(keywords_map));
+        entry.set_attr("keywords", Entry::hashmap(keywords_map));
 
         // Convert node_transitions to Entry::HashMap
         let transitions_map: HashMap<String, Entry> = self
@@ -437,7 +435,7 @@ impl Build for Order {
                 (k.clone(), Entry::vec(children))
             })
             .collect();
-        attrs.insert("node_transitions".to_string(), Entry::hashmap(transitions_map));
+        entry.set_attr("node_transitions", Entry::hashmap(transitions_map));
 
         // Group keywords by category for easier analysis
         let mut by_category: HashMap<String, Vec<Entry>> = HashMap::new();
@@ -452,11 +450,9 @@ impl Build for Order {
             .into_iter()
             .map(|(k, v)| (k, Entry::vec(v)))
             .collect();
-        attrs.insert("keywords_by_category".to_string(), Entry::hashmap(category_map));
+        entry.set_attr("keywords_by_category", Entry::hashmap(category_map));
 
-        // Use language-specific name
-        let order_name = format!("{}_keyword_ordering", self.language);
-        Entry::node_with_attrs("Order", &order_name, attrs)
+        entry
     }
 
     fn kind(&self) -> &str {

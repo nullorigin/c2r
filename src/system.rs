@@ -26,11 +26,12 @@ use crate::handlers::functions::{CallHandler, FunctionHandler};
 use crate::handlers::globals::GlobalHandler;
 use crate::handlers::loops::LoopHandler;
 use crate::handlers::macros::{DefineHandler, IncludeHandler, PreprocessorHandler};
-use crate::handlers::process::{ProcessDecision, Processor};
+use crate::handlers::process::{ProcessorDecision, Processor};
 use crate::handlers::structs::StructHandler;
 use crate::handlers::typedefs::TypedefHandler;
 use crate::handlers::unions::UnionHandler;
 use crate::handlers::variables::VariableHandler;
+use crate::handlers::process::ProcessorStats;
 use crate::{
     Error,
     db::{Build, Config, Entry, Pattern, Report, Token, TokenSet, Tokenizer, Web, WebStats},
@@ -101,6 +102,7 @@ pub struct System {
     type_converter: TypeConverter,
     identifier_converter: IdentifierConverter,
     variable_converter: VariableConverter,
+    processor_stats: ProcessorStats,
     /// Whether Build objects should auto-register to database when completing
     register_builds: bool,
 }
@@ -119,6 +121,7 @@ impl System {
             type_converter: TypeConverter::new(),
             identifier_converter: IdentifierConverter::new(),
             variable_converter: VariableConverter::new(),
+            processor_stats: ProcessorStats::new("system"),
             register_builds: false,
         };
         // Register all handlers and their patterns
@@ -130,6 +133,17 @@ impl System {
         system
     }
     pub fn register_type(&mut self, c_type: &str, rust_type: &str, category: &str) {
+        // Validate type name - skip invalid registrations
+        let trimmed = c_type.trim();
+        if trimmed.is_empty() 
+            || trimmed.starts_with('"')  // string literal
+            || trimmed.starts_with('\'') // char literal
+            || trimmed.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) // starts with number
+            || trimmed.len() == 1 && !trimmed.chars().next().unwrap().is_alphabetic() // single non-alpha char
+        {
+            return; // Skip invalid type names
+        }
+        
         let mut entry = Entry::node("Type", c_type);
         entry.set_attr("c_type", Entry::string(c_type));
         entry.set_attr("rust_type", Entry::string(rust_type));
@@ -1001,7 +1015,12 @@ impl System {
             ProcessMode::Interactive => self.process_interactive(input),
         }
     }
-
+    pub fn process_stats(&mut self, stats: &ProcessorStats) {
+        self.processor_stats.merge(stats);
+        if self.is_build_registration_enabled() {
+            self.db.add_entry(self.processor_stats.to_entry());
+        }
+    }
     /// Process input once and return
     fn process_once(&mut self, input: Option<&str>) -> ProcessResult {
         let mut result = ProcessResult {
@@ -1147,7 +1166,7 @@ impl System {
                             handler_succeeded = true;
 
                             // Store result in database if successful
-                            if let ProcessDecision::Complete {
+                            if let ProcessorDecision::Complete {
                                 rust_code,
                                 confidence: _,
                             } = handler_result
@@ -1184,7 +1203,6 @@ impl System {
 
         result
     }
-
     /// Segment tokens into processable chunks based on statement boundaries
     ///
     /// This finds statement-ending tokens (;, }, etc.) and splits accordingly.
@@ -1638,7 +1656,7 @@ impl System {
         &mut self,
         handler_name: &str,
         tokens: &[Token],
-    ) -> Result<ProcessDecision, String> {
+    ) -> Result<ProcessorDecision, String> {
         // Collected results from nested handlers
         let mut nested_results: Vec<(std::ops::Range<usize>, String)> = Vec::new();
 
@@ -1732,7 +1750,7 @@ impl System {
                 self.run_handler_loop(GlobalHandler::new(), tokens, &mut nested_results)
             }
             // Handlers not yet implemented - return placeholder
-            "control" => Ok(ProcessDecision::Complete {
+            "control" => Ok(ProcessorDecision::Complete {
                 rust_code: format!("// TODO: {} handler not yet implemented", handler_name),
                 confidence: 0.1,
             }),
@@ -1748,17 +1766,17 @@ impl System {
         mut handler: H,
         tokens: &[Token],
         nested_results: &mut Vec<(std::ops::Range<usize>, String)>,
-    ) -> Result<ProcessDecision, String> {
+    ) -> Result<ProcessorDecision, String> {
         loop {
-            let decision = handler.process(tokens);
+            let decision = handler.process(tokens, None);
             match &decision {
-                ProcessDecision::Continue { .. } => continue,
-                ProcessDecision::Complete { .. } => return Ok(decision),
-                ProcessDecision::Route { target_handler, .. } => {
+                ProcessorDecision::Continue { .. } => continue,
+                ProcessorDecision::Complete { .. } => return Ok(decision),
+                ProcessorDecision::Route { target_handler, .. } => {
                     // Recursively call the target handler (replaces current)
                     return self.run_handler(target_handler, tokens);
                 }
-                ProcessDecision::RouteNested {
+                ProcessorDecision::RouteNested {
                     target_handler,
                     token_range,
                     reason,
@@ -1766,7 +1784,7 @@ impl System {
                     // Process nested construct with target handler
                     let nested_tokens = &tokens[token_range.clone()];
                     match self.run_handler(target_handler, nested_tokens) {
-                        Ok(ProcessDecision::Complete {
+                        Ok(ProcessorDecision::Complete {
                             rust_code,
                             confidence,
                         }) => {
@@ -1788,14 +1806,14 @@ impl System {
                         }
                     }
                 }
-                ProcessDecision::NestedComplete { .. } => {
+                ProcessorDecision::NestedComplete { .. } => {
                     // This shouldn't happen at top level - return as-is
                     return Ok(decision);
                 }
-                ProcessDecision::Pause { reason, .. } => {
+                ProcessorDecision::Pause { reason, .. } => {
                     return Err(format!("Processing paused: {}", reason));
                 }
-                ProcessDecision::Fail { reason, .. } => {
+                ProcessorDecision::Fail { reason, .. } => {
                     return Err(reason.clone());
                 }
             }
@@ -2175,11 +2193,16 @@ impl System {
     }
     /// Look up a registered type by C name
     pub fn lookup_type(&self, c_type: &str) -> Option<String> {
-        // Try direct lookup
+        // Try direct lookup - only match actual type entries, not variables
+        let type_kinds = ["Type", "Struct", "Enum", "Union", "Typedef"];
         let entries = self.db.by_name(c_type);
         for entry in &entries {
-            if let Some(rust_type) = entry.get_string_attr("rust_type") {
-                return Some(rust_type.to_string());
+            if let Some(kind) = entry.kind() {
+                if type_kinds.contains(&kind) {
+                    if let Some(rust_type) = entry.get_string_attr("rust_type") {
+                        return Some(rust_type.to_string());
+                    }
+                }
             }
         }
 

@@ -2,11 +2,11 @@
 //!
 //! Converts C loop constructs (for, while, do-while) to Rust equivalents.
 
-use crate::db::convert::{IdentifierConverter, TypeConverter, sanitize_rust_identifier};
+use crate::db::convert::sanitize_rust_identifier;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorDecision, ProcessorStage, Processor, ProcessorState, ProcessorStats};
 use crate::handlers::validation::SequenceValidator;
 use crate::system;
 
@@ -21,6 +21,23 @@ pub enum LoopType {
     For,
     While,
     DoWhile,
+}
+
+impl LoopType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::For => "for",
+            Self::While => "while",
+            Self::DoWhile => "do_while",
+        }
+    }
+}
+
+impl Build for LoopType {
+    fn to_entry(&self) -> Entry { Entry::string(self.as_str()) }
+    fn kind(&self) -> &str { "LoopType" }
+    fn name(&self) -> Option<&str> { Some(self.as_str()) }
+    fn category(&self) -> Option<&str> { Some("loop") }
 }
 
 /// Extracted loop information
@@ -38,25 +55,30 @@ pub struct LoopData {
     pub body_tokens: Vec<Token>,
 }
 
+impl Build for LoopData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("LoopData", "loop");
+        entry.set_attr("loop_type", self.loop_type.to_entry());
+        if let Some(ref init) = self.init { entry.set_attr("init", Entry::string(init)); }
+        if let Some(ref cond) = self.condition { entry.set_attr("condition", Entry::string(cond)); }
+        if let Some(ref upd) = self.update { entry.set_attr("update", Entry::string(upd)); }
+        entry
+    }
+
+    fn kind(&self) -> &str { "LoopData" }
+    fn category(&self) -> Option<&str> { Some("loop") }
+}
+
 /// Handler for C loop constructs
 #[derive(Debug)]
 pub struct LoopHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: LoopData,
+    /// Generic processor state
+    state: ProcessorState<LoopData>,
 }
 
 impl LoopHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: LoopData::default(),
-        }
+        Self { state: ProcessorState::new("LoopHandler") }
     }
 }
 
@@ -76,6 +98,11 @@ impl Processor for LoopHandler {
             "validate_do_while_loop",
             "extract_do_while_loop",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -235,16 +262,22 @@ impl Processor for LoopHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.len() < 5 {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
             return false;
         }
 
         // Determine loop type from first token
         let first = tokens[0].to_string();
         match first.as_str() {
-            "for" => self.data.loop_type = LoopType::For,
-            "while" => self.data.loop_type = LoopType::While,
-            "do" => self.data.loop_type = LoopType::DoWhile,
-            _ => return false,
+            "for" => self.state.data.loop_type = LoopType::For,
+            "while" => self.state.data.loop_type = LoopType::While,
+            "do" => self.state.data.loop_type = LoopType::DoWhile,
+            _ => {
+                self.state.stats.record_failure(None, "validated");
+                self.stats();
+                return false;
+            }
         }
 
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
@@ -263,8 +296,10 @@ impl Processor for LoopHandler {
         let validator = SequenceValidator::new();
         let validation_result = validator.validate_control_flow(tokens);
         let base = if best_confidence > 0.0 { best_confidence } else { 0.8 };
-        self.confidence = validation_result.adjust_confidence(base);
+        self.state.set_confidence(validation_result.adjust_confidence(base));
 
+        self.state.stats.record_success(self.state.confidence, tokens.len(), 0, Some("loop"), "validated");
+        self.stats();
         true
     }
 
@@ -276,7 +311,7 @@ impl Processor for LoopHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get loop type from pattern extraction
                 if let Some(loop_type) = ctx.value("loop_type") {
-                    self.data.loop_type = match loop_type {
+                    self.state.data.loop_type = match loop_type {
                         "for" => LoopType::For,
                         "while" => LoopType::While,
                         "do_while" => LoopType::DoWhile,
@@ -290,75 +325,91 @@ impl Processor for LoopHandler {
                     let header_str = header.join(" ");
                     let parts: Vec<&str> = header_str.split(';').collect();
                     if parts.len() >= 1 {
-                        self.data.init = Some(parts[0].trim().to_string());
+                        self.state.data.init = Some(parts[0].trim().to_string());
                     }
                     if parts.len() >= 2 {
-                        self.data.condition = Some(parts[1].trim().to_string());
+                        self.state.data.condition = Some(parts[1].trim().to_string());
                     }
                     if parts.len() >= 3 {
-                        self.data.update = Some(parts[2].trim().to_string());
+                        self.state.data.update = Some(parts[2].trim().to_string());
                     }
                 }
 
                 // Get condition tokens (while loop)
                 if let Some(cond) = ctx.list("condition_tokens") {
-                    self.data.condition = Some(cond.join(" "));
+                    self.state.data.condition = Some(cond.join(" "));
                 }
 
                 // Get body tokens
                 if let Some(body) = ctx.list("body_tokens") {
                     // Convert strings back to tokens for body
-                    self.data.body_tokens = tokens
+                    self.state.data.body_tokens = tokens
                         .iter()
                         .filter(|t| body.contains(&t.to_string()))
                         .cloned()
                         .collect();
                 }
 
-                self.confidence = 0.85;
+                self.state.set_confidence(0.85);
+                self.state.stats.record_success(self.state.confidence, 0, 0, Some("loop"), "extracted");
+                self.stats();
                 return true;
             }
         }
 
         // Fallback to handler-specific extraction based on loop type
-        match self.data.loop_type {
+        let result = match self.state.data.loop_type {
             LoopType::For => self.extract_for(&token_strs, tokens),
             LoopType::While => self.extract_while(&token_strs, tokens),
             LoopType::DoWhile => self.extract_do_while(&token_strs, tokens),
+        };
+        if result {
+            self.state.stats.record_success(self.state.confidence, 0, 0, Some("loop"), "extracted");
+        } else {
+            self.state.stats.record_failure(Some("loop"), "extracted");
         }
+        self.stats();
+        result
     }
 
     fn convert(&mut self) -> Option<String> {
-        match self.data.loop_type {
+        let result = match self.state.data.loop_type {
             LoopType::For => self.convert_for(),
             LoopType::While => self.convert_while(),
             LoopType::DoWhile => self.convert_do_while(),
+        };
+        if result.is_some() {
+            self.state.stats.record_success(self.state.confidence, 0, 0, Some("loop"), "converted");
+        } else {
+            self.state.stats.record_failure(Some("loop"), "converted");
         }
+        self.stats();
+        result
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -409,13 +460,13 @@ impl LoopHandler {
         }
 
         if parts.len() >= 1 && !parts[0].is_empty() {
-            self.data.init = Some(parts[0].join(" "));
+            self.state.data.init = Some(parts[0].join(" "));
         }
         if parts.len() >= 2 && !parts[1].is_empty() {
-            self.data.condition = Some(parts[1].join(" "));
+            self.state.data.condition = Some(parts[1].join(" "));
         }
         if parts.len() >= 3 && !parts[2].is_empty() {
-            self.data.update = Some(parts[2].join(" "));
+            self.state.data.update = Some(parts[2].join(" "));
         }
 
         // Find body
@@ -438,11 +489,11 @@ impl LoopHandler {
             }
 
             if let Some(cb) = close_brace {
-                self.data.body_tokens = tokens[bp + 1..cb].to_vec();
+                self.state.data.body_tokens = tokens[bp + 1..cb].to_vec();
             }
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         true
     }
 
@@ -474,7 +525,7 @@ impl LoopHandler {
             None => return false,
         };
         let cond_tokens = &token_strs[paren_pos.unwrap() + 1..close_paren];
-        self.data.condition = Some(cond_tokens.join(" "));
+        self.state.data.condition = Some(cond_tokens.join(" "));
 
         let brace_pos = token_strs.iter().position(|t| t == "{");
         if let Some(bp) = brace_pos {
@@ -495,11 +546,11 @@ impl LoopHandler {
             }
 
             if let Some(cb) = close_brace {
-                self.data.body_tokens = tokens[bp + 1..cb].to_vec();
+                self.state.data.body_tokens = tokens[bp + 1..cb].to_vec();
             }
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         true
     }
 
@@ -531,7 +582,7 @@ impl LoopHandler {
             Some(cb) => cb,
             None => return false,
         };
-        self.data.body_tokens = tokens[bp + 1..cb].to_vec();
+        self.state.data.body_tokens = tokens[bp + 1..cb].to_vec();
 
         let while_pos = token_strs[cb..].iter().position(|t| t == "while");
         if let Some(wp) = while_pos {
@@ -557,12 +608,12 @@ impl LoopHandler {
 
                 if let Some(cp) = close_paren {
                     let cond_tokens = &token_strs[pp + 1..cp];
-                    self.data.condition = Some(cond_tokens.join(" "));
+                    self.state.data.condition = Some(cond_tokens.join(" "));
                 }
             }
         }
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         true
     }
 
@@ -571,16 +622,16 @@ impl LoopHandler {
         let body = self.convert_body();
 
         if let (Some(init), Some(cond), Some(update)) =
-            (&self.data.init, &self.data.condition, &self.data.update)
+            (&self.state.data.init, &self.state.data.condition, &self.state.data.update)
         {
             if let Some(range_loop) = self.try_convert_range_for(init, cond, update, &body) {
                 return Some(range_loop);
             }
         }
 
-        let init_str = self.data.init.clone().unwrap_or_default();
-        let cond_str = self.data.condition.clone().unwrap_or_default();
-        let update_str = self.data.update.clone().unwrap_or_default();
+        let init_str = self.state.data.init.clone().unwrap_or_default();
+        let cond_str = self.state.data.condition.clone().unwrap_or_default();
+        let update_str = self.state.data.update.clone().unwrap_or_default();
 
         let init = if init_str.is_empty() {
             String::new()
@@ -619,7 +670,7 @@ impl LoopHandler {
         }
         result.push_str(&format!("\n{}}}", base_indent));
 
-        self.confidence = 0.8;
+        self.state.set_confidence(0.8);
         Some(result)
     }
 
@@ -685,13 +736,13 @@ impl LoopHandler {
         // Get base indent (current level before body push)
         let base_indent = system().indent_str();
 
-        let cond_str = self.data.condition.clone().unwrap_or_default();
+        let cond_str = self.state.data.condition.clone().unwrap_or_default();
         let body = self.convert_body();
 
         // Check for infinite loop patterns: while(1), while(true), while 1
         let trimmed_cond = cond_str.trim();
         if trimmed_cond == "1" || trimmed_cond == "true" || trimmed_cond.is_empty() {
-            self.confidence = 0.95;
+            self.state.set_confidence(0.95);
             return Some(format!(
                 "{}loop {{\n{}\n{}}}",
                 base_indent, body, base_indent
@@ -700,7 +751,7 @@ impl LoopHandler {
 
         let cond = self.convert_condition(&cond_str);
 
-        self.confidence = 0.9;
+        self.state.set_confidence(0.9);
         Some(format!(
             "{}while {} {{\n{}\n{}}}",
             base_indent, cond, body, base_indent
@@ -711,7 +762,7 @@ impl LoopHandler {
     fn convert_do_while(&mut self) -> Option<String> {
 
         let base_indent = system().indent_str();
-        let cond_str = self.data.condition.clone().unwrap_or_default();
+        let cond_str = self.state.data.condition.clone().unwrap_or_default();
         let cond = if cond_str.is_empty() {
             "true".to_string()
         } else {
@@ -724,7 +775,7 @@ impl LoopHandler {
         let body_indent = system().indent_str();
         system().indent_pop();
 
-        self.confidence = 0.85;
+        self.state.set_confidence(0.85);
         Some(format!(
             "{}loop {{\n{}\n{}if !({}) {{ break; }}\n{}}}",
             base_indent, body, body_indent, cond, base_indent
@@ -738,7 +789,7 @@ impl LoopHandler {
         system().indent_push();
         let indent = system().indent_str();
 
-        if self.data.body_tokens.is_empty() {
+        if self.state.data.body_tokens.is_empty() {
             system().indent_pop();
             return format!("{}todo!()", indent);
         }
@@ -748,16 +799,17 @@ impl LoopHandler {
         let _route_id = crate::system::system().register_route(
             Route::new("LoopHandler", "FunctionHandler")
                 .with_reason("loop body statements")
-                .with_range(0, self.data.body_tokens.len())
+                .with_range(0, self.state.data.body_tokens.len())
         );
 
         // Split into statements and convert each
         let mut statements: Vec<String> = Vec::new();
         let mut current_stmt: Vec<Token> = Vec::new();
         let mut brace_depth = 0;
+        let mut paren_depth = 0;
         let mut in_control_struct = false;
 
-        let body_tokens = &self.data.body_tokens;
+        let body_tokens = &self.state.data.body_tokens;
         let mut i = 0;
         while i < body_tokens.len() {
             let token = &body_tokens[i];
@@ -776,11 +828,17 @@ impl LoopHandler {
             if token_str == "}" {
                 brace_depth -= 1;
             }
+            if token_str == "(" {
+                paren_depth += 1;
+            }
+            if token_str == ")" {
+                paren_depth -= 1;
+            }
 
             current_stmt.push(token.clone());
 
-            // End of statement: semicolon at depth 0, OR closing brace of control structure
-            let mut is_end = (token_str == ";" && brace_depth == 0)
+            // End of statement: semicolon at depth 0 (both braces and parens), OR closing brace of control structure
+            let mut is_end = (token_str == ";" && brace_depth == 0 && paren_depth == 0)
                 || (token_str == "}" && brace_depth == 0 && in_control_struct);
 
             // Check if next token is 'else' - if so, continue collecting (if-else block)
@@ -792,7 +850,7 @@ impl LoopHandler {
             }
 
             if is_end {
-                let stmt = self.convert_statement(&current_stmt);
+                let stmt = self.route_statement(&current_stmt, "LoopHandler");
                 if !stmt.is_empty() {
                     statements.push(stmt);
                 }
@@ -805,7 +863,7 @@ impl LoopHandler {
 
         // Handle any remaining tokens
         if !current_stmt.is_empty() {
-            let stmt = self.convert_statement(&current_stmt);
+            let stmt = self.route_statement(&current_stmt, "LoopHandler");
             if !stmt.is_empty() {
                 statements.push(stmt);
             }
@@ -832,12 +890,6 @@ impl LoopHandler {
         // Pop indent level after body conversion
         system().indent_pop();
         result
-    }
-
-    /// Convert a single statement by routing to appropriate handler
-    fn convert_statement(&self, tokens: &[Token]) -> String {
-        // Use the default route_statement implementation from Processor trait
-        self.route_statement(tokens, "LoopHandler")
     }
 
     /// Convert initialization statement
@@ -968,17 +1020,10 @@ impl LoopHandler {
 impl Build for LoopHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "LoopHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr(
-            "loop_type",
-            Entry::string(match self.data.loop_type {
-                LoopType::For => "for",
-                LoopType::While => "while",
-                LoopType::DoWhile => "do_while",
-            }),
-        );
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("loop_type", self.state.data.loop_type.to_entry());
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry
@@ -1012,10 +1057,10 @@ mod tests {
         let mut handler = LoopHandler::new();
 
         assert!(handler.validate(&tokens));
-        assert_eq!(handler.data.loop_type, LoopType::For);
+        assert_eq!(handler.state.data.loop_type, LoopType::For);
         assert!(handler.extract(&tokens));
-        assert_eq!(handler.data.init, Some("int i = 0".to_string()));
-        assert_eq!(handler.data.condition, Some("i < 10".to_string()));
+        assert_eq!(handler.state.data.init, Some("int i = 0".to_string()));
+        assert_eq!(handler.state.data.condition, Some("i < 10".to_string()));
     }
 
     #[test]
@@ -1024,9 +1069,9 @@ mod tests {
         let mut handler = LoopHandler::new();
 
         assert!(handler.validate(&tokens));
-        assert_eq!(handler.data.loop_type, LoopType::While);
+        assert_eq!(handler.state.data.loop_type, LoopType::While);
         assert!(handler.extract(&tokens));
-        assert_eq!(handler.data.condition, Some("x > 0".to_string()));
+        assert_eq!(handler.state.data.condition, Some("x > 0".to_string()));
     }
 
     #[test]
@@ -1037,9 +1082,9 @@ mod tests {
         let mut handler = LoopHandler::new();
 
         assert!(handler.validate(&tokens));
-        assert_eq!(handler.data.loop_type, LoopType::DoWhile);
+        assert_eq!(handler.state.data.loop_type, LoopType::DoWhile);
         assert!(handler.extract(&tokens));
-        assert_eq!(handler.data.condition, Some("x < 10".to_string()));
+        assert_eq!(handler.state.data.condition, Some("x < 10".to_string()));
     }
 
     #[test]

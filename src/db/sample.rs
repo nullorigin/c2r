@@ -528,16 +528,15 @@ impl ConfidenceResult {
     }
 
     pub fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert("overall".to_string(), Entry::f64(self.overall));
-        attrs.insert("token_score".to_string(), Entry::f64(self.token_score));
-        attrs.insert("pattern_score".to_string(), Entry::f64(self.pattern_score));
-        attrs.insert(
-            "frequency_score".to_string(),
-            Entry::f64(self.frequency_score),
-        );
-        attrs.insert("quality".to_string(), Entry::string(self.quality.as_str()));
-        Entry::node_with_attrs("confidence", "result", attrs)
+        let mut entry = Entry::node("ConfidenceResult", "result");
+        entry.set_attr("overall", Entry::f64(self.overall));
+        entry.set_attr("token_score", Entry::f64(self.token_score));
+        entry.set_attr("pattern_score", Entry::f64(self.pattern_score));
+        entry.set_attr("frequency_score", Entry::f64(self.frequency_score));
+        entry.set_attr("quality", Entry::string(self.quality.as_str()));
+        let reasons: Vec<Entry> = self.reasons.iter().map(|r| Entry::string(r)).collect();
+        entry.set_attr("reasons", Entry::vec(reasons));
+        entry
     }
 }
 
@@ -559,30 +558,15 @@ pub struct SampleStats {
 
 impl SampleStats {
     pub fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert("total_nodes".to_string(), Entry::usize(self.total_nodes));
-        attrs.insert(
-            "total_patterns".to_string(),
-            Entry::usize(self.total_patterns),
-        );
-        attrs.insert("total_edges".to_string(), Entry::usize(self.total_edges));
-        attrs.insert(
-            "unique_entries".to_string(),
-            Entry::usize(self.unique_entries),
-        );
-        attrs.insert(
-            "unique_bigrams".to_string(),
-            Entry::usize(self.unique_bigrams),
-        );
-        attrs.insert(
-            "avg_path_length".to_string(),
-            Entry::f64(self.avg_path_length),
-        );
-        attrs.insert(
-            "generation_count".to_string(),
-            Entry::u32(self.generation_count),
-        );
-        Entry::node_with_attrs("sample_stats", "statistics", attrs)
+        let mut entry = Entry::node("SampleStats", "statistics");
+        entry.set_attr("total_nodes", Entry::usize(self.total_nodes));
+        entry.set_attr("total_patterns", Entry::usize(self.total_patterns));
+        entry.set_attr("total_edges", Entry::usize(self.total_edges));
+        entry.set_attr("unique_entries", Entry::usize(self.unique_entries));
+        entry.set_attr("unique_bigrams", Entry::usize(self.unique_bigrams));
+        entry.set_attr("avg_path_length", Entry::f64(self.avg_path_length));
+        entry.set_attr("generation_count", Entry::u32(self.generation_count));
+        entry
     }
 }
 

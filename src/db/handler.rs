@@ -48,21 +48,16 @@ impl CodeSegment {
 
 impl Build for CodeSegment {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert("c_code".to_string(), Entry::string(&self.c_code));
+        let mut entry = Entry::node("CodeSegment", &self.segment_type);
+        entry.set_attr("c_code", Entry::string(&self.c_code));
         if let Some(ref rust) = self.rust_code {
-            attrs.insert("rust_code".to_string(), Entry::string(rust));
+            entry.set_attr("rust_code", Entry::string(rust));
         }
-        attrs.insert(
-            "segment_type".to_string(),
-            Entry::string(&self.segment_type),
-        );
-        attrs.insert("token_count".to_string(), Entry::usize(self.tokens.len()));
-
+        entry.set_attr("segment_type", Entry::string(&self.segment_type));
+        entry.set_attr("token_count", Entry::usize(self.tokens.len()));
         let tokens: Vec<Entry> = self.tokens.iter().map(|t| Entry::string(t)).collect();
-        attrs.insert("tokens".to_string(), Entry::vec(tokens));
-
-        Entry::node_with_attrs("CodeSegment", &self.segment_type, attrs)
+        entry.set_attr("tokens", Entry::vec(tokens));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -197,23 +192,23 @@ impl HandlerResult {
 
 impl Build for HandlerResult {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
+        let mut entry = Entry::node("HandlerResult", self.name().unwrap_or(""));
 
         let (status, range) = match self {
             Self::Completed {
                 range, rust_code, ..
             } => {
-                attrs.insert("rust_code".to_string(), Entry::string(rust_code));
+                entry.set_attr("rust_code", Entry::string(rust_code));
                 ("completed", range)
             }
             Self::Extracted { range, data, .. } => {
-                attrs.insert("data".to_string(), Entry::string(data));
+                entry.set_attr("data", Entry::string(data));
                 ("extracted", range)
             }
             Self::NotHandled {
                 range, handler_id, ..
             } => {
-                attrs.insert("handler_id".to_string(), Entry::string(handler_id.name()));
+                entry.set_attr("handler_id", Entry::string(handler_id.name()));
                 ("not_handled", range)
             }
             Self::Failed {
@@ -222,17 +217,15 @@ impl Build for HandlerResult {
                 handler_id,
                 ..
             } => {
-                attrs.insert("error".to_string(), Entry::string(error));
-                attrs.insert("handler_id".to_string(), Entry::string(handler_id.name()));
+                entry.set_attr("error", Entry::string(error));
+                entry.set_attr("handler_id", Entry::string(handler_id.name()));
                 ("failed", range)
             }
         };
-
-        attrs.insert("status".to_string(), Entry::string(status));
-        attrs.insert("range_start".to_string(), Entry::usize(range.start));
-        attrs.insert("range_end".to_string(), Entry::usize(range.end));
-
-        Entry::node_with_attrs("HandlerResult", status, attrs)
+        entry.set_attr("status", Entry::string(status));
+        entry.set_attr("range_start", Entry::usize(range.start));
+        entry.set_attr("range_end", Entry::usize(range.end));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -388,28 +381,15 @@ impl HandlerStats {
 
 impl Build for HandlerStats {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "total_executions".to_string(),
-            Entry::u32(self.total_executions),
-        );
-        attrs.insert("successful".to_string(), Entry::u32(self.successful));
-        attrs.insert("failed".to_string(), Entry::u32(self.failed));
-        attrs.insert("success_rate".to_string(), Entry::f64(self.success_rate()));
-        attrs.insert(
-            "average_confidence".to_string(),
-            Entry::f64(self.average_confidence),
-        );
-        attrs.insert(
-            "average_tokens".to_string(),
-            Entry::f64(self.average_tokens),
-        );
-        attrs.insert(
-            "average_time_ms".to_string(),
-            Entry::f64(self.average_time_ms),
-        );
-
-        Entry::node_with_attrs("HandlerStats", &self.name, attrs)
+        let mut entry = Entry::node("HandlerStats", &self.name);
+        entry.set_attr("total_executions", Entry::u32(self.total_executions));
+        entry.set_attr("successful", Entry::u32(self.successful));
+        entry.set_attr("failed", Entry::u32(self.failed));
+        entry.set_attr("success_rate", Entry::f64(self.success_rate()));
+        entry.set_attr("average_confidence", Entry::f64(self.average_confidence));
+        entry.set_attr("average_tokens", Entry::f64(self.average_tokens));
+        entry.set_attr("average_time_ms", Entry::f64(self.average_time_ms));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -478,22 +458,17 @@ impl HandlerMetadata {
 
 impl Build for HandlerMetadata {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "handler_type".to_string(),
-            Entry::string(&self.handler_type),
-        );
-        attrs.insert("priority".to_string(), Entry::i32(self.priority));
-        attrs.insert("category".to_string(), Entry::string(&self.category));
-        attrs.insert("min_tokens".to_string(), Entry::usize(self.min_tokens));
+        let mut entry = Entry::node("HandlerMetadata", &self.name);
+        entry.set_attr("handler_type", Entry::string(&self.handler_type));
+        entry.set_attr("priority", Entry::i32(self.priority));
+        entry.set_attr("category", Entry::string(&self.category));
+        entry.set_attr("min_tokens", Entry::usize(self.min_tokens));
         if let Some(max) = self.max_tokens {
-            attrs.insert("max_tokens".to_string(), Entry::usize(max));
+            entry.set_attr("max_tokens", Entry::usize(max));
         }
-
         let patterns: Vec<Entry> = self.patterns.iter().map(|p| Entry::string(p)).collect();
-        attrs.insert("patterns".to_string(), Entry::vec(patterns));
-
-        Entry::node_with_attrs("HandlerMetadata", &self.name, attrs)
+        entry.set_attr("patterns", Entry::vec(patterns));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -527,6 +502,7 @@ pub struct SuccessRecord {
     pub segment: CodeSegment,
     pub time_ms: u64,
     pub timestamp: SystemTime,
+    pub stage: String,
 }
 
 impl SuccessRecord {
@@ -536,6 +512,7 @@ impl SuccessRecord {
         segment: CodeSegment,
         confidence: f64,
         time_ms: u64,
+        stage: impl Into<String>,
     ) -> Self {
         Self {
             handler_name: handler_name.into(),
@@ -545,26 +522,21 @@ impl SuccessRecord {
             segment,
             time_ms,
             timestamp: SystemTime::now(),
+            stage: stage.into(),
         }
     }
 }
 
 impl Build for SuccessRecord {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "handler_name".to_string(),
-            Entry::string(&self.handler_name),
-        );
-        attrs.insert(
-            "pattern_name".to_string(),
-            Entry::string(&self.pattern_name),
-        );
-        attrs.insert("token_count".to_string(), Entry::usize(self.token_count));
-        attrs.insert("confidence".to_string(), Entry::f64(self.confidence));
-        attrs.insert("time_ms".to_string(), Entry::u64(self.time_ms));
-
-        Entry::node_with_attrs("SuccessRecord", &self.handler_name, attrs)
+        let mut entry = Entry::node("SuccessRecord", &self.handler_name);
+        entry.set_attr("handler_name", Entry::string(&self.handler_name));
+        entry.set_attr("pattern_name", Entry::string(&self.pattern_name));
+        entry.set_attr("token_count", Entry::usize(self.token_count));
+        entry.set_attr("confidence", Entry::f64(self.confidence));
+        entry.set_attr("time_ms", Entry::u64(self.time_ms));
+        entry.set_attr("stage", Entry::string(&self.stage));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -589,6 +561,7 @@ pub struct FailureRecord {
     pub reason: String,
     pub segment: CodeSegment,
     pub timestamp: SystemTime,
+    pub stage: String,
 }
 
 impl FailureRecord {
@@ -597,6 +570,7 @@ impl FailureRecord {
         pattern_name: impl Into<String>,
         segment: CodeSegment,
         reason: impl Into<String>,
+        stage: impl Into<String>,
     ) -> Self {
         Self {
             handler_name: handler_name.into(),
@@ -605,25 +579,20 @@ impl FailureRecord {
             reason: reason.into(),
             segment,
             timestamp: SystemTime::now(),
+            stage: stage.into(),
         }
     }
 }
 
 impl Build for FailureRecord {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "handler_name".to_string(),
-            Entry::string(&self.handler_name),
-        );
-        attrs.insert(
-            "pattern_name".to_string(),
-            Entry::string(&self.pattern_name),
-        );
-        attrs.insert("token_count".to_string(), Entry::usize(self.token_count));
-        attrs.insert("reason".to_string(), Entry::string(&self.reason));
-
-        Entry::node_with_attrs("FailureRecord", &self.handler_name, attrs)
+        let mut entry = Entry::node("FailureRecord", &self.handler_name);
+        entry.set_attr("handler_name", Entry::string(&self.handler_name));
+        entry.set_attr("pattern_name", Entry::string(&self.pattern_name));
+        entry.set_attr("token_count", Entry::usize(self.token_count));
+        entry.set_attr("reason", Entry::string(&self.reason));
+        entry.set_attr("stage", Entry::string(&self.stage));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -729,17 +698,13 @@ impl RoutingRule {
 
 impl Build for RoutingRule {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "from_handler".to_string(),
-            Entry::string(&self.from_handler),
-        );
-        attrs.insert("to_handler".to_string(), Entry::string(&self.to_handler));
-        attrs.insert("priority".to_string(), Entry::i32(self.priority));
-        attrs.insert("enabled".to_string(), Entry::bool(self.enabled));
-
         let name = format!("{}->{}", self.from_handler, self.to_handler);
-        Entry::node_with_attrs("RoutingRule", &name, attrs)
+        let mut entry = Entry::node("RoutingRule", &name);
+        entry.set_attr("from_handler", Entry::string(&self.from_handler));
+        entry.set_attr("to_handler", Entry::string(&self.to_handler));
+        entry.set_attr("priority", Entry::i32(self.priority));
+        entry.set_attr("enabled", Entry::bool(self.enabled));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -806,22 +771,13 @@ impl PatternUsage {
 
 impl Build for PatternUsage {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "pattern_name".to_string(),
-            Entry::string(&self.pattern_name),
-        );
-        attrs.insert(
-            "handler_name".to_string(),
-            Entry::string(&self.handler_name),
-        );
-        attrs.insert("success_count".to_string(), Entry::u32(self.success_count));
-        attrs.insert("failure_count".to_string(), Entry::u32(self.failure_count));
-        attrs.insert(
-            "average_confidence".to_string(),
-            Entry::f64(self.average_confidence),
-        );
-        Entry::node_with_attrs("PatternUsage", &self.pattern_name, attrs)
+        let mut entry = Entry::node("PatternUsage", &self.pattern_name);
+        entry.set_attr("pattern_name", Entry::string(&self.pattern_name));
+        entry.set_attr("handler_name", Entry::string(&self.handler_name));
+        entry.set_attr("success_count", Entry::u32(self.success_count));
+        entry.set_attr("failure_count", Entry::u32(self.failure_count));
+        entry.set_attr("average_confidence", Entry::f64(self.average_confidence));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -1011,23 +967,16 @@ impl RoutingStats {
 
 impl Build for RoutingStats {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "from_handler".to_string(),
-            Entry::string(&self.from_handler),
-        );
-        attrs.insert("to_handler".to_string(), Entry::string(&self.to_handler));
-        attrs.insert(
-            "total_redirects".to_string(),
-            Entry::u32(self.total_redirects),
-        );
-        attrs.insert("success_rate".to_string(), Entry::f64(self.success_rate));
-        attrs.insert(
-            "avg_confidence_improvement".to_string(),
-            Entry::f64(self.avg_confidence_improvement),
-        );
         let name = format!("{}->{}", self.from_handler, self.to_handler);
-        Entry::node_with_attrs("RoutingStats", &name, attrs)
+        let mut entry = Entry::node("RoutingStats", &name);
+        entry.set_attr("from_handler", Entry::string(&self.from_handler));
+        entry.set_attr("to_handler", Entry::string(&self.to_handler));
+        entry.set_attr("total_redirects", Entry::u32(self.total_redirects));
+        entry.set_attr("successful_redirects", Entry::u32(self.successful_redirects));
+        entry.set_attr("failed_redirects", Entry::u32(self.failed_redirects));
+        entry.set_attr("success_rate", Entry::f64(self.success_rate));
+        entry.set_attr("avg_confidence_improvement", Entry::f64(self.avg_confidence_improvement));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -1204,32 +1153,14 @@ impl GlobalHandlerStats {
 
 impl Build for GlobalHandlerStats {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-        attrs.insert(
-            "total_handlers".to_string(),
-            Entry::u32(self.total_handlers),
-        );
-        attrs.insert(
-            "total_executions".to_string(),
-            Entry::u32(self.total_executions),
-        );
-        attrs.insert(
-            "total_successes".to_string(),
-            Entry::u32(self.total_successes),
-        );
-        attrs.insert(
-            "total_failures".to_string(),
-            Entry::u32(self.total_failures),
-        );
-        attrs.insert(
-            "overall_success_rate".to_string(),
-            Entry::f64(self.overall_success_rate),
-        );
-        attrs.insert(
-            "average_confidence".to_string(),
-            Entry::f64(self.average_confidence),
-        );
-        Entry::node_with_attrs("GlobalHandlerStats", "global", attrs)
+        let mut entry = Entry::node("GlobalHandlerStats", "global");
+        entry.set_attr("total_handlers", Entry::u32(self.total_handlers));
+        entry.set_attr("total_executions", Entry::u32(self.total_executions));
+        entry.set_attr("total_successes", Entry::u32(self.total_successes));
+        entry.set_attr("total_failures", Entry::u32(self.total_failures));
+        entry.set_attr("overall_success_rate", Entry::f64(self.overall_success_rate));
+        entry.set_attr("average_confidence", Entry::f64(self.average_confidence));
+        entry
     }
 
     fn kind(&self) -> &str {
@@ -1536,67 +1467,40 @@ impl Handler {
 
 impl Build for Handler {
     fn to_entry(&self) -> Entry {
-        let mut attrs = HashMap::new();
-
+        let mut entry = Entry::node("Handler", &self.name);
+        
         // Identity
-        attrs.insert(
-            "handler_type".to_string(),
-            Entry::string(&self.handler_type),
-        );
-        attrs.insert("category".to_string(), Entry::string(&self.category));
-        attrs.insert("state".to_string(), Entry::string(self.state.as_str()));
+        entry.set_attr("handler_type", Entry::string(&self.handler_type));
+        entry.set_attr("category", Entry::string(&self.category));
+        entry.set_attr("state", Entry::string(self.state.as_str()));
 
         // Configuration
-        attrs.insert("priority".to_string(), Entry::i32(self.priority));
-        attrs.insert("min_tokens".to_string(), Entry::usize(self.min_tokens));
+        entry.set_attr("priority", Entry::i32(self.priority));
+        entry.set_attr("min_tokens", Entry::usize(self.min_tokens));
         if let Some(max) = self.max_tokens {
-            attrs.insert("max_tokens".to_string(), Entry::usize(max));
+            entry.set_attr("max_tokens", Entry::usize(max));
         }
 
         // Patterns
         let patterns: Vec<Entry> = self.patterns.iter().map(|p| Entry::string(p)).collect();
-        attrs.insert("patterns".to_string(), Entry::vec(patterns));
+        entry.set_attr("patterns", Entry::vec(patterns));
 
         // Statistics
-        attrs.insert(
-            "total_executions".to_string(),
-            Entry::u32(self.total_executions),
-        );
-        attrs.insert("successful".to_string(), Entry::u32(self.successful));
-        attrs.insert("failed".to_string(), Entry::u32(self.failed));
-        attrs.insert("success_rate".to_string(), Entry::f64(self.success_rate()));
-        attrs.insert(
-            "average_confidence".to_string(),
-            Entry::f64(self.average_confidence),
-        );
-        attrs.insert(
-            "average_tokens".to_string(),
-            Entry::f64(self.average_tokens),
-        );
-        attrs.insert(
-            "average_time_ms".to_string(),
-            Entry::f64(self.average_time_ms),
-        );
+        entry.set_attr("total_executions", Entry::u32(self.total_executions));
+        entry.set_attr("successful", Entry::u32(self.successful));
+        entry.set_attr("failed", Entry::u32(self.failed));
+        entry.set_attr("success_rate", Entry::f64(self.success_rate()));
+        entry.set_attr("average_confidence", Entry::f64(self.average_confidence));
+        entry.set_attr("average_tokens", Entry::f64(self.average_tokens));
+        entry.set_attr("average_time_ms", Entry::f64(self.average_time_ms));
 
         // Counts
-        attrs.insert(
-            "success_record_count".to_string(),
-            Entry::usize(self.success_records.len()),
-        );
-        attrs.insert(
-            "failure_record_count".to_string(),
-            Entry::usize(self.failure_records.len()),
-        );
-        attrs.insert(
-            "code_segment_count".to_string(),
-            Entry::usize(self.code_segments.len()),
-        );
-        attrs.insert(
-            "routing_rule_count".to_string(),
-            Entry::usize(self.routing_rules.len()),
-        );
-
-        Entry::node_with_attrs("Handler", &self.name, attrs)
+        entry.set_attr("success_record_count", Entry::usize(self.success_records.len()));
+        entry.set_attr("failure_record_count", Entry::usize(self.failure_records.len()));
+        entry.set_attr("code_segment_count", Entry::usize(self.code_segments.len()));
+        entry.set_attr("routing_rule_count", Entry::usize(self.routing_rules.len()));
+        
+        entry
     }
 
     fn kind(&self) -> &str {

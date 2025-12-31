@@ -3,7 +3,7 @@
 //! Tree wraps Site to provide a clean API for working with
 //! intermediate format trees. Includes builder pattern methods.
 
-use crate::db::node::{self, kind, Enum, Function, NodeExt, Struct};
+use crate::db::node::{self, NodeKind, Enum, Function, NodeExt, Struct};
 use crate::db::web::{BranchOp, Entry, Links, Site, SiteStats};
 use std::ops::Range;
 
@@ -347,7 +347,7 @@ impl Tree {
     // ========================================================================
 
     /// Find all nodes by kind.
-    pub fn find_by_kind(&self, kind: &str) -> Vec<&Entry> {
+    pub fn find_by_kind(&self, kind: impl Into<String>) -> Vec<&Entry> {
         self.site
             .find_by_kind(kind)
             .iter()
@@ -375,37 +375,37 @@ impl Tree {
 
     /// Get all function nodes.
     pub fn functions(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::FUNCTION)
+        self.find_by_kind(NodeKind::Function)
     }
 
     /// Get all struct nodes.
     pub fn structs(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::STRUCT)
+        self.find_by_kind(NodeKind::Struct)
     }
 
     /// Get all enum nodes.
     pub fn enums(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::ENUM)
+        self.find_by_kind(NodeKind::Enum)
     }
 
     /// Get all global variable nodes.
     pub fn globals(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::GLOBAL)
+        self.find_by_kind(NodeKind::Global)
     }
 
     /// Get all typedef nodes.
     pub fn typedefs(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::TYPEDEF)
+        self.find_by_kind(NodeKind::Typedef)
     }
 
     /// Get all macro nodes.
     pub fn macros(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::MACRO)
+        self.find_by_kind(NodeKind::Macro)
     }
 
     /// Get all include nodes.
     pub fn includes(&self) -> Vec<&Entry> {
-        self.find_by_kind(kind::INCLUDE)
+        self.find_by_kind(NodeKind::Include)
     }
 
     // ========================================================================

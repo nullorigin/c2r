@@ -9,7 +9,7 @@
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorDecision, ProcessorStage, Processor, ProcessorState, ProcessorStats};
 use crate::handlers::validation::SequenceValidator;
 use crate::system;
 
@@ -42,25 +42,36 @@ pub struct GlobalData {
     pub original_line: String,
 }
 
+impl Build for GlobalData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("GlobalData", &self.name);
+        entry.set_attr("name", Entry::string(&self.name));
+        entry.set_attr("c_type", Entry::string(&self.c_type));
+        entry.set_attr("rust_type", Entry::string(&self.rust_type));
+        entry.set_attr("is_const", Entry::bool(self.is_const));
+        entry.set_attr("is_static", Entry::bool(self.is_static));
+        entry.set_attr("is_extern", Entry::bool(self.is_extern));
+        if let Some(ref value) = self.initial_value {
+            entry.set_attr("initial_value", Entry::string(value));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str { "GlobalData" }
+    fn name(&self) -> Option<&str> { if self.name.is_empty() { None } else { Some(&self.name) } }
+    fn category(&self) -> Option<&str> { Some("global") }
+}
+
 /// Handler for C global variable declarations
 #[derive(Debug)]
 pub struct GlobalHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: GlobalData,
+    /// Generic processor state
+    state: ProcessorState<GlobalData>,
 }
 
 impl GlobalHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: GlobalData::default(),
-        }
+        Self { state: ProcessorState::new("GlobalHandler") }
     }
 }
 
@@ -73,6 +84,11 @@ impl Default for GlobalHandler {
 impl Processor for GlobalHandler {
     fn supported_patterns(&self) -> &[&str] {
         &["global", "global_const", "global_static", "global_extern"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -342,7 +358,9 @@ impl Processor for GlobalHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.len() < 3 {
-            self.error = Some("Too few tokens for global declaration".to_string());
+            self.state.set_error("Too few tokens for global declaration".to_string());
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
             return false;
         }
 
@@ -353,7 +371,7 @@ impl Processor for GlobalHandler {
         if token_strs.len() == 3 {
             let first = token_strs[0].as_str();
             if matches!(first, "struct" | "enum" | "union") {
-                self.error = Some("Forward declaration - not a global variable".to_string());
+                self.state.set_error("Forward declaration - not a global variable".to_string());
                 return false;
             }
         }
@@ -373,7 +391,7 @@ impl Processor for GlobalHandler {
                 let has_equals = token_strs.iter().any(|t| t == "=");
                 // Check if there's a type keyword before the struct/enum/union (like "static struct")
                 if !has_equals && tokens_before_semi.len() <= 2 {
-                    self.error = Some("Type declaration - not a global variable".to_string());
+                    self.state.set_error("Type declaration - not a global variable".to_string());
                     return false;
                 }
             }
@@ -391,13 +409,13 @@ impl Processor for GlobalHandler {
 
         // Must end with semicolon
         if token_strs.last() != Some(&";".to_string()) {
-            self.error = Some("Global declaration must end with semicolon".to_string());
+            self.state.set_error("Global declaration must end with semicolon".to_string());
             return false;
         }
 
         // Should not have ( ) which would indicate function
         if token_strs.iter().any(|t| t == "(") {
-            self.error = Some("Has parentheses - likely a function".to_string());
+            self.state.set_error("Has parentheses - likely a function".to_string());
             return false;
         }
 
@@ -410,48 +428,51 @@ impl Processor for GlobalHandler {
         } else {
             0.7
         };
-        self.confidence = validation_result.adjust_confidence(base_confidence);
-
+        self.state.set_confidence(validation_result.adjust_confidence(base_confidence));
+        self.state.stats.record_success(self.state.confidence, tokens.len(), 0, Some("global"), "validated");
+        self.stats();
         true
     }
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
 
-        self.data.original_line = token_strs.join(" ");
+        self.state.data.original_line = token_strs.join(" ");
 
         // Try extraction patterns first
         for (_, extract_pattern) in self.patterns() {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get type from pattern extraction
                 if let Some(var_type) = ctx.value("type") {
-                    self.data.c_type = var_type.to_string();
-                    self.data.rust_type = system().lookup_type(&self.data.c_type)
-                        .unwrap_or_else(|| self.data.c_type.clone());
+                    self.state.data.c_type = var_type.to_string();
+                    self.state.data.rust_type = system().lookup_type(&self.state.data.c_type)
+                        .unwrap_or_else(|| self.state.data.c_type.clone());
                 }
 
                 // Get name from pattern extraction
                 if let Some(name) = ctx.value("name") {
-                    self.data.name = name.to_string();
+                    self.state.data.name = name.to_string();
                 }
 
                 // Check for modifiers
                 if ctx.has_modifier("const") {
-                    self.data.is_const = true;
+                    self.state.data.is_const = true;
                 }
                 if ctx.has_modifier("static") {
-                    self.data.is_static = true;
+                    self.state.data.is_static = true;
                 }
                 if ctx.has_modifier("extern") {
-                    self.data.is_extern = true;
+                    self.state.data.is_extern = true;
                 }
 
                 // Get value tokens
                 if let Some(values) = ctx.list("value_tokens") {
-                    self.data.initial_value = Some(values.join(" "));
+                    self.state.data.initial_value = Some(values.join(" "));
                 }
 
-                if !self.data.name.is_empty() && !self.data.c_type.is_empty() {
+                if !self.state.data.name.is_empty() && !self.state.data.c_type.is_empty() {
+                    self.state.stats.record_success(self.state.confidence, 0, 0, Some("global"), "extracted");
+                    self.stats();
                     return true;
                 }
             }
@@ -463,15 +484,15 @@ impl Processor for GlobalHandler {
         while idx < token_strs.len() {
             match token_strs[idx].as_str() {
                 "const" => {
-                    self.data.is_const = true;
+                    self.state.data.is_const = true;
                     idx += 1;
                 }
                 "static" => {
-                    self.data.is_static = true;
+                    self.state.data.is_static = true;
                     idx += 1;
                 }
                 "extern" => {
-                    self.data.is_extern = true;
+                    self.state.data.is_extern = true;
                     idx += 1;
                 }
                 "volatile" => {
@@ -489,7 +510,7 @@ impl Processor for GlobalHandler {
                 type_parts.push(token.clone());
                 idx += 1;
             } else if token == "*" {
-                self.data.is_pointer = true;
+                self.state.data.is_pointer = true;
                 type_parts.push(token.clone());
                 idx += 1;
             } else {
@@ -498,21 +519,21 @@ impl Processor for GlobalHandler {
         }
 
         if type_parts.is_empty() {
-            self.error = Some("No type found".to_string());
+            self.state.set_error("No type found".to_string());
             return false;
         }
 
-        self.data.c_type = type_parts.join(" ");
-        self.data.rust_type = system().lookup_type(&self.data.c_type)
-            .unwrap_or_else(|| self.data.c_type.clone());
+        self.state.data.c_type = type_parts.join(" ");
+        self.state.data.rust_type = system().lookup_type(&self.state.data.c_type)
+            .unwrap_or_else(|| self.state.data.c_type.clone());
 
         // Next should be the variable name
         if idx >= token_strs.len() {
-            self.error = Some("No variable name found".to_string());
+            self.state.set_error("No variable name found".to_string());
             return false;
         }
 
-        self.data.name = token_strs[idx].clone();
+        self.state.data.name = token_strs[idx].clone();
         idx += 1;
 
         // Check for array brackets
@@ -520,7 +541,7 @@ impl Processor for GlobalHandler {
             idx += 1; // skip [
             if idx < token_strs.len() && token_strs[idx] != "]" {
                 if let Ok(size) = token_strs[idx].parse::<usize>() {
-                    self.data.array_dims.push(size);
+                    self.state.data.array_dims.push(size);
                 }
                 idx += 1;
             }
@@ -541,35 +562,37 @@ impl Processor for GlobalHandler {
             }
 
             if !value_parts.is_empty() {
-                self.data.initial_value = Some(value_parts.join(" "));
+                self.state.data.initial_value = Some(value_parts.join(" "));
             }
         }
 
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("global"), "extracted");
+        self.stats();
         true
     }
 
     fn convert(&mut self) -> Option<String> {
         let rust_name = self.convert_name_to_rust();
-        let rust_type = &self.data.rust_type;
+        let rust_type = &self.state.data.rust_type;
         
         // For const string types, use &'static str (String can't be const in Rust)
-        let effective_type = if self.data.is_const && (rust_type == "String" || rust_type.contains("str")) {
+        let effective_type = if self.state.data.is_const && (rust_type == "String" || rust_type.contains("str")) {
             "&'static str".to_string()
         } else {
             rust_type.clone()
         };
 
-        let output = if self.data.is_const {
+        let output = if self.state.data.is_const {
             // const in C -> const in Rust
             let value = self
-                .data
+                .state.data
                 .initial_value
                 .as_ref()
                 .map(|v| self.convert_value(v))
                 .unwrap_or_else(|| self.default_value(&effective_type));
 
             format!("pub const {}: {} = {};", rust_name, effective_type, value)
-        } else if self.data.is_extern {
+        } else if self.state.data.is_extern {
             // extern declaration - use extern block
             format!(
                 "extern \"C\" {{\n    pub static {}: {};\n}}",
@@ -578,49 +601,57 @@ impl Processor for GlobalHandler {
         } else {
             // Regular global - use static mut (unsafe in Rust)
             let value = self
-                .data
+                .state.data
                 .initial_value
                 .as_ref()
                 .map(|v| self.convert_value(v))
                 .unwrap_or_else(|| self.default_value(rust_type));
 
-            if self.data.is_static || !self.data.is_const {
+            if self.state.data.is_static || !self.state.data.is_const {
                 format!(
-                    "// SAFETY: Global mutable state - ensure proper synchronization\npub static mut {}: {} = {};",
+                    "// SAFETY: Global mutable state - ensure proper synchronization\n    pub static mut {}: {} = {};",
                     rust_name, rust_type, value
                 )
             } else {
-                format!("pub const {}: {} = {};", rust_name, rust_type, value)
+                format!("    pub const {}: {} = {};", rust_name, rust_type, value)
             }
         };
 
-        self.output = Some(output.clone());
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("global"), "converted");
+        self.stats();
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
+
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
+
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output.clone());
     }
+
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
+
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
+
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
+
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -655,7 +686,7 @@ impl GlobalHandler {
 
     /// Convert C variable name to Rust convention (SCREAMING_SNAKE_CASE for globals)
     fn convert_name_to_rust(&self) -> String {
-        let name = &self.data.name;
+        let name = &self.state.data.name;
 
         // If already uppercase, keep it
         if name
@@ -685,7 +716,7 @@ impl GlobalHandler {
         let trimmed = value.trim();
 
         // Handle NULL
-        if trimmed == "NULL" || trimmed == "0" && self.data.is_pointer {
+        if trimmed == "NULL" || trimmed == "0" && self.state.data.is_pointer {
             return "std::ptr::null_mut()".to_string();
         }
 
@@ -701,9 +732,9 @@ impl GlobalHandler {
 
         // Check if this is a string type that needs quotes added
         // (string literals may have lost quotes during tokenization)
-        let is_string_type = self.data.rust_type.contains("str") 
-            || self.data.rust_type == "String"
-            || self.data.c_type.contains("char") && self.data.c_type.contains("*");
+        let is_string_type = self.state.data.rust_type.contains("str") 
+            || self.state.data.rust_type == "String"
+            || self.state.data.c_type.contains("char") && self.state.data.c_type.contains("*");
         if is_string_type && !trimmed.is_empty() 
             && !trimmed.starts_with('"') 
             && !trimmed.chars().next().map(|c| c.is_numeric() || c == '-').unwrap_or(false) {
@@ -740,18 +771,18 @@ impl GlobalHandler {
 impl Build for GlobalHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "GlobalHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("name", Entry::string(&self.data.name));
-        entry.set_attr("c_type", Entry::string(&self.data.c_type));
-        entry.set_attr("rust_type", Entry::string(&self.data.rust_type));
-        entry.set_attr("is_const", Entry::bool(self.data.is_const));
-        entry.set_attr("is_static", Entry::bool(self.data.is_static));
-        entry.set_attr("is_extern", Entry::bool(self.data.is_extern));
-        if let Some(ref value) = self.data.initial_value {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("name", Entry::string(&self.state.data.name));
+        entry.set_attr("c_type", Entry::string(&self.state.data.c_type));
+        entry.set_attr("rust_type", Entry::string(&self.state.data.rust_type));
+        entry.set_attr("is_const", Entry::bool(self.state.data.is_const));
+        entry.set_attr("is_static", Entry::bool(self.state.data.is_static));
+        entry.set_attr("is_extern", Entry::bool(self.state.data.is_extern));
+        if let Some(ref value) = self.state.data.initial_value {
             entry.set_attr("initial_value", Entry::string(value));
         }
-        if let Some(ref output) = self.output {
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry

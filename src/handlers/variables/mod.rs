@@ -2,11 +2,11 @@
 //!
 //! Converts C variable declarations to Rust.
 
-use crate::db::convert::{TypeConverter, sanitize_rust_identifier};
+use crate::db::convert::sanitize_rust_identifier;
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, ProcessorDecision, Processor, ProcessorState, ProcessorStats};
 use crate::handlers::validation::SequenceValidator;
 use crate::system;
 
@@ -29,25 +29,43 @@ pub struct VariableData {
     pub struct_init_values: Vec<String>,
 }
 
+impl Build for VariableData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("VariableData", &self.name);
+        entry.set_attr("name", Entry::string(&self.name));
+        entry.set_attr("c_type", Entry::string(&self.c_type));
+        entry.set_attr("is_const", Entry::bool(self.is_const));
+        entry.set_attr("is_static", Entry::bool(self.is_static));
+        entry.set_attr("is_pointer", Entry::bool(self.is_pointer));
+        if let Some(ref val) = self.initial_value {
+            entry.set_attr("initial_value", Entry::string(val));
+        }
+        entry
+    }
+
+    fn kind(&self) -> &str {
+        "VariableData"
+    }
+
+    fn name(&self) -> Option<&str> {
+        if self.name.is_empty() { None } else { Some(&self.name) }
+    }
+
+    fn category(&self) -> Option<&str> {
+        Some("variable")
+    }
+}
+
 /// Handler for C variable declarations
 #[derive(Debug)]
 pub struct VariableHandler {
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: VariableData,
+    /// Generic processor state
+    state: ProcessorState<VariableData>,
 }
 
 impl VariableHandler {
     pub fn new() -> Self {
-        Self {
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: VariableData::default(),
-        }
+        Self { state: ProcessorState::new("VariableHandler") }
     }
 
     /// Convert variable declaration from tokens (called from DefinitionHandler via routing)
@@ -170,6 +188,23 @@ impl VariableHandler {
         value.to_string()
     }
 
+    /// Smart join tokens: no space around parentheses, no space before ','
+    fn smart_join_tokens(tokens: &[&str]) -> String {
+        let mut result = String::new();
+        for (i, token) in tokens.iter().enumerate() {
+            if i > 0 {
+                let prev = tokens[i - 1];
+                // No space after '(' or before ')' or ',' or ';' or before '('
+                let needs_space = prev != "(" && *token != ")" && *token != "," && *token != ";" && *token != "(";
+                if needs_space {
+                    result.push(' ');
+                }
+            }
+            result.push_str(token);
+        }
+        result
+    }
+
     /// Parse nested values from a comma-separated string, respecting brace nesting
     fn parse_nested_values(&self, s: &str) -> Vec<String> {
         let mut values = Vec::new();
@@ -214,6 +249,11 @@ impl Processor for VariableHandler {
             "validate_variable_declaration",
             "extract_variable_declaration",
         ]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -269,6 +309,8 @@ impl Processor for VariableHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.len() < 3 {
+            self.state.stats.record_failure(None, "validated");
+            self.stats();
             return false;
         }
 
@@ -276,6 +318,12 @@ impl Processor for VariableHandler {
 
         // Must end with semicolon
         if token_strs.last() != Some(&";".to_string()) {
+            return false;
+        }
+
+        // Reject compound assignments (+=, -=, &=, etc.) - these are expressions, not declarations
+        let compound_ops = ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^=", "<<=", ">>="];
+        if token_strs.iter().any(|t| compound_ops.contains(&t.as_str())) {
             return false;
         }
 
@@ -368,8 +416,9 @@ impl Processor for VariableHandler {
             0.1 
         };
         
-        self.confidence = validation_result.adjust_confidence(base_confidence) - order_penalty;
-
+        self.state.set_confidence(validation_result.adjust_confidence(base_confidence) - order_penalty);
+        self.state.stats.record_success(self.state.confidence, tokens.len(), 0, Some("variable"), "validated");
+        self.stats();
         true
     }
 
@@ -381,20 +430,20 @@ impl Processor for VariableHandler {
             if let Some(ctx) = extract_pattern.run_extraction(&token_strs) {
                 // Get type from pattern extraction
                 if let Some(var_type) = ctx.value("type") {
-                    self.data.c_type = var_type.to_string();
+                    self.state.data.c_type = var_type.to_string();
                 }
 
                 // Get name from pattern extraction
                 if let Some(name) = ctx.value("name") {
-                    self.data.name = name.to_string();
+                    self.state.data.name = name.to_string();
                 }
 
                 // Check for modifiers
                 if ctx.has_modifier("const") {
-                    self.data.is_const = true;
+                    self.state.data.is_const = true;
                 }
                 if ctx.has_modifier("static") {
-                    self.data.is_static = true;
+                    self.state.data.is_static = true;
                 }
 
                 // Check for initializer - extract from tokens if has_init flag is set
@@ -407,16 +456,18 @@ impl Processor for VariableHandler {
                             .map(|s| s.as_str())
                             .collect();
                         if init_tokens.first() == Some(&"{") {
-                            self.data.is_struct_init = true;
-                            self.data.struct_init_values = self.parse_brace_init(&init_tokens);
+                            self.state.data.is_struct_init = true;
+                            self.state.data.struct_init_values = self.parse_brace_init(&init_tokens);
                         } else {
-                            self.data.initial_value = Some(init_tokens.join(" "));
+                            self.state.data.initial_value = Some(Self::smart_join_tokens(&init_tokens));
                         }
                     }
                 }
 
-                if !self.data.name.is_empty() && !self.data.c_type.is_empty() {
-                    self.confidence = 0.8;
+                if !self.state.data.name.is_empty() && !self.state.data.c_type.is_empty() {
+                    self.state.set_confidence(0.8);
+                    self.state.stats.record_success(self.state.confidence, 0, 0, Some("variable"), "extracted");
+                    self.stats();
                     return true;
                 }
             }
@@ -436,12 +487,12 @@ impl Processor for VariableHandler {
         let mut idx = 0;
 
         if token_strs.get(idx) == Some(&"const".to_string()) {
-            self.data.is_const = true;
+            self.state.data.is_const = true;
             idx += 1;
         }
 
         if token_strs.get(idx) == Some(&"static".to_string()) {
-            self.data.is_static = true;
+            self.state.data.is_static = true;
             idx += 1;
         }
 
@@ -453,26 +504,26 @@ impl Processor for VariableHandler {
             }
 
             if token_strs[idx..eq].iter().any(|t| t == "*") {
-                self.data.is_pointer = true;
+                self.state.data.is_pointer = true;
             }
 
-            self.data.name = token_strs[eq - 1].clone();
+            self.state.data.name = token_strs[eq - 1].clone();
             let type_tokens: Vec<&str> = token_strs[idx..eq - 1]
                 .iter()
                 .filter(|t| *t != "*")
                 .map(|s| s.as_str())
                 .collect();
-            self.data.c_type = type_tokens.join(" ");
+            self.state.data.c_type = type_tokens.join(" ");
 
             // Check for struct initialization with brace syntax: Type name = { ... }
             let init_tokens: Vec<&str> = token_strs[eq + 1..].iter().map(|s| s.as_str()).collect();
             if init_tokens.first() == Some(&"{") {
                 // This is a struct initialization
-                self.data.is_struct_init = true;
+                self.state.data.is_struct_init = true;
                 // Parse the values between braces
-                self.data.struct_init_values = self.parse_brace_init(&init_tokens);
+                self.state.data.struct_init_values = self.parse_brace_init(&init_tokens);
             } else {
-                self.data.initial_value = Some(init_tokens.join(" "));
+                self.state.data.initial_value = Some(Self::smart_join_tokens(&init_tokens));
             }
         } else {
             if token_strs.len() < idx + 2 {
@@ -480,37 +531,48 @@ impl Processor for VariableHandler {
             }
 
             if token_strs[idx..].iter().any(|t| t == "*") {
-                self.data.is_pointer = true;
+                self.state.data.is_pointer = true;
             }
 
-            self.data.name = token_strs.last().unwrap().clone();
+            self.state.data.name = token_strs.last().unwrap().clone();
             let type_tokens: Vec<&str> = token_strs[idx..token_strs.len() - 1]
                 .iter()
                 .filter(|t| *t != "*")
                 .map(|s| s.as_str())
                 .collect();
-            self.data.c_type = type_tokens.join(" ");
+            self.state.data.c_type = type_tokens.join(" ");
         }
 
-        self.confidence = 0.8;
+        self.state.set_confidence(0.8);
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("variable"), "extracted");
+        self.stats();
         true
     }
 
     fn convert(&mut self) -> Option<String> {
-        let rust_type = system().lookup_type(&self.data.c_type)
-            .unwrap_or_else(|| self.data.c_type.clone());
+        let rust_type = system().lookup_type(&self.state.data.c_type)
+            .unwrap_or_else(|| self.state.data.c_type.clone());
 
-        let full_type = if self.data.is_pointer {
-            format!("*const {}", rust_type)
+        // For char* with string literal initializer, use &str instead of *const i8
+        let full_type = if self.state.data.is_pointer {
+            let is_char_type = matches!(self.state.data.c_type.as_str(), "char" | "const char");
+            let has_string_init = self.state.data.initial_value.as_ref()
+                .map(|v| v.trim().starts_with('"'))
+                .unwrap_or(false);
+            if is_char_type && has_string_init {
+                "&str".to_string()
+            } else {
+                format!("*const {}", rust_type)
+            }
         } else {
             rust_type.clone()
         };
 
         // Build prefix keywords and validate their order
         let mut prefix_keywords = Vec::new();
-        if self.data.is_const {
+        if self.state.data.is_const {
             prefix_keywords.push("const");
-        } else if self.data.is_static {
+        } else if self.state.data.is_static {
             prefix_keywords.push("static");
         } else {
             prefix_keywords.push("let");
@@ -522,13 +584,13 @@ impl Processor for VariableHandler {
         let prefix = fixed_prefix.join(" ");
 
         // Sanitize variable name for Rust keywords (e.g., str -> r#str)
-        let var_name = sanitize_rust_identifier(&self.data.name);
+        let var_name = sanitize_rust_identifier(&self.state.data.name);
 
-        let rust_code = if self.data.is_struct_init {
+        let rust_code = if self.state.data.is_struct_init {
             // Struct initialization: Type name = { val1, val2 } -> Type { field1: val1, field2: val2 }
-            let init_value = self.convert_struct_init(&rust_type, &self.data.struct_init_values);
+            let init_value = self.convert_struct_init(&rust_type, &self.state.data.struct_init_values);
             format!("{} {}: {} = {};", prefix, var_name, full_type, init_value)
-        } else if let Some(ref init) = self.data.initial_value {
+        } else if let Some(ref init) = self.state.data.initial_value {
             // Convert type casts and enum variants in the expression
             let converted_init = self.convert_expression(init);
             format!("{} {}: {} = {};", prefix, var_name, full_type, converted_init)
@@ -538,48 +600,53 @@ impl Processor for VariableHandler {
         };
 
         // Register the variable in the system for sizeof() and type inference
-        if self.data.is_pointer {
-            // Extract base type for pointer registration
-            system().register_pointer_variable(&self.data.name, &self.data.c_type, &rust_type, 1);
-        } else {
-            system().register_variable(&self.data.name, &self.data.c_type, &full_type);
+        // Skip registration for string literals (names starting with quotes)
+        let name = &self.state.data.name;
+        if !name.starts_with('"') && !name.starts_with('\'') && !name.is_empty() {
+            if self.state.data.is_pointer {
+                // Extract base type for pointer registration
+                system().register_pointer_variable(name, &self.state.data.c_type, &rust_type, 1);
+            } else {
+                system().register_variable(name, &self.state.data.c_type, &full_type);
+            }
         }
 
         // Validate the generated Rust code keywords
         let rust_tokens: Vec<&str> = rust_code.split_whitespace().collect();
         let (rust_valid, _) = system().validate_rust_token_order(&rust_tokens);
         if !rust_valid {
-            self.confidence = 0.75; // Lower confidence for potentially invalid output
+            self.state.set_confidence(0.75); // Lower confidence for potentially invalid output
         } else {
-            self.confidence = 0.85;
+            self.state.set_confidence(0.85);
         }
-
+        self.state.stats.record_success(self.state.confidence, 0, 0, Some("variable"), "converted");
+        self.stats();
         Some(rust_code)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
+    fn current_stage(&self) -> ProcessorStage {
+        self.state.stage()
     }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
+    fn set_stage(&mut self, stage: ProcessorStage) {
+        self.state.set_stage(stage);
     }
     fn output(&self) -> Option<String> {
-        self.output.clone()
+        self.state.output.clone()
     }
     fn set_output(&mut self, output: String) {
-        self.output = Some(output);
+        self.state.set_output(output);
     }
     fn error(&self) -> Option<String> {
-        self.error.clone()
+        self.state.error.clone()
     }
     fn set_error(&mut self, error: String) {
-        self.error = Some(error);
+        self.state.set_error(error);
     }
     fn confidence(&self) -> f64 {
-        self.confidence
+        self.state.confidence
     }
     fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
+        self.state.set_confidence(confidence);
     }
 }
 
@@ -862,13 +929,13 @@ impl VariableHandler {
 impl Build for VariableHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "VariableHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
-        entry.set_attr("variable_name", Entry::string(&self.data.name));
-        entry.set_attr("c_type", Entry::string(&self.data.c_type));
+        entry.set_attr("variable_name", Entry::string(&self.state.data.name));
+        entry.set_attr("c_type", Entry::string(&self.state.data.c_type));
         entry
     }
 
@@ -928,7 +995,7 @@ mod tests {
 
         assert!(handler.validate(&tokens));
         assert!(handler.extract(&tokens));
-        assert!(handler.data.is_const);
+        assert!(handler.state.data.is_const);
 
         let output = handler.convert();
         assert!(output.is_some());

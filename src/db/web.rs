@@ -15,6 +15,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::db::NodeKind;
+
 // ============================================================================
 // Branch Operations (for conditional tree structures)
 // ============================================================================
@@ -602,6 +604,317 @@ impl Entry {
         Self::HashMap(m, Links::new())
     }
 
+    /// Parse a string into an appropriate Entry type.
+    /// Supports:
+    /// - Array syntax: `[1, 2, 3]` → Entry::Vec with smallest fitting integer type
+    /// - String arrays: `["a", "b", "c"]` → Entry::Vec<Entry::String>
+    /// - HashMap tuples: `("key":"value"), ("k2":"v2")` → Entry::HashMap (colon separator)
+    /// - Plain strings → Entry::String
+    /// Newlines are ignored in array and hashmap parsing.
+    pub fn parse_string(s: &str) -> Self {
+        // Normalize: collapse all whitespace (including newlines) to single spaces
+        let normalized: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = normalized.trim();
+        
+        // Check for array syntax: [...]
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let inner = trimmed[1..trimmed.len()-1].trim();
+            if inner.is_empty() {
+                return Self::vec(vec![]);
+            }
+            
+            // Try to parse as numeric array first
+            if let Some(entries) = Self::parse_numeric_array(inner) {
+                return Self::vec(entries);
+            }
+            
+            // Try to parse as string array
+            if let Some(entries) = Self::parse_string_array(inner) {
+                return Self::vec(entries);
+            }
+        }
+        
+        // Check for key:value tuple syntax: ("key":value), ...
+        // Single pair → Entry::Pair, multiple → Entry::HashMap
+        if trimmed.starts_with('(') && trimmed.contains(')') {
+            if let Some(pairs) = Self::parse_kv_tuples(trimmed) {
+                if pairs.len() == 1 {
+                    let (k, v) = pairs.into_iter().next().unwrap();
+                    return Self::pair(Entry::string(k), v);
+                } else {
+                    return Self::hashmap(pairs.into_iter().collect());
+                }
+            }
+        }
+        
+        // Default: plain string (use original, not normalized)
+        Self::String(s.to_string(), Links::new())
+    }
+
+    /// Parse a comma-separated list of numbers into Entry values.
+    /// Chooses the smallest integer type that fits all values.
+    fn parse_numeric_array(inner: &str) -> Option<Vec<Entry>> {
+        let parts: Vec<&str> = inner.split(',').map(|p| p.trim()).collect();
+        let mut values: Vec<i128> = Vec::with_capacity(parts.len());
+        let mut all_positive = true;
+        
+        for part in &parts {
+            if part.is_empty() {
+                return None;
+            }
+            match part.parse::<i128>() {
+                Ok(n) => {
+                    if n < 0 { all_positive = false; }
+                    values.push(n);
+                }
+                Err(_) => return None,
+            }
+        }
+        
+        if values.is_empty() {
+            return Some(vec![]);
+        }
+        
+        Some(Self::values_to_smallest_int_entries(&values, all_positive))
+    }
+
+    /// Convert i128 values to Entry using smallest fitting integer type.
+    fn values_to_smallest_int_entries(values: &[i128], all_positive: bool) -> Vec<Entry> {
+        let min_val = *values.iter().min().unwrap();
+        let max_val = *values.iter().max().unwrap();
+        
+        if all_positive {
+            let max_u = max_val as u128;
+            if max_u <= u8::MAX as u128 {
+                values.iter().map(|&v| Entry::u8(v as u8)).collect()
+            } else if max_u <= u16::MAX as u128 {
+                values.iter().map(|&v| Entry::u16(v as u16)).collect()
+            } else if max_u <= u32::MAX as u128 {
+                values.iter().map(|&v| Entry::u32(v as u32)).collect()
+            } else if max_u <= u64::MAX as u128 {
+                values.iter().map(|&v| Entry::u64(v as u64)).collect()
+            } else {
+                values.iter().map(|&v| Entry::u128(v as u128)).collect()
+            }
+        } else {
+            if min_val >= i8::MIN as i128 && max_val <= i8::MAX as i128 {
+                values.iter().map(|&v| Entry::i8(v as i8)).collect()
+            } else if min_val >= i16::MIN as i128 && max_val <= i16::MAX as i128 {
+                values.iter().map(|&v| Entry::i16(v as i16)).collect()
+            } else if min_val >= i32::MIN as i128 && max_val <= i32::MAX as i128 {
+                values.iter().map(|&v| Entry::i32(v as i32)).collect()
+            } else if min_val >= i64::MIN as i128 && max_val <= i64::MAX as i128 {
+                values.iter().map(|&v| Entry::i64(v as i64)).collect()
+            } else {
+                values.iter().map(|&v| Entry::i128(v)).collect()
+            }
+        }
+    }
+
+    /// Convert a single i128 value to Entry using smallest fitting integer type.
+    fn value_to_smallest_int_entry(v: i128) -> Entry {
+        if v >= 0 {
+            let u = v as u128;
+            if u <= u8::MAX as u128 { Entry::u8(v as u8) }
+            else if u <= u16::MAX as u128 { Entry::u16(v as u16) }
+            else if u <= u32::MAX as u128 { Entry::u32(v as u32) }
+            else if u <= u64::MAX as u128 { Entry::u64(v as u64) }
+            else { Entry::u128(u) }
+        } else {
+            if v >= i8::MIN as i128 && v <= i8::MAX as i128 { Entry::i8(v as i8) }
+            else if v >= i16::MIN as i128 && v <= i16::MAX as i128 { Entry::i16(v as i16) }
+            else if v >= i32::MIN as i128 && v <= i32::MAX as i128 { Entry::i32(v as i32) }
+            else if v >= i64::MIN as i128 && v <= i64::MAX as i128 { Entry::i64(v as i64) }
+            else { Entry::i128(v) }
+        }
+    }
+
+    /// Parse a comma-separated list of quoted strings into Entry::String values.
+    fn parse_string_array(inner: &str) -> Option<Vec<Entry>> {
+        let mut entries = Vec::new();
+        let mut chars = inner.chars().peekable();
+        
+        while chars.peek().is_some() {
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Expect opening quote
+            let quote_char = match chars.next() {
+                Some('"') => '"',
+                Some('\'') => '\'',
+                None => break,
+                _ => return None,
+            };
+            
+            // Collect string content until closing quote
+            let mut content = String::new();
+            loop {
+                match chars.next() {
+                    Some('\\') => {
+                        match chars.next() {
+                            Some('n') => content.push('\n'),
+                            Some('t') => content.push('\t'),
+                            Some('r') => content.push('\r'),
+                            Some('\\') => content.push('\\'),
+                            Some('"') => content.push('"'),
+                            Some('\'') => content.push('\''),
+                            Some(c) => { content.push('\\'); content.push(c); }
+                            None => return None,
+                        }
+                    }
+                    Some(c) if c == quote_char => break,
+                    Some(c) => content.push(c),
+                    None => return None,
+                }
+            }
+            
+            entries.push(Entry::string(content));
+            
+            // Skip whitespace after string
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Expect comma or end
+            match chars.peek() {
+                Some(',') => { chars.next(); }
+                None => break,
+                _ => return None,
+            }
+        }
+        
+        if entries.is_empty() { None } else { Some(entries) }
+    }
+
+    /// Parse key-value tuples: ("key":"value"), ("k2":123), ...
+    /// Uses colon as key-value separator to avoid confusion with regular tuples.
+    /// Returns Vec of (String, Entry) pairs for flexible handling (Pair vs HashMap).
+    fn parse_kv_tuples(s: &str) -> Option<Vec<(String, Entry)>> {
+        let mut pairs = Vec::new();
+        let mut chars = s.chars().peekable();
+        
+        loop {
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Check for end
+            if chars.peek().is_none() {
+                break;
+            }
+            
+            // Expect opening paren
+            if chars.next() != Some('(') {
+                return None;
+            }
+            
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Parse key (string or number)
+            let key = Self::parse_tuple_value(&mut chars)?;
+            let key_str = match &key {
+                Entry::String(s, _) => s.clone(),
+                e => e.to_string_value()?,
+            };
+            
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Expect colon (key:value separator)
+            if chars.next() != Some(':') {
+                return None;
+            }
+            
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Parse value (string or number)
+            let value = Self::parse_tuple_value(&mut chars)?;
+            
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Expect closing paren
+            if chars.next() != Some(')') {
+                return None;
+            }
+            
+            pairs.push((key_str, value));
+            
+            // Skip whitespace
+            while chars.peek().map(|c| c.is_whitespace()).unwrap_or(false) {
+                chars.next();
+            }
+            
+            // Expect comma or end
+            match chars.peek() {
+                Some(',') => { chars.next(); }
+                None => break,
+                _ => return None,
+            }
+        }
+        
+        if pairs.is_empty() { None } else { Some(pairs) }
+    }
+
+    /// Parse a single value in a tuple: either a quoted string or a number.
+    fn parse_tuple_value(chars: &mut std::iter::Peekable<std::str::Chars>) -> Option<Entry> {
+        match chars.peek()? {
+            '"' | '\'' => {
+                let quote_char = chars.next()?;
+                let mut content = String::new();
+                loop {
+                    match chars.next()? {
+                        '\\' => {
+                            match chars.next()? {
+                                'n' => content.push('\n'),
+                                't' => content.push('\t'),
+                                'r' => content.push('\r'),
+                                '\\' => content.push('\\'),
+                                '"' => content.push('"'),
+                                '\'' => content.push('\''),
+                                c => { content.push('\\'); content.push(c); }
+                            }
+                        }
+                        c if c == quote_char => break,
+                        c => content.push(c),
+                    }
+                }
+                Some(Entry::string(content))
+            }
+            c if c.is_ascii_digit() || *c == '-' => {
+                let mut num_str = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_digit() || c == '-' {
+                        num_str.push(chars.next()?);
+                    } else {
+                        break;
+                    }
+                }
+                let n: i128 = num_str.parse().ok()?;
+                Some(Self::value_to_smallest_int_entry(n))
+            }
+            _ => None,
+        }
+    }
+    pub fn set_name(mut self, n: impl Into<String>) -> bool {
+        match self {
+            Entry::Node { kind, name, attrs, links } => { self = Entry::Node { kind: kind.clone(),name: n.into(),attrs: attrs.clone(), links: links.clone() }; true }
+            _ => false
+        }
+    }
     /// Create a Node site (for AST-like structures).
     pub fn node(kind: impl Into<String>, name: impl Into<String>) -> Self {
         Self::Node {
@@ -611,7 +924,6 @@ impl Entry {
             links: Links::new(),
         }
     }
-
     /// Create a Node with attributes.
     pub fn node_with_attrs(
         kind: impl Into<String>,
@@ -700,6 +1012,16 @@ impl Entry {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Set attribute from an Option - only sets if Some.
+    /// Works with Option<String>, Option<&str>, Option<&String>, etc.
+    pub fn set_attr_opt<S: AsRef<str>>(&mut self, key: impl Into<String>, value: Option<S>) -> bool {
+        if let Some(v) = value {
+            self.set_attr(key, Entry::string(v.as_ref()))
+        } else {
+            false
         }
     }
 
@@ -1831,6 +2153,21 @@ impl Entry {
             Self::String(v, _) => Some(v.clone()),
             Self::Char(v, _) => Some(v.to_string()),
             Self::PathBuf(v, _) => Some(v.to_string_lossy().into_owned()),
+            Self::I8(n, _) => Some(n.to_string()),
+            Self::I16(n, _) => Some(n.to_string()),
+            Self::I32(n, _) => Some(n.to_string()),
+            Self::I64(n, _) => Some(n.to_string()),
+            Self::I128(n, _) => Some(n.to_string()),
+            Self::U8(n, _) => Some(n.to_string()),
+            Self::U16(n, _) => Some(n.to_string()),
+            Self::U32(n, _) => Some(n.to_string()),
+            Self::U64(n, _) => Some(n.to_string()),
+            Self::U128(n, _) => Some(n.to_string()),
+            Self::Isize(n, _) => Some(n.to_string()),
+            Self::Usize(n, _) => Some(n.to_string()),
+            Self::F32(n, _) => Some(n.to_string()),
+            Self::F64(n, _) => Some(n.to_string()),
+            Self::Bool(b, _) => Some(b.to_string()),
             _ => None,
         }
     }
@@ -1982,11 +2319,12 @@ impl Site {
     }
 
     /// Find all nodes by kind.
-    pub fn find_by_kind(&self, kind: &str) -> Vec<usize> {
+    pub fn find_by_kind(&self, kind: impl Into<String>) -> Vec<usize> {
+        let kind_str = kind.into();
         self.sites
             .iter()
             .enumerate()
-            .filter(|(_, e)| e.kind() == Some(kind))
+            .filter(|(_, e)| e.kind().map_or(false, |k| k == kind_str))
             .map(|(i, _)| i)
             .collect()
     }
@@ -2028,32 +2366,32 @@ impl Site {
 
     /// Get all function nodes.
     pub fn functions(&self) -> Vec<usize> {
-        self.find_by_kind(node_kind::FUNCTION)
+        self.find_by_kind(NodeKind::Function)
     }
 
     /// Get all struct nodes.
     pub fn structs(&self) -> Vec<usize> {
-        self.find_by_kind(node_kind::STRUCT)
+        self.find_by_kind(NodeKind::Struct)
     }
 
     /// Get all enum nodes.
     pub fn enums(&self) -> Vec<usize> {
-        self.find_by_kind(node_kind::ENUM)
+        self.find_by_kind(NodeKind::Enum)
     }
 
     /// Get all global variable nodes.
     pub fn globals(&self) -> Vec<usize> {
-        self.find_by_kind(node_kind::GLOBAL)
+        self.find_by_kind(NodeKind::Global)
     }
 
     /// Get all typedef nodes.
     pub fn typedefs(&self) -> Vec<usize> {
-        self.find_by_kind(node_kind::TYPEDEF)
+        self.find_by_kind(NodeKind::Typedef)
     }
 
     /// Get all macro nodes.
     pub fn macros(&self) -> Vec<usize> {
-        self.find_by_kind(node_kind::MACRO)
+        self.find_by_kind(NodeKind::Macro)
     }
 
     /// Calculate statistics for the site.
@@ -2298,12 +2636,12 @@ impl From<()> for Entry {
 }
 impl From<String> for Entry {
     fn from(v: String) -> Self {
-        Self::string(v)
+        Entry::parse_string(&v)
     }
 }
 impl From<&str> for Entry {
     fn from(v: &str) -> Self {
-        Self::string(v)
+        Entry::parse_string(v)
     }
 }
 impl From<PathBuf> for Entry {

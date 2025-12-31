@@ -10,7 +10,8 @@
 use crate::db::pattern::{Pattern, PatternRule};
 use crate::db::token::Token;
 use crate::db::web::{Build, Entry};
-use crate::handlers::process::{ProcessStage, Processor};
+use crate::handlers::process::{ProcessorStage, Processor, ProcessorState, ProcessorStats};
+use crate::system::system;
 use crate::handlers::validation::SequenceValidator;
 use std::ops::Range;
 
@@ -61,15 +62,23 @@ pub struct PreprocessorData {
     pub original_line: String,
 }
 
+impl Build for PreprocessorData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("PreprocessorData", &self.directive);
+        entry.set_attr("directive", Entry::string(&self.directive));
+        entry.set_attr("symbol", Entry::string(&self.symbol));
+        entry.set_attr("is_negated", Entry::bool(self.is_negated));
+        entry
+    }
+    fn kind(&self) -> &str { "PreprocessorData" }
+    fn category(&self) -> Option<&str> { Some("preprocessor") }
+}
+
 /// Handler for C preprocessor conditionals
 #[derive(Debug)]
 pub struct PreprocessorHandler {
     name: String,
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: PreprocessorData,
+    state: ProcessorState<PreprocessorData>,
     range: Range<usize>,
     input_tokens: Vec<String>,
 }
@@ -78,11 +87,7 @@ impl PreprocessorHandler {
     pub fn new() -> Self {
         Self {
             name: "preprocessor".to_string(),
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: PreprocessorData::default(),
+            state: ProcessorState::new("PreprocessorHandler"),
             range: 0..0,
             input_tokens: Vec::new(),
         }
@@ -152,6 +157,11 @@ impl Processor for PreprocessorHandler {
 
     fn supported_patterns(&self) -> &[&str] {
         &["ifdef", "ifndef", "endif", "else", "elif", "if_defined"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -271,7 +281,7 @@ impl Processor for PreprocessorHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.is_empty() {
-            self.error = Some("No tokens for preprocessor".to_string());
+            self.state.set_error("No tokens for preprocessor".to_string());
             return false;
         }
 
@@ -289,7 +299,7 @@ impl Processor for PreprocessorHandler {
             );
 
         if !is_preprocessor {
-            self.error = Some("Not a preprocessor directive".to_string());
+            self.state.set_error("Not a preprocessor directive".to_string());
             return false;
         }
 
@@ -298,11 +308,11 @@ impl Processor for PreprocessorHandler {
         let validation_result = validator.validate_preprocessor(tokens);
 
         // Adjust confidence based on validation
-        self.confidence = validation_result.adjust_confidence(0.9);
+        self.state.set_confidence(validation_result.adjust_confidence(0.9));
 
         if !validation_result.is_valid {
             if let Some(reason) = &validation_result.reason {
-                self.error = Some(reason.clone());
+                self.state.set_error(reason.clone());
             }
             // Still return true - we can try to process, just with lower confidence
         }
@@ -312,10 +322,10 @@ impl Processor for PreprocessorHandler {
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        self.data.original_line = token_strs.join(" ");
+        self.state.data.original_line = token_strs.join(" ");
 
         if token_strs.is_empty() {
-            self.error = Some("Empty token list".to_string());
+            self.state.set_error("Empty token list".to_string());
             return false;
         }
 
@@ -331,55 +341,55 @@ impl Processor for PreprocessorHandler {
             (format!("#{}", first), 1)
         };
 
-        self.data.directive = directive.clone();
+        self.state.data.directive = directive.clone();
 
         match directive.as_str() {
             "#ifdef" => {
-                self.data.is_negated = false;
+                self.state.data.is_negated = false;
                 if token_strs.len() > symbol_start_idx {
-                    self.data.symbol = token_strs[symbol_start_idx].clone();
+                    self.state.data.symbol = token_strs[symbol_start_idx].clone();
                 }
             }
             "#ifndef" => {
-                self.data.is_negated = true;
+                self.state.data.is_negated = true;
                 if token_strs.len() > symbol_start_idx {
-                    self.data.symbol = token_strs[symbol_start_idx].clone();
+                    self.state.data.symbol = token_strs[symbol_start_idx].clone();
                 }
             }
             "#if" => {
                 // Parse #if defined(SYMBOL) or #if !defined(SYMBOL)
                 let rest = token_strs[symbol_start_idx..].join(" ");
                 if rest.contains("defined") {
-                    self.data.is_negated = rest.contains('!') || rest.contains("!defined");
+                    self.state.data.is_negated = rest.contains('!') || rest.contains("!defined");
                     // Extract symbol from defined(SYMBOL)
                     if let Some(start) = rest.find('(') {
                         if let Some(end) = rest.find(')') {
-                            self.data.symbol = rest[start + 1..end].trim().to_string();
+                            self.state.data.symbol = rest[start + 1..end].trim().to_string();
                         }
                     }
                 } else {
                     // Generic #if expression - keep as-is
-                    self.data.symbol = rest;
+                    self.state.data.symbol = rest;
                 }
             }
             "#elif" => {
                 let rest = token_strs[symbol_start_idx..].join(" ");
-                self.data.is_negated = rest.contains('!');
+                self.state.data.is_negated = rest.contains('!');
                 if rest.contains("defined") {
                     if let Some(start) = rest.find('(') {
                         if let Some(end) = rest.find(')') {
-                            self.data.symbol = rest[start + 1..end].trim().to_string();
+                            self.state.data.symbol = rest[start + 1..end].trim().to_string();
                         }
                     }
                 } else {
-                    self.data.symbol = rest;
+                    self.state.data.symbol = rest;
                 }
             }
             "#else" | "#endif" => {
                 // No symbol needed
             }
             _ => {
-                self.error = Some(format!("Unknown directive: {}", directive));
+                self.state.set_error(format!("Unknown directive: {}", directive));
                 return false;
             }
         }
@@ -388,14 +398,14 @@ impl Processor for PreprocessorHandler {
     }
 
     fn convert(&mut self) -> Option<String> {
-        let output = match self.data.directive.as_str() {
+        let output = match self.state.data.directive.as_str() {
             "#ifdef" | "#ifndef" => {
-                let feature = Self::symbol_to_feature(&self.data.symbol);
+                let feature = Self::symbol_to_feature(&self.state.data.symbol);
 
                 // Determine the appropriate cfg type
-                let cfg_expr = if Self::is_target_os(&self.data.symbol) {
+                let cfg_expr = if Self::is_target_os(&self.state.data.symbol) {
                     format!("target_os = \"{}\"", feature)
-                } else if Self::is_target_env(&self.data.symbol) {
+                } else if Self::is_target_env(&self.state.data.symbol) {
                     format!("target_env = \"{}\"", feature)
                 } else if feature == "debug_assertions" || feature.starts_with("not(") {
                     feature.clone()
@@ -403,7 +413,7 @@ impl Processor for PreprocessorHandler {
                     format!("feature = \"{}\"", feature)
                 };
 
-                if self.data.is_negated {
+                if self.state.data.is_negated {
                     if cfg_expr.starts_with("not(") {
                         // Already negated (like NDEBUG)
                         format!("#[cfg({})]", cfg_expr)
@@ -415,18 +425,18 @@ impl Processor for PreprocessorHandler {
                 }
             }
             "#if" => {
-                if !self.data.symbol.is_empty() {
-                    let feature = Self::symbol_to_feature(&self.data.symbol);
+                if !self.state.data.symbol.is_empty() {
+                    let feature = Self::symbol_to_feature(&self.state.data.symbol);
 
-                    let cfg_expr = if Self::is_target_os(&self.data.symbol) {
+                    let cfg_expr = if Self::is_target_os(&self.state.data.symbol) {
                         format!("target_os = \"{}\"", feature)
-                    } else if Self::is_target_env(&self.data.symbol) {
+                    } else if Self::is_target_env(&self.state.data.symbol) {
                         format!("target_env = \"{}\"", feature)
                     } else {
                         format!("feature = \"{}\"", feature)
                     };
 
-                    if self.data.is_negated {
+                    if self.state.data.is_negated {
                         format!("#[cfg(not({}))]", cfg_expr)
                     } else {
                         format!("#[cfg({})]", cfg_expr)
@@ -434,20 +444,20 @@ impl Processor for PreprocessorHandler {
                 } else {
                     format!(
                         "// TODO: Convert #if expression: {}",
-                        self.data.original_line
+                        self.state.data.original_line
                     )
                 }
             }
             "#elif" => {
                 // For #elif, we need context from the previous #if
                 // For now, generate a cfg with a comment
-                if !self.data.symbol.is_empty() {
-                    let feature = Self::symbol_to_feature(&self.data.symbol);
+                if !self.state.data.symbol.is_empty() {
+                    let feature = Self::symbol_to_feature(&self.state.data.symbol);
                     format!("// #elif converted:\n#[cfg(feature = \"{}\")]", feature)
                 } else {
                     format!(
                         "// TODO: Convert #elif expression: {}",
-                        self.data.original_line
+                        self.state.data.original_line
                     )
                 }
             }
@@ -461,63 +471,40 @@ impl Processor for PreprocessorHandler {
                 "// #endif".to_string()
             }
             _ => {
-                format!("// Unknown preprocessor: {}", self.data.original_line)
+                format!("// Unknown preprocessor: {}", self.state.data.original_line)
             }
         };
 
-        self.output = Some(output.clone());
+        self.state.set_output(output.clone());
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
-    }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
-    }
-    fn output(&self) -> Option<String> {
-        self.output.clone()
-    }
-    fn set_output(&mut self, output: String) {
-        self.output = Some(output);
-    }
-    fn error(&self) -> Option<String> {
-        self.error.clone()
-    }
-    fn set_error(&mut self, error: String) {
-        self.error = Some(error);
-    }
-    fn confidence(&self) -> f64 {
-        self.confidence
-    }
-    fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
-    }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for PreprocessorHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "PreprocessorHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("directive", Entry::string(&self.data.directive));
-        entry.set_attr("symbol", Entry::string(&self.data.symbol));
-        entry.set_attr("is_negated", Entry::bool(self.data.is_negated));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("directive", Entry::string(&self.state.data.directive));
+        entry.set_attr("symbol", Entry::string(&self.state.data.symbol));
+        entry.set_attr("is_negated", Entry::bool(self.state.data.is_negated));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry
     }
-
-    fn kind(&self) -> &str {
-        "Handler"
-    }
-    fn name(&self) -> Option<&str> {
-        Some("PreprocessorHandler")
-    }
-    fn category(&self) -> Option<&str> {
-        Some("preprocessor")
-    }
+    fn kind(&self) -> &str { "Handler" }
+    fn name(&self) -> Option<&str> { Some("PreprocessorHandler") }
+    fn category(&self) -> Option<&str> { Some("preprocessor") }
 }
 
 // ============================================================================
@@ -539,15 +526,22 @@ pub struct DefineData {
     pub original_line: String,
 }
 
+impl Build for DefineData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("DefineData", &self.name);
+        entry.set_attr("name", Entry::string(&self.name));
+        entry.set_attr("is_function_like", Entry::bool(self.is_function_like));
+        entry
+    }
+    fn kind(&self) -> &str { "DefineData" }
+    fn category(&self) -> Option<&str> { Some("macro") }
+}
+
 /// Handler for #define directives
 #[derive(Debug)]
 pub struct DefineHandler {
     name: String,
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: DefineData,
+    state: ProcessorState<DefineData>,
     range: Range<usize>,
     input_tokens: Vec<String>,
 }
@@ -556,11 +550,7 @@ impl DefineHandler {
     pub fn new() -> Self {
         Self {
             name: "define".to_string(),
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: DefineData::default(),
+            state: ProcessorState::new("DefineHandler"),
             range: 0..0,
             input_tokens: Vec::new(),
         }
@@ -568,10 +558,11 @@ impl DefineHandler {
 
     /// Convert a function-like C macro to Rust macro_rules!
     fn convert_function_like_macro(&self) -> String {
-        let macro_name = self.data.name.to_lowercase();
+        let macro_name = self.state.data.name.to_lowercase();
 
         // Build parameter pattern: $a:expr, $b:expr, etc.
         let param_pattern: String = self
+            .state
             .data
             .params
             .iter()
@@ -580,8 +571,8 @@ impl DefineHandler {
             .join(", ");
 
         // Convert body - replace parameter references with $param
-        let mut body = self.data.value.clone();
-        for param in &self.data.params {
+        let mut body = self.state.data.value.clone();
+        for param in &self.state.data.params {
             // Replace bare parameter names with $param
             // Handle cases like: (a) > (b) ? (a) : (b)
             body = self.replace_param_in_body(&body, param);
@@ -689,7 +680,7 @@ impl DefineHandler {
 
     /// Convert a type-defining macro (struct/enum/union) to macro_rules!
     fn convert_type_macro(&self, body: &str) -> String {
-        let macro_name = self.data.name.to_lowercase();
+        let macro_name = self.state.data.name.to_lowercase();
         let rust_body = self.convert_c_to_rust(body);
         
         format!(
@@ -737,7 +728,7 @@ impl DefineHandler {
             ("/* TODO: determine type */", value.to_string())
         };
 
-        format!("pub const {}: {} = {};", self.data.name, rust_type, rust_value)
+        format!("pub const {}: {} = {};", self.state.data.name, rust_type, rust_value)
     }
 }
 
@@ -751,6 +742,11 @@ impl Processor for DefineHandler {
 
     fn supported_patterns(&self) -> &[&str] {
         &["validate_define_constant", "extract_define_constant"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -813,7 +809,7 @@ impl Processor for DefineHandler {
             .collect();
         
         if filtered_tokens.len() < 3 {
-            self.error = Some("Too few tokens for #define".to_string());
+            self.state.set_error("Too few tokens for #define".to_string());
             return false;
         }
 
@@ -827,11 +823,11 @@ impl Processor for DefineHandler {
             || self.input_tokens[0] == "#define";
 
         if !has_define {
-            self.error = Some("Not a #define directive".to_string());
+            self.state.set_error("Not a #define directive".to_string());
             return false;
         }
 
-        self.confidence = 0.9;
+        self.state.set_confidence(0.9);
         true
     }
 
@@ -842,13 +838,13 @@ impl Processor for DefineHandler {
             .map(|t| t.to_string())
             .filter(|s| s != "\\")
             .collect();
-        self.data.original_line = token_strs.join(" ");
+        self.state.data.original_line = token_strs.join(" ");
 
         // Find where macro name starts
         let name_idx = if token_strs[0] == "#" { 2 } else { 1 };
 
         if token_strs.len() <= name_idx {
-            self.error = Some("No macro name found".to_string());
+            self.state.set_error("No macro name found".to_string());
             return false;
         }
 
@@ -857,21 +853,21 @@ impl Processor for DefineHandler {
         // Check for function-like macro: NAME(params) or NAME ( params )
         if let Some(paren_pos) = name_token.find('(') {
             // Params are in the same token as name: MAX(a,b)
-            self.data.name = name_token[..paren_pos].to_string();
-            self.data.is_function_like = true;
+            self.state.data.name = name_token[..paren_pos].to_string();
+            self.state.data.is_function_like = true;
 
             // Extract parameters - they might be split across tokens
             if let Some(close_paren) = name_token.find(')') {
                 // All params in one token: MAX(a,b)
                 let params_str = &name_token[paren_pos + 1..close_paren];
-                self.data.params = params_str
+                self.state.data.params = params_str
                     .split(',')
                     .map(|s| s.trim().to_string())
                     .filter(|s| !s.is_empty())
                     .collect();
                 // Value is everything after this token
                 if token_strs.len() > name_idx + 1 {
-                    self.data.value = token_strs[name_idx + 1..].join(" ");
+                    self.state.data.value = token_strs[name_idx + 1..].join(" ");
                 }
             } else {
                 // Params continue in following tokens: MAX(a, b)
@@ -902,17 +898,17 @@ impl Processor for DefineHandler {
                         params.push(t.clone());
                     }
                 }
-                self.data.params = params;
+                self.state.data.params = params;
                 if value_start < token_strs.len() {
-                    self.data.value = token_strs[value_start..].join(" ");
+                    self.state.data.value = token_strs[value_start..].join(" ");
                 }
             }
         } else {
-            self.data.name = name_token.clone();
+            self.state.data.name = name_token.clone();
 
             // Check if next token is (
             if token_strs.len() > name_idx + 1 && token_strs[name_idx + 1] == "(" {
-                self.data.is_function_like = true;
+                self.state.data.is_function_like = true;
                 // Find matching )
                 let mut depth = 0;
                 let param_start = name_idx + 2;
@@ -928,10 +924,10 @@ impl Processor for DefineHandler {
                                 .filter(|s| *s != ",")
                                 .cloned()
                                 .collect();
-                            self.data.params = params;
+                            self.state.data.params = params;
                             // Value starts after )
                             if i + 1 < token_strs.len() {
-                                self.data.value = token_strs[i + 1..].join(" ");
+                                self.state.data.value = token_strs[i + 1..].join(" ");
                             }
                             break;
                         }
@@ -940,7 +936,7 @@ impl Processor for DefineHandler {
             } else {
                 // Simple constant: value is everything after name
                 if token_strs.len() > name_idx + 1 {
-                    self.data.value = token_strs[name_idx + 1..].join(" ");
+                    self.state.data.value = token_strs[name_idx + 1..].join(" ");
                 }
             }
         }
@@ -949,11 +945,11 @@ impl Processor for DefineHandler {
     }
 
     fn convert(&mut self) -> Option<String> {
-        let output = if self.data.is_function_like {
+        let output = if self.state.data.is_function_like {
             // Convert to Rust macro_rules!
             self.convert_function_like_macro()
-        } else if !self.data.value.is_empty() {
-            let value = self.data.value.trim();
+        } else if !self.state.data.value.is_empty() {
+            let value = self.state.data.value.trim();
             
             // Check if this is a complex/multi-line define (has braces or type keywords)
             let is_complex = value.contains('{') || value.contains('}') ||
@@ -970,63 +966,40 @@ impl Processor for DefineHandler {
             // Empty define - use as feature flag
             format!(
                 "// Feature flag: {}\n#[cfg(feature = \"{}\")]",
-                self.data.name,
-                self.data.name.to_lowercase()
+                self.state.data.name,
+                self.state.data.name.to_lowercase()
             )
         };
 
-        self.output = Some(output.clone());
+        self.state.set_output(output.clone());
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
-    }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
-    }
-    fn output(&self) -> Option<String> {
-        self.output.clone()
-    }
-    fn set_output(&mut self, output: String) {
-        self.output = Some(output);
-    }
-    fn error(&self) -> Option<String> {
-        self.error.clone()
-    }
-    fn set_error(&mut self, error: String) {
-        self.error = Some(error);
-    }
-    fn confidence(&self) -> f64 {
-        self.confidence
-    }
-    fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
-    }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for DefineHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "DefineHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("macro_name", Entry::string(&self.data.name));
-        entry.set_attr("is_function_like", Entry::bool(self.data.is_function_like));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("macro_name", Entry::string(&self.state.data.name));
+        entry.set_attr("is_function_like", Entry::bool(self.state.data.is_function_like));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry
     }
-
-    fn kind(&self) -> &str {
-        "Handler"
-    }
-    fn name(&self) -> Option<&str> {
-        Some("DefineHandler")
-    }
-    fn category(&self) -> Option<&str> {
-        Some("macro")
-    }
+    fn kind(&self) -> &str { "Handler" }
+    fn name(&self) -> Option<&str> { Some("DefineHandler") }
+    fn category(&self) -> Option<&str> { Some("macro") }
 }
 
 // ============================================================================
@@ -1044,15 +1017,22 @@ pub struct IncludeData {
     pub original_line: String,
 }
 
+impl Build for IncludeData {
+    fn to_entry(&self) -> Entry {
+        let mut entry = Entry::node("IncludeData", &self.path);
+        entry.set_attr("path", Entry::string(&self.path));
+        entry.set_attr("is_system", Entry::bool(self.is_system));
+        entry
+    }
+    fn kind(&self) -> &str { "IncludeData" }
+    fn category(&self) -> Option<&str> { Some("macro") }
+}
+
 /// Handler for #include directives
 #[derive(Debug)]
 pub struct IncludeHandler {
     name: String,
-    stage: ProcessStage,
-    confidence: f64,
-    error: Option<String>,
-    output: Option<String>,
-    data: IncludeData,
+    state: ProcessorState<IncludeData>,
     range: Range<usize>,
     input_tokens: Vec<String>,
 }
@@ -1061,11 +1041,7 @@ impl IncludeHandler {
     pub fn new() -> Self {
         Self {
             name: "include".to_string(),
-            stage: ProcessStage::Pending,
-            confidence: 0.0,
-            error: None,
-            output: None,
-            data: IncludeData::default(),
+            state: ProcessorState::new("IncludeHandler"),
             range: 0..0,
             input_tokens: Vec::new(),
         }
@@ -1116,7 +1092,12 @@ impl Default for IncludeHandler {
 impl Processor for IncludeHandler {
 
     fn supported_patterns(&self) -> &[&str] {
-        &["include", "include_system", "include_local"]
+        &["validate_include", "extract_include"]
+    }
+
+    fn stats(&self) -> &ProcessorStats {
+        system().process_stats(&self.state.stats);
+        &self.state.stats
     }
 
     fn patterns(&self) -> Vec<(Pattern, Pattern)> {
@@ -1161,7 +1142,7 @@ impl Processor for IncludeHandler {
 
     fn validate(&mut self, tokens: &[Token]) -> bool {
         if tokens.is_empty() {
-            self.error = Some("No tokens for #include".to_string());
+            self.state.set_error("No tokens for #include".to_string());
             return false;
         }
 
@@ -1177,17 +1158,17 @@ impl Processor for IncludeHandler {
                 && self.input_tokens[1] == "include");
 
         if !has_include {
-            self.error = Some("Not an #include directive".to_string());
+            self.state.set_error("Not an #include directive".to_string());
             return false;
         }
 
-        self.confidence = 0.9;
+        self.state.set_confidence(0.9);
         true
     }
 
     fn extract(&mut self, tokens: &[Token]) -> bool {
         let token_strs: Vec<String> = tokens.iter().map(|t| t.to_string()).collect();
-        self.data.original_line = token_strs.join(" ");
+        self.state.data.original_line = token_strs.join(" ");
 
         let first = &token_strs[0];
         
@@ -1195,12 +1176,12 @@ impl Processor for IncludeHandler {
         if first.starts_with("#include ") {
             let path_part = first.trim_start_matches("#include ").trim();
             if path_part.starts_with('<') && path_part.ends_with('>') {
-                self.data.is_system = true;
-                self.data.path = path_part[1..path_part.len()-1].to_string();
+                self.state.data.is_system = true;
+                self.state.data.path = path_part[1..path_part.len()-1].to_string();
                 return true;
             } else if path_part.starts_with('"') && path_part.ends_with('"') {
-                self.data.is_system = false;
-                self.data.path = path_part[1..path_part.len()-1].to_string();
+                self.state.data.is_system = false;
+                self.state.data.path = path_part[1..path_part.len()-1].to_string();
                 return true;
             }
         }
@@ -1209,7 +1190,7 @@ impl Processor for IncludeHandler {
         let path_idx = if token_strs[0] == "#" { 2 } else { 1 };
 
         if token_strs.len() <= path_idx {
-            self.error = Some("No include path found".to_string());
+            self.state.set_error("No include path found".to_string());
             return false;
         }
 
@@ -1217,7 +1198,7 @@ impl Processor for IncludeHandler {
 
         // Handle angle bracket includes: < header . h >
         if path_token == "<" {
-            self.data.is_system = true;
+            self.state.data.is_system = true;
             // Collect tokens until we find >
             let mut path_parts: Vec<String> = Vec::new();
             for t in &token_strs[path_idx + 1..] {
@@ -1233,58 +1214,59 @@ impl Processor for IncludeHandler {
                 }
             }
             // Join without spaces - tokens like "unistd", ".", "h" become "unistd.h"
-            self.data.path = path_parts.join("");
+            self.state.data.path = path_parts.join("");
         } else if path_token.starts_with('<') && path_token.ends_with('>') {
             // Already combined: <header.h>
-            self.data.is_system = true;
-            self.data.path = path_token[1..path_token.len() - 1].to_string();
+            self.state.data.is_system = true;
+            self.state.data.path = path_token[1..path_token.len() - 1].to_string();
         } else if path_token.starts_with('<') {
-            self.data.is_system = true;
+            self.state.data.is_system = true;
             // Partial: <header - collect rest
             let full_path = token_strs[path_idx..].join("");
             if let (Some(start), Some(end)) = (full_path.find('<'), full_path.find('>')) {
-                self.data.path = full_path[start + 1..end].to_string();
+                self.state.data.path = full_path[start + 1..end].to_string();
             } else {
-                self.data.path = path_token.trim_start_matches('<').to_string();
+                self.state.data.path = path_token.trim_start_matches('<').to_string();
             }
         } else if path_token.starts_with('"') {
-            self.data.is_system = false;
+            self.state.data.is_system = false;
             // Handle quoted includes
             if path_token.ends_with('"') && path_token.len() > 2 {
-                self.data.path = path_token[1..path_token.len() - 1].to_string();
+                self.state.data.path = path_token[1..path_token.len() - 1].to_string();
             } else {
                 // Collect tokens until closing quote
                 let full_path = token_strs[path_idx..].join("");
                 if let (Some(start), Some(end)) = (full_path.find('"'), full_path.rfind('"')) {
                     if start != end {
-                        self.data.path = full_path[start + 1..end].to_string();
+                        self.state.data.path = full_path[start + 1..end].to_string();
                     }
                 }
             }
         } else {
             // Unknown format - use as-is
-            self.data.path = path_token.clone();
+            self.state.data.path = path_token.clone();
         }
 
         true
     }
 
     fn convert(&mut self) -> Option<String> {
-        let output = if self.data.is_system {
+        let output = if self.state.data.is_system {
             // System include - map to Rust pub use
-            let module_name = self.data.path
+            let module_name = self.state.data.path
                 .trim_end_matches(".h")
                 .replace('.', "_");
             
-            if let Some(rust_equiv) = Self::map_header_to_rust(&self.data.path) {
+            if let Some(rust_equiv) = Self::map_header_to_rust(&self.state.data.path) {
                 rust_equiv
             } else {
                 // Output as pub use with a comment about the original
-                format!("pub use {}; // from <{}>", module_name, self.data.path)
+                format!("pub use {}; // from <{}>", module_name, self.state.data.path)
             }
         } else {
             // Local include - convert to pub use mod
             let module_name = self
+                .state
                 .data
                 .path
                 .trim_end_matches(".h")
@@ -1295,56 +1277,33 @@ impl Processor for IncludeHandler {
             format!("pub use {};", module_name)
         };
 
-        self.output = Some(output.clone());
+        self.state.set_output(output.clone());
         Some(output)
     }
 
-    fn current_stage(&self) -> ProcessStage {
-        self.stage
-    }
-    fn set_stage(&mut self, stage: ProcessStage) {
-        self.stage = stage;
-    }
-    fn output(&self) -> Option<String> {
-        self.output.clone()
-    }
-    fn set_output(&mut self, output: String) {
-        self.output = Some(output);
-    }
-    fn error(&self) -> Option<String> {
-        self.error.clone()
-    }
-    fn set_error(&mut self, error: String) {
-        self.error = Some(error);
-    }
-    fn confidence(&self) -> f64 {
-        self.confidence
-    }
-    fn set_confidence(&mut self, confidence: f64) {
-        self.confidence = confidence;
-    }
+    fn current_stage(&self) -> ProcessorStage { self.state.stage() }
+    fn set_stage(&mut self, stage: ProcessorStage) { self.state.set_stage(stage); }
+    fn output(&self) -> Option<String> { self.state.output.clone() }
+    fn set_output(&mut self, output: String) { self.state.set_output(output); }
+    fn error(&self) -> Option<String> { self.state.error.clone() }
+    fn set_error(&mut self, error: String) { self.state.set_error(error); }
+    fn confidence(&self) -> f64 { self.state.confidence }
+    fn set_confidence(&mut self, confidence: f64) { self.state.set_confidence(confidence); }
 }
 
 impl Build for IncludeHandler {
     fn to_entry(&self) -> Entry {
         let mut entry = Entry::node("Handler", "IncludeHandler");
-        entry.set_attr("stage", Entry::string(self.stage.as_str()));
-        entry.set_attr("confidence", Entry::f64(self.confidence));
-        entry.set_attr("path", Entry::string(&self.data.path));
-        entry.set_attr("is_system", Entry::bool(self.data.is_system));
-        if let Some(ref output) = self.output {
+        entry.set_attr("stage", self.state.stage().to_entry());
+        entry.set_attr("confidence", Entry::f64(self.state.confidence));
+        entry.set_attr("path", Entry::string(&self.state.data.path));
+        entry.set_attr("is_system", Entry::bool(self.state.data.is_system));
+        if let Some(ref output) = self.state.output {
             entry.set_attr("output", Entry::string(output));
         }
         entry
     }
-
-    fn kind(&self) -> &str {
-        "Handler"
-    }
-    fn name(&self) -> Option<&str> {
-        Some("IncludeHandler")
-    }
-    fn category(&self) -> Option<&str> {
-        Some("macro")
-    }
+    fn kind(&self) -> &str { "Handler" }
+    fn name(&self) -> Option<&str> { Some("IncludeHandler") }
+    fn category(&self) -> Option<&str> { Some("macro") }
 }
